@@ -2570,7 +2570,7 @@ main { position: relative; }
 /* ===== Context strip ===== */
 .ctx-strip {
   flex-shrink: 0;
-  padding: 4px 24px 8px;
+  padding: 2px 24px 6px;
   display: flex;
   justify-content: center;
 }
