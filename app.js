@@ -1765,6 +1765,158 @@ function renderShortcutsPanel() {
     </div>
   `;
 }
+// ---------- Aperçu (Preview) panel ----------
+function renderApercuPanel() {
+  const mockUrl = 'localhost:5182';
+  return `
+    <div class="preview-panel">
+      <!-- Browser-style toolbar -->
+      <div class="preview-toolbar">
+        <div class="preview-toolbar__nav">
+          <button class="icon-btn icon-btn--sm" title="Back" disabled style="opacity:.3"><i data-phosphor="arrow-left"></i></button>
+          <button class="icon-btn icon-btn--sm" title="Forward" disabled style="opacity:.3"><i data-phosphor="arrow-right"></i></button>
+          <button class="icon-btn icon-btn--sm" title="Reload"><i data-phosphor="arrow-clockwise"></i></button>
+        </div>
+        <div class="preview-addressbar">
+          <i data-phosphor="lock-simple" class="preview-addressbar__lock"></i>
+          <span class="preview-addressbar__url">${mockUrl}</span>
+        </div>
+        <div class="preview-toolbar__actions">
+          <button class="icon-btn icon-btn--sm" title="Desktop view" class="is-active"><i data-phosphor="monitor"></i></button>
+          <button class="icon-btn icon-btn--sm" title="Mobile view"><i data-phosphor="device-mobile"></i></button>
+          <button class="icon-btn icon-btn--sm" title="Open in browser"><i data-phosphor="arrow-square-out"></i></button>
+        </div>
+      </div>
+      <!-- Preview viewport -->
+      <div class="preview-viewport">
+        <div class="preview-frame">
+          <!-- Mock rendered app content -->
+          <div class="preview-mock">
+            <div class="preview-mock__nav">
+              <span class="preview-mock__logo">◆ MyApp</span>
+              <span class="preview-mock__nav-links">
+                <span>Dashboard</span><span>Reports</span><span>Settings</span>
+              </span>
+            </div>
+            <div class="preview-mock__body">
+              <div class="preview-mock__sidebar">
+                <div class="preview-mock__menu-item is-active">Overview</div>
+                <div class="preview-mock__menu-item">Analytics</div>
+                <div class="preview-mock__menu-item">Users</div>
+                <div class="preview-mock__menu-item">Exports</div>
+              </div>
+              <div class="preview-mock__main">
+                <div class="preview-mock__card preview-mock__card--wide">
+                  <div class="preview-mock__card-label">Total sessions</div>
+                  <div class="preview-mock__card-val">1,284</div>
+                  <div class="preview-mock__sparkline">
+                    <svg viewBox="0 0 80 24" preserveAspectRatio="none" width="80" height="24">
+                      <polyline points="0,20 12,16 24,18 36,10 48,13 60,6 72,4 80,2" fill="none" stroke="#7ab389" stroke-width="1.5"/>
+                    </svg>
+                  </div>
+                </div>
+                <div class="preview-mock__card">
+                  <div class="preview-mock__card-label">Active users</div>
+                  <div class="preview-mock__card-val">342</div>
+                </div>
+                <div class="preview-mock__card">
+                  <div class="preview-mock__card-label">Errors</div>
+                  <div class="preview-mock__card-val preview-mock__card-val--warn">7</div>
+                </div>
+                <div class="preview-mock__table-wrap">
+                  <div class="preview-mock__table-head">Recent Activity</div>
+                  ${[
+                    ['index.html',   'Modified', '#7ab389'],
+                    ['app.js',       'Modified', '#7ab389'],
+                    ['style.css',    'Modified', '#7ab389'],
+                    ['icons.js',     'Unchanged','#5a5a63'],
+                  ].map(([f,s,c]) => `
+                    <div class="preview-mock__table-row">
+                      <span class="preview-mock__table-file">${f}</span>
+                      <span class="preview-mock__table-status" style="color:${c}">${s}</span>
+                    </div>`).join('')}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="preview-viewport__footer">
+          <span class="preview-viewport__info"><i data-phosphor="circle-wavy-check" style="color:#7ab389"></i> Live · auto-refresh on save</span>
+          <span class="preview-viewport__size">1280 × 720</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ---------- Tâches (Tasks) panel — Kanban board ----------
+function renderTachesPanel() {
+  const cols = [
+    {
+      id: 'backlog', label: 'Backlog', color: '#5a5a63',
+      tasks: [
+        { id: 'T-08', title: 'Add keyboard navigation to sidebar', tags: ['a11y'], pri: 'low' },
+        { id: 'T-09', title: 'Dark/light theme auto-detection from OS', tags: ['ui'], pri: 'low' },
+        { id: 'T-10', title: 'Persist open panels across sessions', tags: ['ux'], pri: 'med' },
+        { id: 'T-11', title: 'Export conversation as Markdown', tags: ['export'], pri: 'low' },
+      ],
+    },
+    {
+      id: 'inprogress', label: 'In Progress', color: '#c9a96e',
+      tasks: [
+        { id: 'T-04', title: 'Split panel — vertical resize handle', tags: ['ui'], pri: 'high', who: 'Claude' },
+        { id: 'T-05', title: 'Terminal panel edge-to-edge layout', tags: ['terminal'], pri: 'high', who: 'Claude' },
+        { id: 'T-06', title: 'Context strip chip active-state sync', tags: ['ui'], pri: 'med', who: 'Claude' },
+        { id: 'T-07', title: 'Electron desktop packaging', tags: ['build'], pri: 'high', who: 'Claude' },
+      ],
+    },
+    {
+      id: 'done', label: 'Done', color: '#7ab389',
+      tasks: [
+        { id: 'T-01', title: 'Sub-task tree with CSS grid expand', tags: ['ui'], pri: 'med' },
+        { id: 'T-02', title: 'Streaming state shimmer animations (9 variants)', tags: ['anim'], pri: 'med' },
+        { id: 'T-03', title: 'Context strip chips — MCP, Git, Context, Plan', tags: ['ui'], pri: 'high' },
+      ],
+    },
+  ];
+
+  const priBadge = p => {
+    const map = { high: ['#c96442','H'], med: ['#c9a96e','M'], low: ['#5a5a63','L'] };
+    const [col, lbl] = map[p] || map.low;
+    return `<span class="task-card__pri" style="background:${col}22;color:${col}">${lbl}</span>`;
+  };
+  const tagBadge = t => `<span class="task-card__tag">${escapeHTML(t)}</span>`;
+
+  return `
+    <div class="kanban">
+      <div class="kanban__header">
+        <span class="kanban__title">Session tasks</span>
+        <span class="kanban__meta">${cols.reduce((s,c) => s+c.tasks.length, 0)} total · ${cols.find(c=>c.id==='done').tasks.length} done</span>
+      </div>
+      <div class="kanban__board">
+        ${cols.map(col => `
+          <div class="kanban__col">
+            <div class="kanban__col-head">
+              <span class="kanban__col-dot" style="background:${col.color}"></span>
+              <span class="kanban__col-label">${escapeHTML(col.label)}</span>
+              <span class="kanban__col-count">${col.tasks.length}</span>
+            </div>
+            <div class="kanban__cards">
+              ${col.tasks.map(t => `
+                <div class="task-card${col.id === 'done' ? ' task-card--done' : ''}">
+                  <div class="task-card__top">
+                    <span class="task-card__id">${escapeHTML(t.id)}</span>
+                    ${priBadge(t.pri)}
+                    ${t.who ? `<span class="task-card__who">${escapeHTML(t.who)}</span>` : ''}
+                  </div>
+                  <div class="task-card__title">${escapeHTML(t.title)}</div>
+                  <div class="task-card__tags">${t.tags.map(tagBadge).join('')}</div>
+                </div>`).join('')}
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
 // ---------- Diff panel ----------
 function renderDiffPanel() {
   const file = (name, add, del, lines) => `
@@ -2197,9 +2349,11 @@ let _splitTopPx    = null;   // persisted height of top pane (px)
 
 // Tabs available in the split mini-selectors
 const SPLIT_TABS = [
+  { id: 'apercu',   icon: 'eye',             label: 'Preview'  },
   { id: 'terminal', icon: 'terminal-window', label: 'Terminal' },
   { id: 'diff',     icon: 'git-diff',        label: 'Diff'     },
   { id: 'plan',     icon: 'list-checks',     label: 'Plan'     },
+  { id: 'taches',   icon: 'kanban',          label: 'Tasks'    },
   { id: 'git',      icon: 'git-branch',      label: 'Git'      },
   { id: 'mcp',      icon: 'plug',            label: 'MCP'      },
   { id: 'context',  icon: 'chart-bar',       label: 'Context'  },
@@ -2211,6 +2365,8 @@ function renderPanelContent(id) {
   const label = t(tab.labelKey);
   let body;
   if      (id === 'shortcuts') body = renderShortcutsPanel();
+  else if (id === 'apercu')    body = renderApercuPanel();
+  else if (id === 'taches')    body = renderTachesPanel();
   else if (id === 'diff')      body = renderDiffPanel();
   else if (id === 'fichiers')  body = renderFilesPanel();
   else if (id === 'terminal')  body = renderTerminalPanel();
@@ -2395,8 +2551,9 @@ function setRightPanelTab(id) {
     wirePlanTabEvents(_splitBottomTab, document.getElementById('split-content-bottom'));
   } else {
     bodyEl.classList.remove('is-split');
-    // Toggle terminal edge-to-edge mode
+    // Edge-to-edge modes
     bodyEl.classList.toggle('rp-body--terminal', id === 'terminal');
+    bodyEl.classList.toggle('rp-body--apercu',   id === 'apercu');
     bodyEl.innerHTML = renderPanelContent(id);
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(id, bodyEl);
