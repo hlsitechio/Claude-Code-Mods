@@ -2570,8 +2570,7 @@ main { position: relative; }
 /* ===== Context strip ===== */
 .ctx-strip {
   flex-shrink: 0;
-  padding: 5px 24px 7px;
-  border-top: 1px solid rgba(255,255,255,0.045);
+  padding: 4px 24px 8px;
   display: flex;
   justify-content: center;
 }

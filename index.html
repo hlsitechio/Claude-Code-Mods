@@ -307,78 +307,6 @@
         </div>
       </div>
 
-      <!-- ══════════ Context strip ══════════ -->
-      <div class="ctx-strip" id="ctx-strip">
-        <div class="ctx-strip__inner">
-
-          <!-- MCP chip -->
-          <button class="ctx-chip" id="ctx-chip-mcp" data-ctx-tab="mcp">
-            <span class="ctx-chip__ico">
-              <!-- Real MCP logo — hub node with 4 spokes -->
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
-                <circle cx="12"  cy="3.5" r="1.5" fill="currentColor"/>
-                <circle cx="20.5" cy="12" r="1.5" fill="currentColor"/>
-                <circle cx="12"  cy="20.5" r="1.5" fill="currentColor"/>
-                <circle cx="3.5" cy="12" r="1.5" fill="currentColor"/>
-                <path d="M12 9.5V5M15 12H20M12 14.5V19M9 12H4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name">MCP</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-mcp-val">4 tools</span>
-            <span class="ctx-chip__pulse"></span>
-          </button>
-
-          <!-- Git chip -->
-          <button class="ctx-chip" id="ctx-chip-git" data-ctx-tab="git">
-            <span class="ctx-chip__ico">
-              <!-- Official Git logo -->
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#F05133" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <path d="M23.546 10.93 13.067.452c-.604-.603-1.582-.603-2.188 0L8.708 2.627l2.76 2.76c.645-.215 1.379-.07 1.889.441.516.515.658 1.258.438 1.9l2.658 2.66c.645-.223 1.387-.078 1.9.435.721.72.721 1.884 0 2.604-.719.719-1.881.719-2.6 0-.539-.541-.674-1.337-.404-1.996L12.86 8.955v6.525c.176.086.342.203.488.348.713.721.713 1.883 0 2.6-.719.721-1.889.721-2.609 0-.719-.719-.719-1.879 0-2.598.182-.18.387-.316.605-.406V8.835c-.217-.091-.424-.222-.6-.401-.545-.545-.676-1.342-.396-2.009L7.636 3.7.45 10.881c-.6.605-.6 1.584 0 2.189l10.48 10.477c.604.604 1.582.604 2.186 0l10.43-10.43c.605-.603.605-1.582 0-2.187"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name" id="ctx-git-branch">main</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-git-val">2 changes</span>
-          </button>
-
-          <!-- Context chip -->
-          <button class="ctx-chip ctx-chip--ctx" id="ctx-chip-context" data-ctx-tab="context">
-            <span class="ctx-chip__ico">
-              <!-- Gauge icon -->
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <path d="M5.636 18.364A9 9 0 1 1 18.364 5.636" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                <path d="M12 12 8.8 8.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name">Context</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-ctx-val">12k / 200k</span>
-            <span class="ctx-chip__bar"><span class="ctx-chip__bar-fill" style="width:6%"></span></span>
-          </button>
-
-          <!-- Plan chip -->
-          <button class="ctx-chip" id="ctx-chip-plan" data-ctx-tab="plan">
-            <span class="ctx-chip__ico">
-              <!-- Tasks list icon -->
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <rect x="3" y="5"  width="18" height="2" rx="1" fill="currentColor" opacity="0.35"/>
-                <rect x="3" y="11" width="14" height="2" rx="1" fill="currentColor" opacity="0.65"/>
-                <rect x="3" y="17" width="10" height="2" rx="1" fill="currentColor"/>
-                <circle cx="19.5" cy="18" r="3.5" fill="#7ab389"/>
-                <path d="M18 18l1 1.2 2-2.2" stroke="white" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name">Plan</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-plan-val">2 / 6</span>
-          </button>
-
-        </div>
-      </div>
-
       <!-- Composer -->
       <div class="px-6 pb-4">
         <div class="mx-auto max-w-[780px]">
@@ -416,6 +344,74 @@
             <!-- Hidden context anchor — legacy handler still references it -->
             <button hidden id="context-btn"></button>
           </div>
+        </div>
+      </div>
+
+      <!-- ══════════ Context strip ══════════ -->
+      <div class="ctx-strip" id="ctx-strip">
+        <div class="ctx-strip__inner">
+
+          <!-- MCP chip -->
+          <button class="ctx-chip" id="ctx-chip-mcp" data-ctx-tab="mcp">
+            <span class="ctx-chip__ico">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
+                <circle cx="12"  cy="3.5" r="1.5" fill="currentColor"/>
+                <circle cx="20.5" cy="12" r="1.5" fill="currentColor"/>
+                <circle cx="12"  cy="20.5" r="1.5" fill="currentColor"/>
+                <circle cx="3.5" cy="12" r="1.5" fill="currentColor"/>
+                <path d="M12 9.5V5M15 12H20M12 14.5V19M9 12H4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <span class="ctx-chip__name">MCP</span>
+            <span class="ctx-chip__sep">·</span>
+            <span class="ctx-chip__val" id="ctx-mcp-val">4 tools</span>
+            <span class="ctx-chip__pulse"></span>
+          </button>
+
+          <!-- Git chip -->
+          <button class="ctx-chip" id="ctx-chip-git" data-ctx-tab="git">
+            <span class="ctx-chip__ico">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="#F05133" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M23.546 10.93 13.067.452c-.604-.603-1.582-.603-2.188 0L8.708 2.627l2.76 2.76c.645-.215 1.379-.07 1.889.441.516.515.658 1.258.438 1.9l2.658 2.66c.645-.223 1.387-.078 1.9.435.721.72.721 1.884 0 2.604-.719.719-1.881.719-2.6 0-.539-.541-.674-1.337-.404-1.996L12.86 8.955v6.525c.176.086.342.203.488.348.713.721.713 1.883 0 2.6-.719.721-1.889.721-2.609 0-.719-.719-.719-1.879 0-2.598.182-.18.387-.316.605-.406V8.835c-.217-.091-.424-.222-.6-.401-.545-.545-.676-1.342-.396-2.009L7.636 3.7.45 10.881c-.6.605-.6 1.584 0 2.189l10.48 10.477c.604.604 1.582.604 2.186 0l10.43-10.43c.605-.603.605-1.582 0-2.187"/>
+              </svg>
+            </span>
+            <span class="ctx-chip__name" id="ctx-git-branch">main</span>
+            <span class="ctx-chip__sep">·</span>
+            <span class="ctx-chip__val" id="ctx-git-val">2 changes</span>
+          </button>
+
+          <!-- Context chip -->
+          <button class="ctx-chip ctx-chip--ctx" id="ctx-chip-context" data-ctx-tab="context">
+            <span class="ctx-chip__ico">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M5.636 18.364A9 9 0 1 1 18.364 5.636" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M12 12 8.8 8.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+              </svg>
+            </span>
+            <span class="ctx-chip__name">Context</span>
+            <span class="ctx-chip__sep">·</span>
+            <span class="ctx-chip__val" id="ctx-ctx-val">12k / 200k</span>
+            <span class="ctx-chip__bar"><span class="ctx-chip__bar-fill" style="width:6%"></span></span>
+          </button>
+
+          <!-- Plan chip -->
+          <button class="ctx-chip" id="ctx-chip-plan" data-ctx-tab="plan">
+            <span class="ctx-chip__ico">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <rect x="3" y="5"  width="18" height="2" rx="1" fill="currentColor" opacity="0.35"/>
+                <rect x="3" y="11" width="14" height="2" rx="1" fill="currentColor" opacity="0.65"/>
+                <rect x="3" y="17" width="10" height="2" rx="1" fill="currentColor"/>
+                <circle cx="19.5" cy="18" r="3.5" fill="#7ab389"/>
+                <path d="M18 18l1 1.2 2-2.2" stroke="white" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="ctx-chip__name">Plan</span>
+            <span class="ctx-chip__sep">·</span>
+            <span class="ctx-chip__val" id="ctx-plan-val">2 / 6</span>
+          </button>
+
         </div>
       </div>
 
