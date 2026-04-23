@@ -2227,7 +2227,10 @@ function renderPanelContent(id) {
 }
 
 function splitPaneMiniHead(activeId, pane) {
-  return SPLIT_TABS.map(st => `
+  const activeTab = SPLIT_TABS.find(s => s.id === activeId);
+  const labelText = pane === 'top' ? 'TOP' : 'BTM';
+  return `<span class="split-pane__label">${labelText}</span>` +
+    SPLIT_TABS.map(st => `
     <button class="split-tab${st.id === activeId ? ' is-active' : ''}"
             data-split-pane="${pane}" data-split-tab="${st.id}">
       ${st.label}
@@ -2248,33 +2251,27 @@ function renderSplitBody() {
     </div>`;
 }
 
+function setSplitPaneContent(pane, tabId) {
+  const isTop   = pane === 'top';
+  const headId  = isTop ? 'split-head-top'    : 'split-head-bottom';
+  const contId  = isTop ? 'split-content-top' : 'split-content-bottom';
+  if (isTop) _splitTopTab = tabId; else _splitBottomTab = tabId;
+  // Update active state on mini-tabs
+  document.querySelectorAll(`#${headId} .split-tab`).forEach(b =>
+    b.classList.toggle('is-active', b.dataset.splitTab === tabId));
+  const content = document.getElementById(contId);
+  if (!content) return;
+  // Terminal is edge-to-edge inside split pane — handled by CSS :has() selector
+  // but we still need to render into the content element
+  content.innerHTML = renderPanelContent(tabId);
+  if (window.renderIcons) window.renderIcons(content);
+  wirePlanTabEvents(tabId, content);
+}
+
 function wireSplitPaneTabs(bodyEl) {
   bodyEl.querySelectorAll('.split-tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      const pane  = btn.dataset.splitPane;
-      const tabId = btn.dataset.splitTab;
-      if (pane === 'top') {
-        _splitTopTab = tabId;
-        // Update mini-head active state
-        document.querySelectorAll('#split-head-top .split-tab').forEach(b =>
-          b.classList.toggle('is-active', b.dataset.splitTab === tabId));
-        const content = document.getElementById('split-content-top');
-        if (content) {
-          content.innerHTML = renderPanelContent(tabId);
-          if (window.renderIcons) window.renderIcons(content);
-          wirePlanTabEvents(tabId, content);
-        }
-      } else {
-        _splitBottomTab = tabId;
-        document.querySelectorAll('#split-head-bottom .split-tab').forEach(b =>
-          b.classList.toggle('is-active', b.dataset.splitTab === tabId));
-        const content = document.getElementById('split-content-bottom');
-        if (content) {
-          content.innerHTML = renderPanelContent(tabId);
-          if (window.renderIcons) window.renderIcons(content);
-          wirePlanTabEvents(tabId, content);
-        }
-      }
+      setSplitPaneContent(btn.dataset.splitPane, btn.dataset.splitTab);
     });
   });
 }
@@ -2323,10 +2320,17 @@ document.addEventListener('mouseup', () => {
 
 function applyToggleSplitMode() {
   const splitBtn = document.getElementById('right-panel-split-btn');
+  const bodyEl   = document.getElementById('right-panel-body');
+
   if (_splitMode) {
+    // Auto-open the panel if it's closed
+    if (!document.body.classList.contains('right-panel-open')) {
+      setRightPanelOpen(true);
+    }
     // Sync top tab to current main tab
     _splitTopTab = currentRightPanel;
-    const bodyEl = document.getElementById('right-panel-body');
+    // Remove any terminal-specific body class
+    bodyEl.classList.remove('rp-body--terminal');
     bodyEl.classList.add('is-split');
     bodyEl.innerHTML = renderSplitBody();
     if (window.renderIcons) window.renderIcons(bodyEl);
@@ -2336,12 +2340,12 @@ function applyToggleSplitMode() {
     splitBtn?.classList.add('is-active');
     splitBtn?.setAttribute('aria-pressed', 'true');
   } else {
-    const bodyEl = document.getElementById('right-panel-body');
     bodyEl.classList.remove('is-split');
     splitBtn?.classList.remove('is-active');
     splitBtn?.setAttribute('aria-pressed', 'false');
-    // Re-render the main tab normally
+    // Re-render the main tab normally (will re-add terminal class if needed)
     bodyEl.innerHTML = renderPanelContent(currentRightPanel);
+    bodyEl.classList.toggle('rp-body--terminal', currentRightPanel === 'terminal');
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(currentRightPanel, bodyEl);
   }
@@ -2391,6 +2395,8 @@ function setRightPanelTab(id) {
     wirePlanTabEvents(_splitBottomTab, document.getElementById('split-content-bottom'));
   } else {
     bodyEl.classList.remove('is-split');
+    // Toggle terminal edge-to-edge mode
+    bodyEl.classList.toggle('rp-body--terminal', id === 'terminal');
     bodyEl.innerHTML = renderPanelContent(id);
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(id, bodyEl);
