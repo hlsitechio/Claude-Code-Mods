@@ -2922,8 +2922,300 @@ function applyStreamState(state) {
   });
 }
 
-// Cycle every 3 s — showcases all states in the prototype
-setInterval(() => {
+// Cycle every 3 s — showcases all states in the MOCK messages only
+let _streamInterval = setInterval(() => {
   _streamIdx = (_streamIdx + 1) % STREAM_STATES.length;
   applyStreamState(STREAM_STATES[_streamIdx]);
 }, 3000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE CHAT ENGINE — connects to Claude API via Electron IPC
+// ─────────────────────────────────────────────────────────────────────────────
+
+(function initLiveChat() {
+  const chatConv      = document.querySelector('.chat-conversation');
+  const chatScroll    = document.getElementById('chat-scroll');
+  const composerInput = document.getElementById('composer-input');
+  const sendBtn       = document.getElementById('composer-send');
+
+  if (!chatConv || !composerInput || !sendBtn) return;
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let history       = [];   // [{role:'user'|'assistant', content:string}]
+  let isStreaming   = false;
+  let mockCleared   = false;
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  function scrollBottom() {
+    requestAnimationFrame(() => { chatScroll.scrollTop = chatScroll.scrollHeight; });
+  }
+
+  function clearMock() {
+    if (mockCleared) return;
+    clearInterval(_streamInterval); // stop mock state cycling
+    chatConv.innerHTML = '';
+    mockCleared = true;
+  }
+
+  // Very simple Markdown → HTML renderer (handles the most common Claude output patterns)
+  function mdToHtml(raw) {
+    // 1. Fenced code blocks  ```lang\ncode\n```
+    let out = raw.replace(/```([\w\-+#.]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+      const l = escapeHTML(lang.trim() || 'code');
+      const c = escapeHTML(code.trimEnd());
+      return `<div class="code-block"><div class="code-block__head">`
+           + `<span class="code-block__lang">${l}</span>`
+           + `<span class="code-block__actions">`
+           + `<button class="code-block__btn" data-action="copy" title="Copy"><i data-phosphor="copy"></i></button>`
+           + `</span></div><pre class="code-block__body">${c}</pre></div>`;
+    });
+
+    // 2. Process the remaining text line-by-line
+    const lines = out.split('\n');
+    const blocks = [];
+    let para = [];
+
+    const flushPara = () => {
+      if (para.length) { blocks.push(`<p>${para.join('<br>')}</p>`); para = []; }
+    };
+
+    for (const raw of lines) {
+      // Already a code-block HTML chunk — pass through
+      if (raw.startsWith('<div class="code-block"')) { flushPara(); blocks.push(raw); continue; }
+
+      let line = raw;
+      // Inline code  `...`
+      line = line.replace(/`([^`]+)`/g, (_, c) => `<code>${escapeHTML(c)}</code>`);
+      // Already-escaped HTML from code-block pass-through is safe here
+      // Bold **text**
+      line = line.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      // Italic *text*  (not inside **)
+      line = line.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+      // Headings # ## ###
+      const hm = line.match(/^(#{1,3})\s+(.*)/);
+      if (hm) { flushPara(); blocks.push(`<h${hm[1].length} class="md-h">${hm[2]}</h${hm[1].length}>`); continue; }
+      // Bullet  - or *
+      const bm = line.match(/^[-*]\s+(.*)/);
+      if (bm) { flushPara(); blocks.push(`<li>${bm[1]}</li>`); continue; }
+      // Numbered list  1. ...
+      const nm = line.match(/^\d+\.\s+(.*)/);
+      if (nm) { flushPara(); blocks.push(`<li>${nm[1]}</li>`); continue; }
+      // Horizontal rule ---
+      if (/^-{3,}$/.test(line.trim())) { flushPara(); blocks.push('<hr>'); continue; }
+      // Blank line → paragraph break
+      if (!line.trim()) { flushPara(); continue; }
+
+      para.push(line);
+    }
+    flushPara();
+
+    // Wrap consecutive <li> in <ul>
+    return blocks.join('\n')
+      .replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+  }
+
+  // ── DOM helpers ───────────────────────────────────────────────────────────
+
+  function addUserBubble(text) {
+    const div = document.createElement('div');
+    div.className = 'msg msg--user';
+    div.innerHTML = `<div class="msg__body"><p>${escapeHTML(text).replace(/\n/g,'<br>')}</p></div>`;
+    chatConv.appendChild(div);
+    scrollBottom();
+  }
+
+  function addAssistantBubble() {
+    const div = document.createElement('div');
+    div.className = 'msg msg--assistant msg--streaming';
+    div.innerHTML = `
+      <div class="msg__head">
+        <div class="msg__dot msg__dot--thinking"></div>
+        <span>Claude</span>
+        <span class="msg__meta msg__meta--streaming">generating a response</span>
+      </div>
+      <div class="msg__body"></div>`;
+    chatConv.appendChild(div);
+    if (window.renderIcons) window.renderIcons(div);
+    scrollBottom();
+    return div;
+  }
+
+  function streamToAssistantBubble(div, text) {
+    div.querySelector('.msg__body').innerHTML = mdToHtml(text);
+    if (window.renderIcons) window.renderIcons(div.querySelector('.msg__body'));
+    scrollBottom();
+  }
+
+  function finalizeAssistantBubble(div, stats) {
+    div.classList.remove('msg--streaming');
+    const dot  = div.querySelector('.msg__dot');
+    const meta = div.querySelector('.msg__meta');
+    if (dot)  { dot.className  = 'msg__dot msg__dot--done'; }
+    if (meta) {
+      meta.className = 'msg__meta';
+      meta.textContent = stats?.outputTokens ? `${stats.outputTokens.toLocaleString()} tokens` : 'Done';
+    }
+    // Wire copy buttons inside code blocks
+    div.querySelectorAll('[data-action="copy"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const pre = btn.closest('.code-block')?.querySelector('pre');
+        if (pre) navigator.clipboard.writeText(pre.textContent).catch(() => {});
+      });
+    });
+  }
+
+  function showErrorBubble(div, message) {
+    div.classList.remove('msg--streaming');
+    const dot  = div.querySelector('.msg__dot');
+    const meta = div.querySelector('.msg__meta');
+    const body = div.querySelector('.msg__body');
+    if (dot)  dot.className = 'msg__dot';
+    if (meta) { meta.className = 'msg__meta'; meta.textContent = 'Error'; }
+    if (body) body.innerHTML = `<p style="color:#c96442">${escapeHTML(message)}</p>`;
+  }
+
+  // ── API key setup modal ───────────────────────────────────────────────────
+
+  function showApiKeyModal(onSaved) {
+    const overlay = document.createElement('div');
+    overlay.className = 'apikey-overlay';
+    overlay.innerHTML = `
+      <div class="apikey-card">
+        <div class="apikey-card__ico">
+          <svg viewBox="0 0 24 24" fill="#d97757" width="32" height="32"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg>
+        </div>
+        <h2 class="apikey-card__title">Connect Claude</h2>
+        <p class="apikey-card__desc">Paste your Anthropic API key to start chatting.<br>It's encrypted and stored only on this device.</p>
+        <div class="apikey-card__field">
+          <input id="apikey-input" type="password" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false"/>
+        </div>
+        <p class="apikey-card__hint">Get a key at <span style="color:#6a86c3">console.anthropic.com</span></p>
+        <div class="apikey-card__actions">
+          <button class="modal__btn" id="apikey-cancel">Later</button>
+          <button class="modal__btn modal__btn--primary" id="apikey-save">Connect →</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const inp      = overlay.querySelector('#apikey-input');
+    const saveBtn  = overlay.querySelector('#apikey-save');
+    const cancelBtn= overlay.querySelector('#apikey-cancel');
+
+    setTimeout(() => inp.focus(), 50);
+
+    const doSave = async () => {
+      const key = inp.value.trim();
+      if (!key) { inp.classList.add('is-error'); return; }
+      inp.classList.remove('is-error');
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      await window.electronAPI.setApiKey(key);
+      overlay.remove();
+      onSaved?.();
+    };
+
+    saveBtn.addEventListener('click', doSave);
+    cancelBtn.addEventListener('click', () => overlay.remove());
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') doSave(); });
+  }
+
+  // ── Core send ─────────────────────────────────────────────────────────────
+
+  async function send(text) {
+    text = text.trim();
+    if (!text || isStreaming) return;
+
+    // Electron check — real API requires desktop app
+    if (!window.electronAPI?.isElectron) {
+      clearMock();
+      addUserBubble(text);
+      composerInput.value = '';
+      const aDiv = addAssistantBubble();
+      setTimeout(() => {
+        streamToAssistantBubble(aDiv, '**Desktop app required.**\n\nReal Claude chat works in the Electron desktop app.\n\nRun `npm run electron:dev` to start it.');
+        finalizeAssistantBubble(aDiv, null);
+      }, 400);
+      return;
+    }
+
+    // Check for API key
+    const hasKey = await window.electronAPI.hasApiKey();
+    if (!hasKey) {
+      showApiKeyModal(() => send(text));
+      return;
+    }
+
+    // ----- Send -----
+    clearMock();
+    isStreaming = true;
+    sendBtn.disabled = true;
+    sendBtn.classList.add('is-streaming');
+
+    history.push({ role: 'user', content: text });
+    addUserBubble(text);
+    composerInput.value = '';
+    composerInput.style.height = '';
+
+    const aDiv = addAssistantBubble();
+    let responseText = '';
+
+    // Subscribe to chunks before invoking (avoid race condition)
+    const unsubChunk = window.electronAPI.onChunk(chunk => {
+      responseText += chunk;
+      streamToAssistantBubble(aDiv, responseText);
+    });
+
+    try {
+      const result = await window.electronAPI.sendMessage(
+        history,
+        modelState?.currentModel?.id || 'claude-opus-4-5',
+        null
+      );
+      history.push({ role: 'assistant', content: responseText || result?.text || '' });
+      finalizeAssistantBubble(aDiv, result);
+    } catch (err) {
+      if (err.message === 'NO_API_KEY' || err.message?.includes('NO_API_KEY')) {
+        showErrorBubble(aDiv, 'No API key set. Click the key icon in settings to add one.');
+      } else {
+        showErrorBubble(aDiv, err.message || 'Unknown error');
+      }
+      // Remove last user message from history on error
+      history.pop();
+    } finally {
+      unsubChunk?.();
+      isStreaming = false;
+      sendBtn.disabled = false;
+      sendBtn.classList.remove('is-streaming');
+    }
+  }
+
+  // ── Composer wiring ───────────────────────────────────────────────────────
+
+  sendBtn.addEventListener('click', () => send(composerInput.value));
+
+  composerInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send(composerInput.value);
+    }
+  });
+
+  // Auto-resize textarea as user types
+  composerInput.addEventListener('input', () => {
+    composerInput.style.height = '';
+    composerInput.style.height = Math.min(composerInput.scrollHeight, 200) + 'px';
+  });
+
+  // ── Startup: check for API key ────────────────────────────────────────────
+
+  if (window.electronAPI?.isElectron) {
+    window.electronAPI.hasApiKey().then(has => {
+      if (!has) {
+        // Show key modal after a brief delay so the UI renders first
+        setTimeout(() => showApiKeyModal(), 800);
+      }
+    });
+  }
+
+})(); // end initLiveChat
