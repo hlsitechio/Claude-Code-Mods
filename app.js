@@ -1883,8 +1883,14 @@ function renderTerminalPanel() {
   return `
     <div class="terminal-view">
       <div class="terminal-toolbar">
-        <span class="terminal-toolbar__title">bash</span>
+        <span class="terminal-toolbar__dots">
+          <span class="t-dot t-dot--red"></span>
+          <span class="t-dot t-dot--yellow"></span>
+          <span class="t-dot t-dot--green"></span>
+        </span>
+        <span class="terminal-toolbar__title">bash — ~/claude-code-mods</span>
         <span class="terminal-toolbar__actions">
+          <button class="icon-btn icon-btn--sm" title="New tab"><i data-phosphor="plus"></i></button>
           <button class="icon-btn icon-btn--sm" title="Clear"><i data-phosphor="trash"></i></button>
         </span>
       </div>
@@ -2182,22 +2188,27 @@ function renderPlanPanel() {
 }
 
 let currentRightPanel = localStorage.getItem(RIGHT_PANEL_KEY + '.tab') || 'apercu';
-function setRightPanelOpen(open) {
-  document.body.classList.toggle('right-panel-open', open);
-  if (open) {
-    // Restore persisted width (overrides the CSS 360px default)
-    const saved = parseInt(localStorage.getItem(RP_WIDTH_KEY), 10);
-    if (saved >= RP_MIN && saved <= RP_MAX) {
-      rightPanelEl.style.width = saved + 'px';
-    }
-  }
-  localStorage.setItem(RIGHT_PANEL_KEY + '.open', open ? '1' : '0');
-}
-function setRightPanelTab(id) {
-  currentRightPanel = id;
+
+// ---------- Split panel state ----------
+let _splitMode     = false;
+let _splitTopTab   = currentRightPanel;
+let _splitBottomTab = 'terminal';
+let _splitTopPx    = null;   // persisted height of top pane (px)
+
+// Tabs available in the split mini-selectors
+const SPLIT_TABS = [
+  { id: 'terminal', icon: 'terminal-window', label: 'Terminal' },
+  { id: 'diff',     icon: 'git-diff',        label: 'Diff'     },
+  { id: 'plan',     icon: 'list-checks',     label: 'Plan'     },
+  { id: 'git',      icon: 'git-branch',      label: 'Git'      },
+  { id: 'mcp',      icon: 'plug',            label: 'MCP'      },
+  { id: 'context',  icon: 'chart-bar',       label: 'Context'  },
+  { id: 'fichiers', icon: 'folder-open',     label: 'Files'    },
+];
+
+function renderPanelContent(id) {
   const tab = rightPanelTabs.find(x => x.id === id) || rightPanelTabs[0];
   const label = t(tab.labelKey);
-  rightPanelTitle.textContent = label;
   let body;
   if      (id === 'shortcuts') body = renderShortcutsPanel();
   else if (id === 'diff')      body = renderDiffPanel();
@@ -2212,20 +2223,177 @@ function setRightPanelTab(id) {
       <div class="right-panel__empty-icon">${iconSVG(tab.icon)}</div>
       <div class="right-panel__empty-text">${escapeHTML(label)}</div>
     </div>`;
-  const bodyEl = document.getElementById('right-panel-body');
-  bodyEl.innerHTML = body;
-  if (window.renderIcons) window.renderIcons(bodyEl);
-  localStorage.setItem(RIGHT_PANEL_KEY + '.tab', id);
+  return body;
+}
 
-  // Plan panel: click on task row to toggle sub-tasks
-  if (id === 'plan') {
+function splitPaneMiniHead(activeId, pane) {
+  return SPLIT_TABS.map(st => `
+    <button class="split-tab${st.id === activeId ? ' is-active' : ''}"
+            data-split-pane="${pane}" data-split-tab="${st.id}">
+      ${st.label}
+    </button>`).join('');
+}
+
+function renderSplitBody() {
+  const topPx    = _splitTopPx || 260;
+  return `
+    <div class="split-pane" id="split-pane-top" style="height:${topPx}px;flex:none">
+      <div class="split-pane__head" id="split-head-top">${splitPaneMiniHead(_splitTopTab, 'top')}</div>
+      <div class="split-pane__content" id="split-content-top">${renderPanelContent(_splitTopTab)}</div>
+    </div>
+    <div class="split-divider" id="split-divider"></div>
+    <div class="split-pane" id="split-pane-bottom">
+      <div class="split-pane__head" id="split-head-bottom">${splitPaneMiniHead(_splitBottomTab, 'bottom')}</div>
+      <div class="split-pane__content" id="split-content-bottom">${renderPanelContent(_splitBottomTab)}</div>
+    </div>`;
+}
+
+function wireSplitPaneTabs(bodyEl) {
+  bodyEl.querySelectorAll('.split-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pane  = btn.dataset.splitPane;
+      const tabId = btn.dataset.splitTab;
+      if (pane === 'top') {
+        _splitTopTab = tabId;
+        // Update mini-head active state
+        document.querySelectorAll('#split-head-top .split-tab').forEach(b =>
+          b.classList.toggle('is-active', b.dataset.splitTab === tabId));
+        const content = document.getElementById('split-content-top');
+        if (content) {
+          content.innerHTML = renderPanelContent(tabId);
+          if (window.renderIcons) window.renderIcons(content);
+          wirePlanTabEvents(tabId, content);
+        }
+      } else {
+        _splitBottomTab = tabId;
+        document.querySelectorAll('#split-head-bottom .split-tab').forEach(b =>
+          b.classList.toggle('is-active', b.dataset.splitTab === tabId));
+        const content = document.getElementById('split-content-bottom');
+        if (content) {
+          content.innerHTML = renderPanelContent(tabId);
+          if (window.renderIcons) window.renderIcons(content);
+          wirePlanTabEvents(tabId, content);
+        }
+      }
+    });
+  });
+}
+
+function wirePlanTabEvents(tabId, bodyEl) {
+  if (tabId === 'plan') {
     bodyEl.querySelectorAll('.plan-task--has-subs').forEach(el => {
       el.addEventListener('click', () => {
         const idx = parseInt(el.dataset.planIdx, 10);
         _planExpandedIdx = (_planExpandedIdx === idx) ? -1 : idx;
-        setRightPanelTab('plan');
+        // Re-render in the same container
+        const content = el.closest('.split-pane__content') || document.getElementById('right-panel-body');
+        if (content) {
+          content.innerHTML = renderPanelContent('plan');
+          if (window.renderIcons) window.renderIcons(content);
+          wirePlanTabEvents('plan', content);
+        }
       });
     });
+  }
+}
+
+// Split divider drag
+let _splitDrag = null;
+document.addEventListener('mousedown', (e) => {
+  if (!e.target.closest('#split-divider')) return;
+  e.preventDefault();
+  const topPane = document.getElementById('split-pane-top');
+  _splitDrag = { startY: e.clientY, startH: topPane ? topPane.getBoundingClientRect().height : 260 };
+  document.getElementById('split-divider')?.classList.add('is-dragging');
+});
+document.addEventListener('mousemove', (e) => {
+  if (!_splitDrag) return;
+  const delta = e.clientY - _splitDrag.startY;
+  const bodyEl = document.getElementById('right-panel-body');
+  const maxH   = bodyEl ? bodyEl.getBoundingClientRect().height - 120 : 9999;
+  const newH   = Math.max(80, Math.min(maxH, _splitDrag.startH + delta));
+  const topPane = document.getElementById('split-pane-top');
+  if (topPane) { topPane.style.height = newH + 'px'; _splitTopPx = newH; }
+});
+document.addEventListener('mouseup', () => {
+  if (!_splitDrag) return;
+  _splitDrag = null;
+  document.getElementById('split-divider')?.classList.remove('is-dragging');
+});
+
+function applyToggleSplitMode() {
+  const splitBtn = document.getElementById('right-panel-split-btn');
+  if (_splitMode) {
+    // Sync top tab to current main tab
+    _splitTopTab = currentRightPanel;
+    const bodyEl = document.getElementById('right-panel-body');
+    bodyEl.classList.add('is-split');
+    bodyEl.innerHTML = renderSplitBody();
+    if (window.renderIcons) window.renderIcons(bodyEl);
+    wireSplitPaneTabs(bodyEl);
+    wirePlanTabEvents(_splitTopTab, document.getElementById('split-content-top'));
+    wirePlanTabEvents(_splitBottomTab, document.getElementById('split-content-bottom'));
+    splitBtn?.classList.add('is-active');
+    splitBtn?.setAttribute('aria-pressed', 'true');
+  } else {
+    const bodyEl = document.getElementById('right-panel-body');
+    bodyEl.classList.remove('is-split');
+    splitBtn?.classList.remove('is-active');
+    splitBtn?.setAttribute('aria-pressed', 'false');
+    // Re-render the main tab normally
+    bodyEl.innerHTML = renderPanelContent(currentRightPanel);
+    if (window.renderIcons) window.renderIcons(bodyEl);
+    wirePlanTabEvents(currentRightPanel, bodyEl);
+  }
+}
+
+// Wire split toggle button — runs after this script evaluates (DOM is ready at that point)
+function wireSplitBtn() {
+  const btn = document.getElementById('right-panel-split-btn');
+  if (!btn || btn._splitWired) return;
+  btn._splitWired = true;
+  btn.addEventListener('click', () => {
+    _splitMode = !_splitMode;
+    applyToggleSplitMode();
+  });
+}
+// Defer to next microtask so all DOM elements are guaranteed available
+queueMicrotask(wireSplitBtn);
+
+function setRightPanelOpen(open) {
+  document.body.classList.toggle('right-panel-open', open);
+  if (open) {
+    // Restore persisted width (overrides the CSS 360px default)
+    const saved = parseInt(localStorage.getItem(RP_WIDTH_KEY), 10);
+    if (saved >= RP_MIN && saved <= RP_MAX) {
+      rightPanelEl.style.width = saved + 'px';
+    }
+  }
+  localStorage.setItem(RIGHT_PANEL_KEY + '.open', open ? '1' : '0');
+}
+function setRightPanelTab(id) {
+  currentRightPanel = id;
+  const tab   = rightPanelTabs.find(x => x.id === id) || rightPanelTabs[0];
+  const label = t(tab.labelKey);
+  if (rightPanelTitle) rightPanelTitle.textContent = label;
+  localStorage.setItem(RIGHT_PANEL_KEY + '.tab', id);
+
+  const bodyEl = document.getElementById('right-panel-body');
+
+  if (_splitMode) {
+    // In split mode — update the top pane and refresh the whole split layout
+    _splitTopTab = id;
+    bodyEl.classList.add('is-split');
+    bodyEl.innerHTML = renderSplitBody();
+    if (window.renderIcons) window.renderIcons(bodyEl);
+    wireSplitPaneTabs(bodyEl);
+    wirePlanTabEvents(_splitTopTab, document.getElementById('split-content-top'));
+    wirePlanTabEvents(_splitBottomTab, document.getElementById('split-content-bottom'));
+  } else {
+    bodyEl.classList.remove('is-split');
+    bodyEl.innerHTML = renderPanelContent(id);
+    if (window.renderIcons) window.renderIcons(bodyEl);
+    wirePlanTabEvents(id, bodyEl);
   }
 
   // Sync context-strip chips
@@ -2345,6 +2513,8 @@ if (localStorage.getItem(RIGHT_PANEL_KEY + '.open') === '1') {
   setRightPanelOpen(true);
   setRightPanelTab(currentRightPanel);
 }
+// Ensure split btn is wired (called after all DOM-querying code above)
+wireSplitBtn();
 
 // ---------- Mic (stub — blinking when "recording") ----------
 const micBtn = document.getElementById('mic-btn');
