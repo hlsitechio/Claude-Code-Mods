@@ -1,0 +1,14 @@
+{
+  "name": "claude-code-mods",
+  "version": "0.1.0",
+  "description": "Claude Code fan UI redesign — vanilla prototype served by Vite",
+  "private": true,
+  "scripts": {
+    "dev":     "vite --port 5181 --open",
+    "build":   "vite build",
+    "preview": "vite preview --port 5182"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}
