@@ -129,6 +129,34 @@ function createWindow() {
 
   mainWin = win;
 
+  // ── Filesystem watcher — notifies renderer when files change under FS_ROOT ──
+  let _fsWatcher = null;
+  const _fsDebounce = new Map(); // dirPath → timeout id
+
+  function startFsWatcher() {
+    if (_fsWatcher) return;
+    try {
+      _fsWatcher = fs.watch(FS_ROOT, { recursive: true }, (eventType, filename) => {
+        if (!filename) return;
+        // Derive the directory that changed (parent of the changed entry)
+        const fullPath   = path.join(FS_ROOT, filename);
+        const changedDir = path.dirname(fullPath);
+        // Debounce rapid bursts (e.g. file saves emit multiple events)
+        clearTimeout(_fsDebounce.get(changedDir));
+        _fsDebounce.set(changedDir, setTimeout(() => {
+          _fsDebounce.delete(changedDir);
+          if (!win.isDestroyed()) win.webContents.send('fs:changed', changedDir);
+        }, 250));
+      });
+      _fsWatcher.on('error', e => console.error('[fs:watch]', e.message));
+    } catch (e) {
+      console.error('[fs:watch] could not start:', e.message);
+    }
+  }
+  startFsWatcher();
+
+  win.on('closed', () => { _fsWatcher?.close(); _fsWatcher = null; });
+
   if (state.maximized) win.maximize();
 
   win.once('ready-to-show', () => win.show());
@@ -301,8 +329,8 @@ ipcMain.handle('claude:sign-out', () => {
 
 // ── IPC: streaming chat ──────────────────────────────────────────────────────
 
-ipcMain.handle('claude:send', async (event, { messages, model, system, cliSessionId }) => {
-  return getClaudeService().streamMessage(event, messages, model, system, cliSessionId);
+ipcMain.handle('claude:send', async (event, { messages, model, system, cliSessionId, permMode }) => {
+  return getClaudeService().streamMessage(event, messages, model, system, cliSessionId, permMode);
 });
 
 ipcMain.handle('claude:abort', () => {
@@ -346,6 +374,87 @@ ipcMain.handle('kb:write', async (_, { id, content }) => {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, 'utf8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// ── IPC: file-system explorer ────────────────────────────────────────────────
+const FS_ROOT   = path.join(__dirname, '../..'); // G:\claude_code_mod
+const FS_IGNORE = new Set([
+  'node_modules', '.git', 'dist', 'release', '.cache',
+  'coverage', '__pycache__', '.pytest_cache', '.parcel-cache',
+]);
+
+ipcMain.handle('fs:root', () => FS_ROOT);
+
+ipcMain.handle('fs:mkdir', async (_, dirPath) => {
+  try {
+    fs.mkdirSync(path.resolve(dirPath), { recursive: true });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('fs:list', async (_, dirPath) => {
+  const resolved = path.resolve(dirPath || FS_ROOT);
+  try {
+    const raw = await fs.promises.readdir(resolved, { withFileTypes: true });
+    const entries = raw
+      .filter(e => !FS_IGNORE.has(e.name))
+      .map(e => ({
+        name: e.name,
+        type: e.isDirectory() ? 'dir' : 'file',
+        path: path.join(resolved, e.name),
+      }))
+      .sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      });
+    return { ok: true, entries, dir: resolved };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('fs:read', async (_, filePath) => {
+  const resolved = path.resolve(filePath);
+  try {
+    const stat = await fs.promises.stat(resolved);
+    if (stat.size > 2 * 1024 * 1024) return { ok: false, error: 'File too large (>2 MB)' };
+    const content = await fs.promises.readFile(resolved, 'utf8');
+    return { ok: true, content, path: resolved };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('fs:writeText', async (_, filePath, content) => {
+  const resolved = path.resolve(filePath);
+  try {
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    await fs.promises.writeFile(resolved, content, 'utf8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('fs:exists', async (_, filePath) => {
+  try {
+    const stat = await fs.promises.stat(path.resolve(filePath));
+    return { exists: true, isDir: stat.isDirectory(), isFile: stat.isFile() };
+  } catch {
+    return { exists: false };
+  }
+});
+
+ipcMain.handle('shell:open', async (_, filePath) => {
+  try {
+    const resolved = path.resolve(filePath);
+    await shell.openPath(resolved);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };

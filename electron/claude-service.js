@@ -381,20 +381,55 @@ function getCliBinary() {
 // Stream a message through the real claude CLI subprocess.
 // Uses --output-format stream-json --verbose so we get session_id and incremental text.
 // cliSessionId (if set) is passed as --resume so the CLI maintains conversation context.
-async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary) {
+async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode) {
   const model   = resolveModel(modelId);
   const lastMsg = messages[messages.length - 1];
   if (!lastMsg || lastMsg.role !== 'user') throw new Error('Last message must be from user');
 
+  // content can be a plain string OR an array of blocks (text + image) when images are attached
+  let promptText  = '';
+  const tmpImages = [];  // temp file paths to clean up after
+  if (Array.isArray(lastMsg.content)) {
+    for (const block of lastMsg.content) {
+      if (block.type === 'text') {
+        promptText += (promptText ? '\n' : '') + block.text;
+      } else if (block.type === 'image' && block.source?.type === 'base64') {
+        // Save image to a temp file so we can pass --image <path> to the CLI
+        const ext   = (block.source.media_type || 'image/png').split('/')[1] || 'png';
+        const tmp   = path.join(require('os').tmpdir(), `ccmod_img_${Date.now()}_${tmpImages.length}.${ext}`);
+        fs.writeFileSync(tmp, Buffer.from(block.source.data, 'base64'));
+        tmpImages.push(tmp);
+      }
+    }
+  } else {
+    promptText = lastMsg.content || '';
+  }
+
   const args = [
-    '-p', lastMsg.content,
+    '-p', promptText || '(image attached)',
     '--output-format', 'stream-json',
     '--verbose',
     '--model', model,
   ];
+  // Pass each saved image via --image flag (Claude Code CLI supports this)
+  for (const imgPath of tmpImages) args.push('--image', imgPath);
   if (cliSessionId)  args.push('--resume', cliSessionId);
-  // For the very first turn we can optionally inject system context
-  if (systemPrompt && !cliSessionId) args.push('--system-prompt', systemPrompt);
+
+  // ── Permission mode → CLI flags ──────────────────────────────────────────
+  // bypass  → --dangerously-skip-permissions  (no prompts at all)
+  // accept  → --auto-approve-everything       (auto-accept file edits)
+  // plan    → no exec flags (planning only; model self-limits)
+  // default → no flags     (Claude prompts for each tool)
+  if (permMode === 'bypass') {
+    args.push('--dangerously-skip-permissions');
+  } else if (permMode === 'accept') {
+    args.push('--auto-approve-everything');
+  }
+
+  // Always inject system context as a hidden layer — passed on every turn so
+  // Claude and any sub-agents always have workspace awareness without it
+  // appearing in user-turn message content.
+  if (systemPrompt) args.push('--system-prompt', systemPrompt);
 
   const isCmd = binary.endsWith('.cmd');
   console.log(`[claude-cli] spawn ${isCmd ? '(shell)' : '(exe)'}  model=${model}  resume=${cliSessionId || 'new'}`);
@@ -417,6 +452,11 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
     let newSessionId = cliSessionId || null;
     let inputTokens  = 0;
     let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let costUSD      = 0;
+    let numTurns     = 0;
+    let toolCallCount = 0;
+    let sessionModel  = modelId;
     let settled      = false;
 
     const settle = (ok, val) => {
@@ -435,6 +475,7 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
         case 'system':
           if (ev.subtype === 'init' && ev.session_id) {
             newSessionId = ev.session_id;
+            if (ev.model) sessionModel = ev.model;
             console.log(`[claude-cli] session=${newSessionId}  model=${ev.model}`);
           }
           break;
@@ -476,10 +517,16 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
                 }
               }
 
+              // Count all tool calls
+              toolCallCount++;
+
               // Any other non-todo tool → generic activity ping
               const skipGeneric = ['TodoWrite', 'todo_write', 'Read', 'read_file', 'read', 'cat', 'view'];
               if (!skipGeneric.includes((block.name || '').toLowerCase())) {
-                const payload = JSON.stringify({ type: 'tool', tool: block.name });
+                // For Agent tool calls, extract the agent name from input
+                const inp = block.input || {};
+                const agentName = inp.agent_name || inp.agentName || inp.agent || inp.subagent_type || inp.name || null;
+                const payload = JSON.stringify({ type: 'tool', tool: block.name, agentName });
                 event.sender.send('claude:chunk', '\x01ACT:' + payload + '\x02');
               }
             }
@@ -509,9 +556,13 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
 
         case 'result':
           if (ev.usage) {
-            inputTokens  = ev.usage.input_tokens  || 0;
-            outputTokens = ev.usage.output_tokens || 0;
+            inputTokens      = ev.usage.input_tokens             || 0;
+            outputTokens     = ev.usage.output_tokens            || 0;
+            cacheReadTokens  = ev.usage.cache_read_input_tokens  || 0;
           }
+          if (ev.cost_usd       != null) costUSD   = ev.cost_usd;
+          if (ev.total_cost_usd != null) costUSD   = ev.total_cost_usd;
+          if (ev.num_turns      != null) numTurns  = ev.num_turns;
           if (ev.is_error || ev.subtype === 'error_during_execution') {
             const msg = ev.result || ev.error || 'CLI reported an error';
             const errStr = typeof msg === 'string' ? msg : JSON.stringify(msg);
@@ -538,18 +589,24 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
       if (msg) console.error('[claude-cli] stderr:', msg);
     });
 
+    const cleanupTmpImages = () => {
+      for (const p of tmpImages) try { fs.unlinkSync(p); } catch {}
+    };
+
     proc.on('close', code => {
       _currentProc = null;
+      cleanupTmpImages();
       if (buffer.trim()) processLine(buffer); // flush
       if (!settled) {
-        // Deliver whatever partial text we have (covers both normal end and user abort)
-        event.sender.send('claude:done', { inputTokens, outputTokens });
-        settle(true, { text: fullText, inputTokens, outputTokens, cliSessionId: newSessionId });
+        const stats = { inputTokens, outputTokens, cacheReadTokens, costUSD, numTurns, toolCallCount, model: sessionModel };
+        event.sender.send('claude:done', stats);
+        settle(true, { text: fullText, ...stats, cliSessionId: newSessionId });
       }
     });
 
     proc.on('error', err => {
       _currentProc = null;
+      cleanupTmpImages();
       console.error('[claude-cli] spawn error:', err.message);
       settle(false, err);
     });
@@ -574,10 +631,10 @@ const MODEL_MAP = {
 function resolveModel(id) { return MODEL_MAP[id] || id || 'claude-sonnet-4-6'; }
 
 // Public entry point — tries real CLI first, falls back to direct Anthropic SDK.
-async function streamMessage(event, messages, modelId, systemPrompt, cliSessionId) {
+async function streamMessage(event, messages, modelId, systemPrompt, cliSessionId, permMode) {
   const binary = getCliBinary();
   if (binary) {
-    return streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary);
+    return streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode);
   }
   console.warn('[claude] CLI unavailable — using SDK fallback');
   return streamMessageViaSDK(event, messages, modelId, systemPrompt);

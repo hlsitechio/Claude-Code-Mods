@@ -1,7 +1,13 @@
 {
   "name": "claude-code-desktop",
-  "version": "0.1.0",
-  "description": "Claude Code fan-made desktop UI redesign — Electron + Vite",
+  "version": "0.2.0",
+  "description": "Fan-made Electron desktop UI for the Claude Code CLI — live context panel, permission modes, JSX preview, workspace awareness",
+  "homepage": "https://github.com/hlsitechio/Claude-Code-Mods",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hlsitechio/Claude-Code-Mods.git"
+  },
+  "keywords": ["claude", "claude-code", "anthropic", "electron", "desktop", "ai", "coding-assistant"],
   "private": true,
   "main": "electron/main.js",
   "scripts": {

@@ -61,8 +61,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // ── Streaming chat ────────────────────────────────────────────────────────
-  sendMessage: (messages, model, system, cliSessionId) =>
-    ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId }),
+  sendMessage: (messages, model, system, cliSessionId, permMode) =>
+    ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId, permMode }),
 
   abort: () => ipcRenderer.invoke('claude:abort'),
 
@@ -100,5 +100,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Agents persistence ────────────────────────────────────────────────────
   agents: {
     save: (list) => ipcRenderer.invoke('agents:save', list),
+  },
+
+  // ── File-system explorer ──────────────────────────────────────────────────
+  files: {
+    root: ()                    => ipcRenderer.invoke('fs:root'),
+    list: (dirPath)             => ipcRenderer.invoke('fs:list', dirPath),
+    read: (filePath)            => ipcRenderer.invoke('fs:read', filePath),
+    write: (filePath, content)  => ipcRenderer.invoke('fs:writeText', filePath, content),
+    mkdir: (dirPath)            => ipcRenderer.invoke('fs:mkdir', dirPath),
+    exists: (filePath)          => ipcRenderer.invoke('fs:exists', filePath),
+    openInExplorer: (filePath)  => ipcRenderer.invoke('shell:open', filePath),
+    onChanged: (cb) => {
+      const handler = (_, dirPath) => cb(dirPath);
+      ipcRenderer.on('fs:changed', handler);
+      return () => ipcRenderer.removeListener('fs:changed', handler);
+    },
   },
 });
