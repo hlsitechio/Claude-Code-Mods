@@ -171,50 +171,304 @@ function applyLanguage() {
   if (rpTitle) rpTitle.textContent = t('rp_' + (currentRightPanel || 'apercu'));
 }
 
-// ---------- Mock data ----------
+// ---------- Session persistence layer ----------
+// Sessions and their message histories are persisted to localStorage.
+// Key "ccmod.sessions"  → array of session metadata (id, title, pinned, ts, projectId)
+// Key "ccmod.msgs.<id>" → JSON array of {role,content} messages for that session
+// Key "ccmod.state"     → {activeId, projects}
+
 const PROJECT_COLORS = ['#c96442', '#d97757', '#6a86c3', '#7ab389', '#b48ead', '#c9a96e', '#5aa1a1'];
 
+// System prompt injected on every new CLI session (first turn only).
+// Prevents the CLI's default agent behaviour (filesystem exploration, tool use)
+// and keeps it in direct chat mode — answering and generating code immediately.
+const CHAT_SYSTEM_PROMPT = `You are Claude, a helpful AI assistant running inside a desktop chat application.
+
+IMPORTANT RULES:
+- You are in a CHAT interface, not a coding agent. There is no project, no filesystem, no codebase to explore.
+- Respond directly and immediately. Never say "let me explore the project" or "let me check the current setup" — there is nothing to explore.
+- When asked to generate code, produce complete, working code immediately in a single code block.
+- When asked to create UI components, generate the full HTML/CSS/JSX code right away.
+- Be conversational, concise, and helpful. Markdown is rendered — use it freely.
+- Do NOT use bash commands or try to read/write files. Just respond.
+
+PLAN PANEL — TodoWrite:
+- This app has a Plan panel (right side) that displays a live task board fed by TodoWrite.
+- When the user asks you to "create a plan", "put it in the plan panel", "show tasks", or anything similar → call TodoWrite IMMEDIATELY with the tasks. Never ask for clarification first.
+- If the user references something from earlier in the conversation (e.g. "it", "the plan above", "that list") → use those items as your TodoWrite tasks. Re-read the conversation history and act.
+- For any multi-step task (3+ steps), proactively call TodoWrite at the start, then update statuses as you complete each step.`;
+
+const SESSION_KEY    = 'ccmod.sessions';
+const STATE_META_KEY = 'ccmod.state';
+const MAX_SESSIONS   = 60;
+
+function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+function formatRelTime(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 60_000)         return 'now';
+  if (diff < 3_600_000)      return Math.floor(diff / 60_000) + 'm';
+  if (diff < 86_400_000)     return Math.floor(diff / 3_600_000) + 'h';
+  if (diff < 2 * 86_400_000) return 'Yesterday';
+  return Math.floor(diff / 86_400_000) + 'd';
+}
+
+// Load or initialise persisted session list
+function loadSessionList() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY)) || []; }
+  catch { return []; }
+}
+function saveSessionList(list) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(list.slice(0, MAX_SESSIONS))); }
+  catch (e) { console.warn('[sessions] save failed', e); }
+}
+
+// Load/save per-session message history
+function loadSessionMessages(id) {
+  try { return JSON.parse(localStorage.getItem('ccmod.msgs.' + id)) || []; }
+  catch { return []; }
+}
+function saveSessionMessages(id, msgs) {
+  try { localStorage.setItem('ccmod.msgs.' + id, JSON.stringify(msgs)); }
+  catch (e) { console.warn('[sessions] msgs save failed', e); }
+}
+function deleteSessionMessages(id) {
+  try { localStorage.removeItem('ccmod.msgs.' + id); } catch {}
+}
+
+// Load or initialise the main app state (projects + activeId)
+function loadStateMeta() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STATE_META_KEY));
+    if (saved) return saved;
+  } catch {}
+  return null;
+}
+function saveStateMeta() {
+  try {
+    localStorage.setItem(STATE_META_KEY, JSON.stringify({
+      activeId:  state.activeId,
+      projects:  state.projects.map(p => ({
+        id: p.id, name: p.name, color: p.color, open: p.open,
+        sessions: p.sessions.map(s => s.id),
+      })),
+    }));
+  } catch (e) { console.warn('[state] save failed', e); }
+}
+
+// Build state from persisted data, falling back to defaults
+(function initState() {
+  const list    = loadSessionList();
+  const meta    = loadStateMeta();
+
+  // Build a map id → session for quick lookup
+  const byId = Object.fromEntries(list.map(s => [s.id, s]));
+
+  // Restore projects structure if we have saved meta
+  let restoredProjects = null;
+  if (meta?.projects?.length) {
+    restoredProjects = meta.projects.map(p => ({
+      id: p.id, name: p.name, color: p.color, open: p.open,
+      sessions: (p.sessions || []).map(id => byId[id]).filter(Boolean),
+    }));
+  }
+
+  // Restore pinned/recent from session list
+  const pinnedSessions = list.filter(s => s.pinned);
+  const recentSessions = list.filter(s => !s.pinned && !s.projectId)
+                             .sort((a, b) => b.ts - a.ts)
+                             .slice(0, 30);
+
+  // If nothing saved yet, create a default first session
+  if (!list.length) {
+    const firstId = genId();
+    const firstSession = { id: firstId, title: 'New session', ts: Date.now(), pinned: false };
+    saveSessionList([firstSession]);
+    window.__defaultState = {
+      projects: [
+        { id: 'p1', name: 'Claude Code Mod', color: '#c96442', open: true, sessions: [] },
+        { id: 'p2', name: 'Crowbyte',         color: '#6a86c3', open: false, sessions: [] },
+      ],
+      pinned:   [],
+      recent:   [firstSession],
+      activeId: firstId,
+    };
+  } else {
+    window.__defaultState = {
+      projects: restoredProjects || [],
+      pinned:   pinnedSessions,
+      recent:   recentSessions,
+      activeId: meta?.activeId || (recentSessions[0]?.id ?? pinnedSessions[0]?.id ?? list[0]?.id),
+    };
+  }
+})();
+
 const state = {
-  projects: [
-    {
-      id: 'p1', name: 'Claude Code Mod', color: '#c96442', open: true,
-      sessions: [
-        { id: 's1', title: 'Enhance app with Claude Code', time: '2m', active: true, processing: true },
-        { id: 's2', title: 'Extract app.asar and map bundle', time: '1h' },
-        { id: 's3', title: 'Sidebar redesign — first pass', time: '3h' },
-      ],
-    },
-    {
-      id: 'p2', name: 'Crowbyte', color: '#6a86c3', open: false,
-      sessions: [
-        { id: 's4', title: 'Build autonomous AI software updates', time: '2d' },
-        { id: 's5', title: 'Implement new MCP package integration', time: '3d' },
-        { id: 's6', title: 'Fix CLI square bracket formatting', time: '4d' },
-      ],
-    },
-    {
-      id: 'p3', name: 'Hermes Agents', color: '#7ab389', open: false,
-      sessions: [
-        { id: 's7', title: 'Hermes agent digest routine', time: '1d' },
-        { id: 's8', title: 'Hermes security alerts routine', time: '5d' },
-      ],
-    },
-    {
-      id: 'p4', name: 'Research & Notes', color: '#b48ead', open: false, sessions: [],
-    },
-  ],
-  pinned: [
-    { id: 'sp1', title: 'Product strategy notes', time: 'pinned' },
-  ],
-  recent: [
-    { id: 'sr1', title: 'Demonstrate app functionality', time: '12m' },
-    { id: 'sr2', title: 'Add Git requirement for local sessions', time: '2h' },
-    { id: 'sr3', title: 'Build pay-to-dispute resolution flow', time: 'Yesterday' },
-    { id: 'sr4', title: 'Weekly review — April 21', time: '2d' },
-    { id: 'sr5', title: 'Supabase RLS audit', time: '5d' },
-  ],
-  activeId: 's1',
+  projects: window.__defaultState.projects,
+  pinned:   window.__defaultState.pinned,
+  recent:   window.__defaultState.recent,
+  activeId: window.__defaultState.activeId,
 };
+delete window.__defaultState;
+
+// ── Session CRUD helpers ──────────────────────────────────────────────────────
+
+function createNewSession({ projectId = null, title = 'New session' } = {}) {
+  const id  = genId();
+  const now = Date.now();
+  const session = { id, title, ts: now, pinned: false, projectId };
+
+  // Add to session list
+  const list = loadSessionList();
+  list.unshift(session);
+  saveSessionList(list);
+  saveSessionMessages(id, []);
+
+  // Add to in-memory state
+  if (projectId) {
+    const proj = state.projects.find(p => p.id === projectId);
+    if (proj) { proj.sessions.unshift(session); proj.open = true; }
+  } else {
+    state.recent.unshift(session);
+  }
+
+  return session;
+}
+
+function deleteSession(id) {
+  deleteSessionMessages(id);
+  const list = loadSessionList().filter(s => s.id !== id);
+  saveSessionList(list);
+
+  state.recent   = state.recent.filter(s => s.id !== id);
+  state.pinned   = state.pinned.filter(s => s.id !== id);
+  state.projects.forEach(p => { p.sessions = p.sessions.filter(s => s.id !== id); });
+
+  if (state.activeId === id) {
+    const next = state.recent[0] || state.pinned[0] || state.projects.flatMap(p => p.sessions)[0];
+    if (next) {
+      switchToSession(next.id);
+    } else {
+      const newS = createNewSession();
+      switchToSession(newS.id);
+    }
+  } else {
+    render(); // re-render sidebar to remove the row
+  }
+}
+
+function updateSessionTitle(id, title) {
+  const list = loadSessionList();
+  const entry = list.find(s => s.id === id);
+  if (entry) { entry.title = title; saveSessionList(list); }
+  // Update in-memory
+  const findInState = (arr) => arr.find(s => s.id === id);
+  const s = findInState(state.recent) || findInState(state.pinned)
+         || state.projects.flatMap(p => p.sessions).find(s => s.id === id);
+  if (s) s.title = title;
+}
+
+function togglePinSession(id) {
+  const list = loadSessionList();
+  const entry = list.find(s => s.id === id);
+  if (!entry) return;
+  entry.pinned = !entry.pinned;
+  saveSessionList(list);
+  // Rebuild pinned/recent in memory
+  state.pinned = list.filter(s => s.pinned && !s.projectId);
+  state.recent = list.filter(s => !s.pinned && !s.projectId).sort((a,b) => b.ts - a.ts).slice(0, 30);
+  render();
+}
+
+// (deleteSession above is the single authoritative implementation)
+
+// ── Chat switching (the real work) ───────────────────────────────────────────
+
+// Current in-memory messages (per-session). Exposed as window.__chatHistory
+// so the initLiveChat IIFE can read/write it.
+window.__chatHistory = loadSessionMessages(state.activeId);
+
+function switchToSession(id, skipRender = false) {
+  if (id === state.activeId) return;
+
+  // Persist current session's messages before switching
+  saveSessionMessages(state.activeId, window.__chatHistory || []);
+
+  state.activeId = id;
+  window.__chatHistory = loadSessionMessages(id);
+
+  // Reset plan panel — each session has its own todo state
+  window.__planTodos  = null;
+  _planExpandedIdx    = -1;
+
+  saveStateMeta();
+
+  // Clear the chat view and repopulate
+  _renderChatForSession(id);
+
+  if (!skipRender) render();
+}
+
+function _renderChatForSession(id) {
+  const conv   = document.querySelector('.chat-conversation');
+  const scroll = document.getElementById('chat-scroll');
+  if (!conv || !scroll) return;
+
+  // Refresh aperçu panel if it's currently open (new session may have different code)
+  if (document.body.classList.contains('right-panel-open') && currentRightPanel === 'apercu') {
+    requestAnimationFrame(() => setRightPanelTab('apercu'));
+  }
+
+  const msgs = window.__chatHistory;
+  const isEmpty = !msgs || msgs.length === 0;
+
+  if (isEmpty) {
+    // Show empty state
+    const emptyHTML = scroll.querySelector('.chat-empty')?.outerHTML || '';
+    conv.innerHTML = emptyHTML ? '' : '';
+    // Re-inject empty state if it was removed
+    if (!scroll.querySelector('.chat-empty')) {
+      const emptyDiv = document.createElement('div');
+      emptyDiv.className = 'chat-empty flex-1 flex flex-col items-center justify-center gap-3 select-none';
+      emptyDiv.innerHTML = `
+        <p class="font-serif text-[22px] text-ink-800">${document.querySelector('.chat-empty .font-serif')?.textContent || 'How can I help you today?'}</p>
+        <p class="mt-2 text-ink-500 text-sm">${document.querySelector('.chat-empty .mt-2')?.innerHTML || 'Type <span class="kbd">/</span> for commands'}</p>
+      `;
+      scroll.insertBefore(emptyDiv, conv);
+    }
+    conv.innerHTML = '';
+  } else {
+    // Remove empty state
+    scroll.querySelector('.chat-empty')?.remove();
+    // Render all stored messages
+    conv.innerHTML = '';
+    const _md = window.mdToHtml || (s => `<pre>${escapeHTML(s)}</pre>`);
+    msgs.forEach(m => {
+      if (m.role === 'user') {
+        const div = document.createElement('div');
+        div.className = 'msg msg--user';
+        div.innerHTML = `<div class="msg__body"><p>${escapeHTML(m.content)}</p></div>`;
+        conv.appendChild(div);
+      } else if (m.role === 'assistant') {
+        const div = document.createElement('div');
+        div.className = 'msg msg--assistant';
+        div.innerHTML = `<div class="msg__avatar"></div><div class="msg__body">${_md(m.content)}</div>`;
+        conv.appendChild(div);
+
+        // Restore Plan panel from any ```plan block in this message
+        const planTodos = typeof parsePlanBlock === 'function' ? parsePlanBlock(m.content) : null;
+        if (planTodos?.length) {
+          window.__planTodos = planTodos;
+        }
+      }
+    });
+    // Re-render icons for code blocks in restored messages
+    requestAnimationFrame(() => {
+      window.renderIcons?.();
+      scroll.scrollTop = scroll.scrollHeight;
+    });
+  }
+}
 
 // ---------- Renderers ----------
 const projectsEl = document.getElementById('projects-list');
@@ -270,7 +524,7 @@ function sessionRow(session, { showTime = true, accent = null } = {}) {
   row.addEventListener('click', (e) => {
     if (e.target.closest('[data-act]')) return;
     if (row.querySelector('input.session__edit')) return;
-    state.activeId = session.id;
+    switchToSession(session.id);
     document.querySelectorAll('.session.is-active').forEach(el => el.classList.remove('is-active'));
     row.classList.add('is-active');
     document.querySelectorAll('.project.has-active').forEach(p => p.classList.remove('has-active'));
@@ -377,6 +631,7 @@ function render() {
   renderIcons();
   installDropzones();
   applySearch();
+  saveStateMeta();   // persist project open/close state + activeId
   window.dispatchEvent(new CustomEvent('ccmod:render'));
 }
 
@@ -417,6 +672,7 @@ function moveSessionToBucket(sessionId, bucket) {
 }
 
 function togglePin(id) {
+  togglePinSession(id);   // persist + rebuild state.pinned/recent
   const found = findSession(id);
   if (!found) return;
   if (found.source === 'pinned') {
@@ -431,12 +687,7 @@ function togglePin(id) {
   render();
 }
 
-function deleteSession(id) {
-  const found = findSession(id);
-  if (!found) return;
-  found.list.splice(found.index, 1);
-  render();
-}
+// deleteSession is defined once at the top of the session layer above.
 
 function renameSession(id) {
   const row = document.querySelector(`.session[data-session-id="${id}"]`);
@@ -447,6 +698,7 @@ function renameSession(id) {
     const next = prompt('Rename session', found.list[found.index].title);
     if (next != null && next.trim()) {
       found.list[found.index].title = next.trim();
+      updateSessionTitle(id, next.trim());
       render();
     }
   }
@@ -470,6 +722,7 @@ function startInlineRename(row, session) {
     const next = input.value.trim();
     if (save && next && next !== current) {
       session.title = next;
+      updateSessionTitle(session.id, next);
     }
     render();
   };
@@ -603,8 +856,8 @@ function showProjectMenu(e, project) {
     if (btn.dataset.act === 'rename') renameProject(project);
     if (btn.dataset.act === 'delete') deleteProject(project);
     if (btn.dataset.act === 'new-session') {
-      project.sessions.unshift({ id: 'n' + Math.random().toString(36).slice(2, 6), title: 'New session', time: 'now' });
-      project.open = true;
+      const s = createNewSession({ projectId: project.id, title: 'New session' });
+      switchToSession(s.id);
       render();
     }
     hideCtx();
@@ -656,10 +909,25 @@ document.getElementById('new-project-name')?.addEventListener('keydown', e => {
 
 // File-tree toggle (delegated, for renderFilesPanel nodes)
 document.getElementById('right-panel-body')?.addEventListener('click', e => {
+  // File-tree expand/collapse
   const toggle = e.target.closest('[data-ft-toggle]');
-  if (!toggle) return;
-  const id = toggle.dataset.ftToggle;
-  document.querySelector(`.ft-node[data-ft-id="${id}"]`)?.classList.toggle('is-open');
+  if (toggle) {
+    const id = toggle.dataset.ftToggle;
+    document.querySelector(`.ft-node[data-ft-id="${id}"]`)?.classList.toggle('is-open');
+    return;
+  }
+  // Aperçu toolbar — Reload
+  if (e.target.closest('#apercu-reload')) {
+    const iframe = document.getElementById('apercu-iframe');
+    if (iframe) { const src = iframe.srcdoc; iframe.srcdoc = ''; requestAnimationFrame(() => { iframe.srcdoc = src; }); }
+    return;
+  }
+  // Aperçu toolbar — Fullscreen modal
+  if (e.target.closest('#apercu-fullscreen')) {
+    const block = getLastRenderableCodeBlock();
+    if (block) openCodePreview(block.lang, block.code);
+    return;
+  }
 });
 
 // Sidebar collapse toggle (icon-only mode)
@@ -716,6 +984,15 @@ document.addEventListener('mouseup', () => {
   document.body.classList.remove('is-resizing-sidebar');
   const w = parseInt(sidebarEl.style.width, 10);
   if (w) localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
+});
+
+// ── New session button (top of sidebar quick-actions) ────────────────────────
+document.querySelector('.nav-item--primary')?.addEventListener('click', () => {
+  const s = createNewSession({ title: 'New session' });
+  switchToSession(s.id);
+  render();
+  // Focus composer
+  setTimeout(() => document.getElementById('composer-input')?.focus(), 80);
 });
 
 // Collapsible nav group (quick actions)
@@ -1007,8 +1284,18 @@ userBtn?.addEventListener('click', (e) => {
 });
 
 function showUserMenu(anchor) {
+  // Build subscription badge for the header
+  let subBadge = '';
+  if (window.electronAPI?.isElectron) {
+    try {
+      // Sync read from the account-email element (already updated at startup)
+      const emailEl = document.getElementById('account-email');
+      if (emailEl) subBadge = `<div class="user-menu__tier">${escapeHTML(emailEl.textContent)}</div>`;
+    } catch (e) { /* ignore */ }
+  }
   ctx.innerHTML = `
     <div class="user-menu__email">${escapeHTML(userState.email)}</div>
+    ${subBadge}
     <button data-user="settings">${iconSVG('gear-six')}<span>${t('settings')}</span><span class="ctx-shortcut">Ctrl +,</span></button>
     <button data-user="language" class="has-sub">${iconSVG('eye')}<span>${t('language')}</span><span class="sub-caret">${iconSVG('caret-right')}</span></button>
     <button data-user="help">${iconSVG('chat-circle')}<span>${t('get_help')}</span></button>
@@ -1045,6 +1332,14 @@ function showUserMenu(anchor) {
     if (btn.classList.contains('has-sub')) return;
     const act = btn.dataset.user;
     if (act === 'settings') { hideSub(); hideCtx(); openProfileModal('profile'); return; }
+    if (act === 'logout' && window.electronAPI?.signOut) {
+      hideSub(); hideCtx();
+      window.electronAPI.signOut().then(() => {
+        updateAccountBadge({ mode: 'none', valid: false });
+        setTimeout(() => showAuthModal(), 300);
+      });
+      return;
+    }
     console.log('[stub] user action:', act);
     hideSub();
     hideCtx();
@@ -1242,6 +1537,11 @@ function showSettingsTree(anchor) {
       ${node('mic',       'microphone',          t('microphone'),  (currentDevice?.label || '').split(' - ')[0],   micChildren)}
       ${node('attach',    'plus',                t('insert'),      null,                                           attachChildren)}
       ${node('lang',      'eye',                 t('language'),    currentLang?.label || '',                       langChildren)}
+      <button class="tree-action kb-open-btn" data-do="kb-open" style="margin:4px 0 0;width:100%;justify-content:flex-start;gap:8px;padding:8px 10px;border-radius:8px">
+        ${iconSVG('list-checks')}
+        <span style="flex:1;text-align:left;font-size:13px">Knowledge Base</span>
+        <span style="font-size:11px;color:#5a5a63">CLAUDE.md · skills · memory</span>
+      </button>
       <div class="tree-toggle-row" data-toggle="cmd-hint" title="${t('show_cmd_hint')}">
         ${iconSVG('eye')}
         <span class="tree-toggle-row__label">${t('show_cmd_hint')}</span>
@@ -1322,6 +1622,1095 @@ function handleSettingsAction(group, id) {
     applyLanguage();
     render();                                               // rebuild sidebar strings pulled from mock data are english-agnostic, but sections header updates
   }
+  if (group === 'kb' && id === 'open') {
+    showKnowledgeBaseEditor();
+  }
+}
+
+// ── Agents store (localStorage) — module-level so any code can call loadAgents() ──
+const AGENTS_KEY = 'ccmod.agents';
+function loadAgents() {
+  try { return JSON.parse(localStorage.getItem(AGENTS_KEY) || '[]'); } catch { return []; }
+}
+function saveAgents(list) { localStorage.setItem(AGENTS_KEY, JSON.stringify(list)); }
+
+// ── Console (full settings dashboard) ────────────────────────────────────────
+function showConsole(initialPage = 'overview') {
+  if (document.getElementById('console-overlay')) return;
+
+  /* ── Nav items ────────────────────────────────────────────── */
+  const NAV = [
+    { id: 'overview',    icon: 'lightning',        label: 'Overview'      },
+    { id: 'knowledge',   icon: 'list-checks',      label: 'Knowledge Base'},
+    { id: 'agents',      icon: 'gear-six',         label: 'AI Agents'     },
+    { id: 'models',      icon: 'circle-wavy-check',label: 'Models'        },
+    { id: 'appearance',  icon: 'eye',              label: 'Appearance'    },
+    { id: 'sessions',    icon: 'folders',          label: 'Sessions'      },
+    { id: 'permissions', icon: 'sliders-horizontal',label: 'Permissions'  },
+    { id: 'about',       icon: 'circle',           label: 'About'         },
+  ];
+
+  /* ── Shell ────────────────────────────────────────────────── */
+  const overlay = document.createElement('div');
+  overlay.id = 'console-overlay';
+  overlay.className = 'console-overlay';
+  overlay.innerHTML = `
+    <div class="console-layout">
+      <aside class="console-nav">
+        <div class="console-nav__brand">
+          <span class="console-nav__logo">${iconSVG('monitor')}</span>
+          <span class="console-nav__name">Console</span>
+        </div>
+        <nav class="console-nav__links" id="console-nav">
+          ${NAV.map(n => `
+            <button class="console-nav__item${n.id === initialPage ? ' is-active' : ''}" data-page="${n.id}">
+              ${iconSVG(n.icon)}
+              <span>${n.label}</span>
+            </button>`).join('')}
+        </nav>
+        <div class="console-nav__foot">
+          <div class="console-nav__user">
+            <span class="console-nav__avatar" id="cons-avatar">HL</span>
+            <div class="console-nav__user-info">
+              <span id="cons-name" style="font-size:12px;font-weight:600;color:#e7e7ea">User</span>
+              <span id="cons-email" style="font-size:11px;color:#5a5a63">Not connected</span>
+            </div>
+          </div>
+          <button class="console-nav__close" id="console-close" title="Close (Esc)">${iconSVG('x')}</button>
+        </div>
+      </aside>
+      <main class="console-main" id="console-main"></main>
+    </div>`;
+  document.body.appendChild(overlay);
+  if (window.renderIcons) window.renderIcons(overlay);
+
+  // Populate user info
+  const avatarEl = overlay.querySelector('#cons-avatar');
+  const nameEl   = overlay.querySelector('#cons-name');
+  const emailEl  = overlay.querySelector('#cons-email');
+  const srcAvatar = document.getElementById('account-avatar');
+  const srcName   = document.getElementById('account-name');
+  const srcEmail  = document.getElementById('account-email');
+  if (srcAvatar) avatarEl.textContent = srcAvatar.textContent;
+  if (srcName)   nameEl.textContent   = srcName.textContent;
+  if (srcEmail)  emailEl.textContent  = srcEmail.textContent;
+
+  /* ── Page renderers ───────────────────────────────────────── */
+  function pageOverview() {
+    const sessions = loadSessionList?.() || [];
+    const agents   = loadAgents?.() || [];
+    const model    = modelState?.currentModel || 'claude-sonnet-4-6';
+    const effort   = modelState?.currentEffort || 'normal';
+    return `
+      <div class="console-page">
+
+        <!-- ── Hero card ───────────────────────────────────────── -->
+        <div class="ov-hero">
+          <!-- Glow orbs -->
+          <div class="ov-hero__orb ov-hero__orb--1"></div>
+          <div class="ov-hero__orb ov-hero__orb--2"></div>
+
+          <div class="ov-hero__inner">
+            <!-- Top badges row -->
+            <div class="ov-hero__badges">
+              <span class="ov-badge ov-badge--accent">
+                <span class="ov-badge__dot"></span>Fan-made · v0.1 · Concept
+              </span>
+              <code class="ov-badge ov-badge--code">$ claude --dangerously-skip-permissions</code>
+            </div>
+
+            <!-- Logo + title -->
+            <div class="ov-hero__title-row">
+              <div class="ov-logo">
+                <svg viewBox="0 0 24 24" fill="none" width="36" height="36">
+                  <path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" fill="#d97757"/>
+                </svg>
+              </div>
+              <h1 class="ov-hero__h1">Claude Code <span class="ov-hero__accent">Mods</span></h1>
+            </div>
+
+            <!-- Tagline stats row -->
+            <div class="ov-hero__tagline-row">
+              <span class="ov-stat">${sessions.length} session${sessions.length !== 1 ? 's' : ''} built</span>
+              <span class="ov-stat__sep">·</span>
+              <span class="ov-stat">${agents.length} agent${agents.length !== 1 ? 's' : ''}</span>
+              <span class="ov-stat__sep">·</span>
+              <span class="ov-stat">Live Anthropic API</span>
+            </div>
+
+            <!-- Description -->
+            <p class="ov-hero__desc">
+              A community sketch exploring what the Claude Code desktop sidebar
+              <em>could</em> feel like — tree-style projects, per-color accents, and a calmer settings surface.
+            </p>
+
+            <!-- Feature chips -->
+            <div class="ov-chips">
+              <span class="ov-chip ov-chip--orange">Projects &amp; sessions</span>
+              <span class="ov-chip ov-chip--blue">Per-project color cascade</span>
+              <span class="ov-chip ov-chip--green">Consolidated settings tree</span>
+              <span class="ov-chip ov-chip--purple">Light + dark themes</span>
+              <span class="ov-chip ov-chip--yellow">i18n (EN/FR)</span>
+            </div>
+
+            <!-- CTA row -->
+            <div class="ov-hero__cta">
+              <button class="ov-btn ov-btn--filled" data-quick="new-session">
+                ${iconSVG('plus')}<span>New session</span>
+              </button>
+              <button class="ov-btn ov-btn--ghost" data-quick="open-kb">
+                <span>Knowledge Base →</span>
+              </button>
+              <span class="ov-hero__hint">New session · ${escapeHTML(model.replace('claude-','').replace(/-\d+$/,''))}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Stats cards ──────────────────────────────────────── -->
+        <div class="console-cards" style="margin-top:20px">
+          <div class="console-card">
+            <div class="console-card__val">${sessions.length}</div>
+            <div class="console-card__label">Sessions</div>
+          </div>
+          <div class="console-card">
+            <div class="console-card__val">${agents.length}</div>
+            <div class="console-card__label">Agents</div>
+          </div>
+          <div class="console-card">
+            <div class="console-card__val" style="font-size:13px">${escapeHTML(model.replace('claude-',''))}</div>
+            <div class="console-card__label">Active model</div>
+          </div>
+          <div class="console-card">
+            <div class="console-card__val" style="color:#7ab389">●</div>
+            <div class="console-card__label">CLI connected</div>
+          </div>
+        </div>
+
+        <!-- ── Skills ───────────────────────────────────────────── -->
+        <div class="console-section-title" style="margin-top:24px">CLAUDE.md skills active</div>
+        <div class="console-skill-chips">
+          <span class="console-chip">app-context.md</span>
+          <span class="console-chip">jsx-code-blocks.md</span>
+          <span class="console-chip">design-system.md</span>
+          <span class="console-chip console-chip--dim">cwd → app root</span>
+        </div>
+      </div>`;
+  }
+
+  function pageKnowledge() {
+    return `
+      <div class="console-page console-page--kb">
+        <div class="console-page__head" style="padding-bottom:0">
+          <h1 class="console-page__title">Knowledge Base</h1>
+          <p class="console-page__sub" style="margin-bottom:12px">
+            Internal config editor — <strong>drafts stay in-app</strong>; publish to push to disk (what the CLI reads).
+          </p>
+        </div>
+
+        <div class="console-kb-layout">
+          <!-- File list sidebar -->
+          <div class="console-kb-sidebar" id="cons-kb-list">
+            <div class="cons-kb-sidebar-head">Files</div>
+            <div style="padding:8px;color:#5a5a63;font-size:12px">Loading…</div>
+          </div>
+
+          <!-- Editor panel -->
+          <div class="console-kb-editor">
+
+            <!-- Top bar: path + view-mode + actions -->
+            <div class="console-kb-editor__bar">
+              <span class="console-kb-path" id="cons-kb-path" title="">Select a file</span>
+
+              <!-- View-mode toggle -->
+              <div class="kb-view-toggle" id="kb-view-toggle">
+                <button class="kb-view-btn is-active" data-view="edit"  title="Edit">Edit</button>
+                <button class="kb-view-btn"            data-view="split" title="Split">Split</button>
+                <button class="kb-view-btn"            data-view="preview" title="Preview">Preview</button>
+              </div>
+
+              <!-- Save state badge + action buttons -->
+              <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
+                <span class="kb-state-badge kb-state-badge--clean" id="cons-kb-badge" style="display:none"></span>
+                <button class="console-btn console-btn--sm" id="cons-kb-revert" disabled title="Discard unsaved edits and reload">Revert</button>
+                <button class="console-btn console-btn--sm" id="cons-kb-draft"  disabled title="Save draft (in-app only, not written to disk — Ctrl+S)">Save draft</button>
+                <button class="console-btn console-btn--sm console-btn--publish" id="cons-kb-publish" disabled title="Write to disk — CLI picks this up on next session">Publish →</button>
+              </div>
+            </div>
+
+            <!-- Markdown toolbar -->
+            <div class="kb-toolbar" id="kb-toolbar">
+              <button class="kb-tb-btn" data-insert="# "     title="Heading 1">H1</button>
+              <button class="kb-tb-btn" data-insert="## "    title="Heading 2">H2</button>
+              <button class="kb-tb-btn" data-insert="### "   title="Heading 3">H3</button>
+              <span class="kb-tb-sep"></span>
+              <button class="kb-tb-btn" data-wrap="**"       title="Bold">B</button>
+              <button class="kb-tb-btn" data-wrap="*"        title="Italic" style="font-style:italic">I</button>
+              <button class="kb-tb-btn" data-wrap="BACKTICK"  title="Inline code" style="font-family:monospace">&#96;c&#96;</button>
+              <span class="kb-tb-sep"></span>
+              <button class="kb-tb-btn" data-insert="CODEBLOCK" title="Code block">&#96;&#96;&#96;</button>
+              <button class="kb-tb-btn" data-insert="\n---\n" title="Divider">—</button>
+              <button class="kb-tb-btn" data-insert="@skills/" title="Import skill">@</button>
+            </div>
+
+            <!-- Edit + Preview panes -->
+            <div class="kb-panes" id="kb-panes" data-view="edit">
+              <div class="kb-pane kb-pane--edit">
+                <textarea class="console-kb-textarea" id="cons-kb-ta"
+                  placeholder="Select a file from the left to start editing…"
+                  spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+              </div>
+              <div class="kb-pane kb-pane--preview" id="kb-preview">
+                <div class="kb-preview-body" id="kb-preview-body">
+                  <p style="color:#3b3b42;font-size:13px">Nothing to preview yet.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Status bar -->
+            <div class="console-kb-status" id="cons-kb-status"></div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function pageAgents() {
+    const agents = loadAgents();
+    const agentTypes = [
+      { id: 'claude_code_mod', label: 'Claude Code Mods (this app)' },
+      { id: 'claude_code',     label: 'claude_code' },
+      { id: 'claude_desktop',  label: 'claude_desktop' },
+      { id: 'api',             label: 'api' },
+      { id: 'webhook',         label: 'webhook' },
+    ];
+    const agentModels = [
+      { id: '',                          label: 'Default (from settings)' },
+      { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6' },
+      { id: 'claude-sonnet-4-5',         label: 'Claude Sonnet 4.5' },
+      { id: 'claude-opus-4-5',           label: 'Claude Opus 4.5' },
+      { id: 'claude-opus-4',             label: 'Claude Opus 4' },
+      { id: 'claude-haiku-4-5',          label: 'Claude Haiku 4.5' },
+      { id: 'claude-haiku-3-5',          label: 'Claude Haiku 3.5' },
+      { id: 'claude-haiku-3-5-20241022', label: 'Claude Haiku 3.5 (10/2024)' },
+    ];
+    return `
+      <div class="console-page">
+        <div class="console-page__head">
+          <h1 class="console-page__title">AI Agents</h1>
+          <p class="console-page__sub">Agents are saved to <code>agents.json</code> and <code>skills/agents.md</code> — Claude picks them up as sub-agents. Invoke with <code>@agentname</code> or "use sub agent X".</p>
+        </div>
+        <div id="agents-list">
+          ${agents.length === 0 ? `
+            <div class="console-empty">
+              ${iconSVG('gear-six')}
+              <p>No agents configured yet.</p>
+            </div>` :
+          agents.map((a, i) => `
+            <div class="agent-card" data-agent-idx="${i}">
+              <div class="agent-card__head">
+                <span class="agent-card__dot" style="background:${a.color||'#7ab389'}"></span>
+                <strong class="agent-card__name">${escapeHTML(a.name)}</strong>
+                <span class="agent-card__type">${escapeHTML(a.type)}</span>
+                <div style="flex:1"></div>
+                <button class="agent-card__edit" data-agent-edit="${i}">${iconSVG('pencil-simple')}</button>
+                <button class="agent-card__del" data-agent-del="${i}">${iconSVG('trash')}</button>
+              </div>
+              <div class="agent-card__body">
+                ${a.model    ? `<div class="agent-card__row"><span class="agent-card__key">Model</span><span class="agent-card__val">${escapeHTML(a.model)}</span></div>` : ''}
+                ${a.system   ? `<div class="agent-card__row"><span class="agent-card__key">System</span><span class="agent-card__val" style="font-style:italic;opacity:.7">${escapeHTML(a.system.slice(0,80))}${a.system.length>80?'…':''}</span></div>` : ''}
+                ${a.endpoint ? `<div class="agent-card__row"><span class="agent-card__key">Endpoint</span><span class="agent-card__val">${escapeHTML(a.endpoint)}</span></div>` : ''}
+                ${a.notes    ? `<div class="agent-card__row"><span class="agent-card__key">Notes</span><span class="agent-card__val">${escapeHTML(a.notes)}</span></div>` : ''}
+              </div>
+            </div>`).join('')}
+        </div>
+        <button class="console-btn console-btn--primary" id="agent-add-btn" style="margin-top:20px">
+          ${iconSVG('plus')}<span>Add agent</span>
+        </button>
+
+        <!-- Inline agent form (hidden) -->
+        <div class="agent-form" id="agent-form" style="display:none">
+          <div class="console-section-title" id="agent-form-title">New agent</div>
+          <input type="hidden" id="af-idx" value="-1">
+          <div class="agent-form__grid">
+
+            <label class="agent-form__label">Name
+              <input class="agent-form__input" id="af-name" placeholder="e.g. researcher">
+            </label>
+            <label class="agent-form__label">Type
+              <select class="agent-form__input" id="af-type">
+                ${agentTypes.map(t => `<option value="${t.id}">${t.label}</option>`).join('')}
+              </select>
+            </label>
+
+            <label class="agent-form__label">Model
+              <select class="agent-form__input" id="af-model">
+                ${agentModels.map(m => `<option value="${m.id}">${m.label}</option>`).join('')}
+              </select>
+            </label>
+            <label class="agent-form__label">Color
+              <input class="agent-form__input agent-form__input--color" id="af-color" type="color" value="#7ab389">
+            </label>
+
+            <label class="agent-form__label af-external-field" id="af-endpoint-wrap">Endpoint / Gateway URL
+              <input class="agent-form__input" id="af-endpoint" placeholder="https://...supabase.co/functions/v1/gateway">
+            </label>
+            <label class="agent-form__label af-external-field" id="af-apikey-wrap">API Key
+              <input class="agent-form__input" id="af-apikey" type="password" placeholder="agk_...">
+            </label>
+
+            <label class="agent-form__label" style="grid-column:1/-1">System prompt
+              <textarea class="agent-form__input agent-form__textarea" id="af-system"
+                placeholder="You are a specialized research agent. Focus on accuracy and cite sources…"
+                rows="3" spellcheck="true"></textarea>
+            </label>
+            <label class="agent-form__label" style="grid-column:1/-1">Notes
+              <input class="agent-form__input" id="af-notes" placeholder="Optional description shown in card">
+            </label>
+
+          </div>
+          <div style="display:flex;gap:8px;margin-top:14px;align-items:center">
+            <button class="console-btn console-btn--primary" id="af-save">Save agent</button>
+            <button class="console-btn" id="af-cancel">Cancel</button>
+            <span class="af-save-status" id="af-save-status" style="font-size:11.5px;color:#7ab389;margin-left:8px;opacity:0;transition:opacity .4s"></span>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function pageModels() {
+    const models  = modelState?.models  || [];
+    const efforts = modelState?.efforts || [];
+    return `
+      <div class="console-page">
+        <div class="console-page__head">
+          <h1 class="console-page__title">Models</h1>
+          <p class="console-page__sub">Choose the model and effort level for your sessions.</p>
+        </div>
+        <div class="console-section-title">Model</div>
+        <div class="console-radio-group" id="cons-model-group">
+          ${models.map(m => `
+            <button class="console-radio${m.id === modelState?.currentModel ? ' is-selected' : ''}" data-model-pick="${m.id}">
+              <span class="console-radio__dot"></span>
+              <div>
+                <div class="console-radio__label">${escapeHTML(m.label)}</div>
+                <div class="console-radio__hint">${m.shortcut || ''}</div>
+              </div>
+            </button>`).join('')}
+        </div>
+        <div class="console-section-title" style="margin-top:28px">Effort level</div>
+        <div class="console-radio-group" id="cons-effort-group">
+          ${efforts.map(ef => `
+            <button class="console-radio${ef.id === modelState?.currentEffort ? ' is-selected' : ''}" data-effort-pick="${ef.id}">
+              <span class="console-radio__dot"></span>
+              <div>
+                <div class="console-radio__label">${escapeHTML(ef.label || ef.id)}</div>
+              </div>
+            </button>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  function pageAppearance() {
+    const langs = userState?.languages || [];
+    const curLang = userState?.language || 'en';
+    const isDark  = document.documentElement.getAttribute('data-theme') !== 'light';
+    return `
+      <div class="console-page">
+        <div class="console-page__head">
+          <h1 class="console-page__title">Appearance</h1>
+          <p class="console-page__sub">Theme, language, and display preferences.</p>
+        </div>
+        <div class="console-section-title">Theme</div>
+        <div class="console-theme-row">
+          <button class="console-theme-btn${isDark ? ' is-active' : ''}" data-theme-set="dark">
+            <div class="console-theme-preview console-theme-preview--dark">
+              <div class="ctp__bar"></div><div class="ctp__lines"><div></div><div></div></div>
+            </div>
+            <span>Dark</span>
+          </button>
+          <button class="console-theme-btn${!isDark ? ' is-active' : ''}" data-theme-set="light">
+            <div class="console-theme-preview console-theme-preview--light">
+              <div class="ctp__bar"></div><div class="ctp__lines"><div></div><div></div></div>
+            </div>
+            <span>Light</span>
+          </button>
+        </div>
+        <div class="console-section-title" style="margin-top:28px">Language</div>
+        <div class="console-radio-group">
+          ${langs.map(l => `
+            <button class="console-radio${l.id === curLang ? ' is-selected' : ''}" data-lang-pick="${l.id}">
+              <span class="console-radio__dot"></span>
+              <div class="console-radio__label">${escapeHTML(l.label)}</div>
+            </button>`).join('')}
+        </div>
+        <div class="console-section-title" style="margin-top:28px">Display</div>
+        <div class="console-toggle-row" id="cons-hint-toggle">
+          <div>
+            <div class="console-toggle-label">Show command hints</div>
+            <div class="console-toggle-sub">Displays keyboard shortcut hints in the composer</div>
+          </div>
+          <span class="toggle${hintsState?.showCommandHint ? ' is-on' : ''}" role="switch" aria-checked="${hintsState?.showCommandHint}">
+            <span class="toggle__knob"></span>
+          </span>
+        </div>
+      </div>`;
+  }
+
+  function pageSessions() {
+    const list = loadSessionList?.() || [];
+    return `
+      <div class="console-page">
+        <div class="console-page__head">
+          <h1 class="console-page__title">Sessions</h1>
+          <p class="console-page__sub">${list.length} session${list.length !== 1 ? 's' : ''} stored locally.</p>
+        </div>
+        <div class="console-session-list">
+          ${list.length === 0 ? '<div class="console-empty">' + iconSVG('folders') + '<p>No sessions yet.</p></div>' :
+          list.map(s => `
+            <div class="console-session-row">
+              <div class="console-session-dot" style="background:${s.color||'#5a5a63'}"></div>
+              <div class="console-session-info">
+                <div class="console-session-title">${escapeHTML(s.title || 'Untitled')}</div>
+                <div class="console-session-meta">${new Date(s.ts||0).toLocaleDateString()} · ${(s.cliSessionId ? 'CLI session active' : 'no CLI session')}</div>
+              </div>
+              <button class="console-btn console-btn--sm" data-sess-open="${s.id}">Open</button>
+            </div>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  function pagePermissions() {
+    const modes = permState?.modes || [];
+    return `
+      <div class="console-page">
+        <div class="console-page__head">
+          <h1 class="console-page__title">Permissions</h1>
+          <p class="console-page__sub">Control what Claude can do during sessions.</p>
+        </div>
+        <div class="console-perm-list">
+          ${modes.map(m => `
+            <button class="console-perm-card${m.id === permState?.current ? ' is-active' : ''}" data-perm-pick="${m.id}">
+              <div class="console-perm-card__head">
+                ${m.id === permState?.current ? iconSVG('check-circle') : iconSVG('circle')}
+                <span class="console-perm-card__name">${escapeHTML(m.label || m.id)}</span>
+              </div>
+              <p class="console-perm-card__desc">${escapeHTML(m.description || m.desc || '')}</p>
+            </button>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  function pageAbout() {
+    return `
+      <div class="console-page">
+        <div class="console-page__head">
+          <h1 class="console-page__title">About</h1>
+        </div>
+        <div class="console-about">
+          <div class="console-about__logo">${iconSVG('claude-logo')}</div>
+          <h2 class="console-about__app">Claude Code Mod</h2>
+          <p class="console-about__tagline">Fan-made desktop UI · Electron 35 + Vite 5</p>
+          <div class="console-about__grid">
+            <div class="console-about__row"><span>Renderer</span><code>Electron 35 / Chromium</code></div>
+            <div class="console-about__row"><span>Backend</span><code>claude CLI (stream-json)</code></div>
+            <div class="console-about__row"><span>Skills</span><code>CLAUDE.md + skills/</code></div>
+            <div class="console-about__row"><span>Shortcut</span><code>Ctrl + \`</code></div>
+          </div>
+          <p class="console-about__credit">Built with ♥ — not affiliated with Anthropic</p>
+        </div>
+      </div>`;
+  }
+
+  const PAGES = { overview: pageOverview, knowledge: pageKnowledge, agents: pageAgents,
+    models: pageModels, appearance: pageAppearance, sessions: pageSessions,
+    permissions: pagePermissions, about: pageAbout };
+
+  /* ── Routing ──────────────────────────────────────────────── */
+  let currentPage = initialPage;
+  const mainEl = overlay.querySelector('#console-main');
+
+  function navigate(pageId) {
+    if (!PAGES[pageId]) return;
+    currentPage = pageId;
+    overlay.querySelectorAll('.console-nav__item').forEach(b =>
+      b.classList.toggle('is-active', b.dataset.page === pageId));
+    mainEl.innerHTML = PAGES[pageId]();
+    if (window.renderIcons) window.renderIcons(mainEl);
+    wirePageEvents(pageId);
+  }
+
+  function wirePageEvents(pageId) {
+    /* Overview quick actions */
+    mainEl.querySelectorAll('[data-quick]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const q = btn.dataset.quick;
+        if (q === 'new-session')  { closeConsole(); document.querySelector('[data-do="new-session"]')?.click(); }
+        if (q === 'open-kb')      navigate('knowledge');
+        if (q === 'open-agents')  navigate('agents');
+      });
+    });
+
+    /* Knowledge Base */
+    if (pageId === 'knowledge') wireKBPage();
+
+    /* Agents */
+    if (pageId === 'agents') wireAgentsPage();
+
+    /* Models */
+    mainEl.querySelectorAll('[data-model-pick]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        modelState.currentModel = btn.dataset.modelPick;
+        if (typeof syncModelChip === 'function') syncModelChip();
+        mainEl.querySelectorAll('[data-model-pick]').forEach(b =>
+          b.classList.toggle('is-selected', b.dataset.modelPick === modelState.currentModel));
+      });
+    });
+    mainEl.querySelectorAll('[data-effort-pick]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        modelState.currentEffort = btn.dataset.effortPick;
+        if (typeof syncModelChip === 'function') syncModelChip();
+        mainEl.querySelectorAll('[data-effort-pick]').forEach(b =>
+          b.classList.toggle('is-selected', b.dataset.effortPick === modelState.currentEffort));
+      });
+    });
+
+    /* Appearance */
+    mainEl.querySelectorAll('[data-theme-set]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const t = btn.dataset.themeSet;
+        document.documentElement.setAttribute('data-theme', t);
+        localStorage.setItem('ccmod.theme', t);
+        mainEl.querySelectorAll('[data-theme-set]').forEach(b =>
+          b.classList.toggle('is-active', b.dataset.themeSet === t));
+      });
+    });
+    mainEl.querySelectorAll('[data-lang-pick]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (userState) userState.language = btn.dataset.langPick;
+        if (typeof applyLanguage === 'function') applyLanguage();
+        mainEl.querySelectorAll('[data-lang-pick]').forEach(b =>
+          b.classList.toggle('is-selected', b.dataset.langPick === (userState?.language)));
+      });
+    });
+    const hintRow = mainEl.querySelector('#cons-hint-toggle');
+    if (hintRow) {
+      hintRow.addEventListener('click', () => {
+        if (!hintsState) return;
+        hintsState.showCommandHint = !hintsState.showCommandHint;
+        localStorage.setItem('ccmod.hints.cmd', hintsState.showCommandHint ? '1' : '0');
+        if (typeof applyHintsVisibility === 'function') applyHintsVisibility();
+        const sw = hintRow.querySelector('.toggle');
+        sw?.classList.toggle('is-on', hintsState.showCommandHint);
+        sw?.setAttribute('aria-checked', String(hintsState.showCommandHint));
+      });
+    }
+
+    /* Sessions */
+    mainEl.querySelectorAll('[data-sess-open]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.sessOpen;
+        closeConsole();
+        if (typeof switchSession === 'function') switchSession(id);
+      });
+    });
+
+    /* Permissions */
+    mainEl.querySelectorAll('[data-perm-pick]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (permState) permState.current = btn.dataset.permPick;
+        mainEl.querySelectorAll('[data-perm-pick]').forEach(b =>
+          b.classList.toggle('is-active', b.dataset.permPick === permState?.current));
+        const pl = document.getElementById('perm-label');
+        if (pl) pl.textContent = permState?.modes?.find(m => m.id === permState.current)?.label || '';
+      });
+    });
+  }
+
+  /* ── Knowledge Base wiring ────────────────────────────────── */
+  function wireKBPage() {
+    const kb = window.electronAPI?.kb;
+
+    // DOM refs
+    const listEl     = mainEl.querySelector('#cons-kb-list');
+    const ta         = mainEl.querySelector('#cons-kb-ta');
+    const pathEl     = mainEl.querySelector('#cons-kb-path');
+    const badge      = mainEl.querySelector('#cons-kb-badge');
+    const revertBtn  = mainEl.querySelector('#cons-kb-revert');
+    const draftBtn   = mainEl.querySelector('#cons-kb-draft');
+    const publishBtn = mainEl.querySelector('#cons-kb-publish');
+    const statEl     = mainEl.querySelector('#cons-kb-status');
+    const panesEl    = mainEl.querySelector('#kb-panes');
+    const previewEl  = mainEl.querySelector('#kb-preview-body');
+    const toolbar    = mainEl.querySelector('#kb-toolbar');
+
+    // Draft storage helpers
+    const DRAFT_PREFIX = 'ccmod.kb.draft.';
+    const getDraft  = id => localStorage.getItem(DRAFT_PREFIX + id);
+    const setDraft  = (id, v) => localStorage.setItem(DRAFT_PREFIX + id, v);
+    const clearDraft= id => localStorage.removeItem(DRAFT_PREFIX + id);
+
+    // State
+    let activeId    = null;   // currently open file id
+    let diskContent = '';     // what's actually on disk (from last read/publish)
+    let draftContent= null;   // saved draft (localStorage), null = no draft
+
+    // ── Status bar ──────────────────────────────────────────
+    function setStatus(msg, isErr = false) {
+      statEl.textContent = msg;
+      statEl.style.color = isErr ? '#c96442' : '#7ab389';
+      if (msg) setTimeout(() => { if (statEl.textContent === msg) statEl.textContent = ''; }, 3500);
+    }
+
+    // ── Badge / button states ────────────────────────────────
+    // States: 'clean' | 'draft' | 'modified'
+    function updateState() {
+      if (!activeId) return;
+      const current = ta.value;
+      const hasDraft   = getDraft(activeId) !== null;
+      const isModified = current !== (draftContent ?? diskContent);
+      const draftDiffsDisk = hasDraft && getDraft(activeId) !== diskContent;
+
+      if (isModified) {
+        setBadge('modified', '● unsaved');
+      } else if (draftDiffsDisk) {
+        setBadge('draft', '◆ draft — not published');
+      } else {
+        setBadge('clean', '✓ in sync with disk');
+      }
+
+      revertBtn.disabled  = !isModified;
+      draftBtn.disabled   = !isModified;
+      publishBtn.disabled = current === diskContent; // nothing new to publish
+    }
+
+    function setBadge(state, label) {
+      badge.style.display = 'inline-flex';
+      badge.textContent = label;
+      badge.className = `kb-state-badge kb-state-badge--${state}`;
+    }
+
+    // ── Markdown preview ─────────────────────────────────────
+    function renderPreview() {
+      const md = window.mdToHtml ? window.mdToHtml(ta.value) : `<pre>${escapeHTML(ta.value)}</pre>`;
+      previewEl.innerHTML = md;
+      if (window.renderIcons) window.renderIcons(previewEl);
+    }
+
+    // ── Sidebar file list ────────────────────────────────────
+    if (!kb) {
+      listEl.innerHTML = '<div style="padding:12px;color:#c96442;font-size:12px">KB API unavailable (dev mode?)</div>';
+      return;
+    }
+
+    kb.list().then(files => {
+      // Render file list with draft indicator dots
+      function renderList() {
+        const inner = listEl.querySelector('.cons-kb-files') || (() => {
+          const d = document.createElement('div'); d.className = 'cons-kb-files'; return listEl.appendChild(d);
+        })();
+        inner.innerHTML = files.map(f => {
+          const hasDraft = getDraft(f.id) !== null;
+          return `
+            <button class="cons-kb-item${activeId === f.id ? ' is-active' : ''}" data-id="${f.id}">
+              <span class="cons-kb-item__ico">${iconSVG(f.icon)}</span>
+              <span class="cons-kb-item__label">${escapeHTML(f.label)}</span>
+              ${hasDraft ? '<span class="cons-kb-dot" title="Has unsaved draft"></span>' : ''}
+            </button>`;
+        }).join('');
+        if (window.renderIcons) window.renderIcons(inner);
+      }
+      renderList();
+
+      // ── Load a file ──────────────────────────────────────
+      async function loadFile(id) {
+        if (activeId === id) return;
+        // Warn if current file has unsaved in-memory edits
+        if (activeId && ta.value !== (draftContent ?? diskContent)) {
+          if (!confirm('You have unsaved edits. Switch anyway? (Your draft is already saved.)')) return;
+        }
+
+        activeId = id;
+        ta.value = ''; ta.disabled = true;
+        pathEl.textContent = 'Loading…';
+        badge.style.display = 'none';
+        [revertBtn, draftBtn, publishBtn].forEach(b => b.disabled = true);
+
+        // Read from disk
+        const res = await kb.read(id);
+        if (!res.ok) { setStatus(res.error, true); ta.disabled = false; return; }
+
+        diskContent  = res.content;
+        draftContent = getDraft(id);       // null if no draft
+
+        // Load draft if exists, otherwise disk content
+        ta.value     = draftContent ?? diskContent;
+        pathEl.textContent = res.path;
+        ta.disabled  = false;
+
+        renderList(); // refresh dots
+        updateState();
+        renderPreview();
+        ta.focus();
+      }
+
+      // ── File list click ──────────────────────────────────
+      listEl.addEventListener('click', e => {
+        const b = e.target.closest('.cons-kb-item');
+        if (b) loadFile(b.dataset.id);
+      });
+
+      // ── Textarea input ───────────────────────────────────
+      ta.addEventListener('input', () => {
+        updateState();
+        // Update live preview if split/preview mode active
+        const view = panesEl.dataset.view;
+        if (view === 'split' || view === 'preview') renderPreview();
+      });
+
+      // ── Toolbar buttons ──────────────────────────────────
+      const TOOLBAR_MAP = { BACKTICK: '\x60', CODEBLOCK: '\x60\x60\x60\n\n\x60\x60\x60' };
+      toolbar.addEventListener('click', e => {
+        const btn = e.target.closest('[data-insert],[data-wrap]');
+        if (!btn || ta.disabled) return;
+        const start = ta.selectionStart, end = ta.selectionEnd;
+        const sel   = ta.value.slice(start, end);
+        let insert;
+        if (btn.dataset.wrap) {
+          const w = TOOLBAR_MAP[btn.dataset.wrap] ?? btn.dataset.wrap;
+          insert = sel ? w + sel + w : w + w;
+          const offset = sel ? 0 : w.length;
+          ta.focus();
+          document.execCommand('insertText', false, insert);
+          if (!sel) { ta.selectionStart = ta.selectionEnd = start + offset; }
+        } else {
+          insert = TOOLBAR_MAP[btn.dataset.insert] ?? btn.dataset.insert;
+          const needsNewline = start > 0 && ta.value[start - 1] !== '\n';
+          ta.focus();
+          document.execCommand('insertText', false, (needsNewline ? '\n' : '') + insert);
+        }
+        updateState();
+        const view = panesEl.dataset.view;
+        if (view === 'split' || view === 'preview') renderPreview();
+      });
+
+      // ── View-mode toggle ─────────────────────────────────
+      mainEl.querySelector('#kb-view-toggle').addEventListener('click', e => {
+        const btn = e.target.closest('[data-view]');
+        if (!btn) return;
+        const v = btn.dataset.view;
+        panesEl.dataset.view = v;
+        mainEl.querySelectorAll('.kb-view-btn').forEach(b =>
+          b.classList.toggle('is-active', b.dataset.view === v));
+        if (v === 'split' || v === 'preview') renderPreview();
+      });
+
+      // ── Revert button ────────────────────────────────────
+      revertBtn.addEventListener('click', () => {
+        if (!activeId) return;
+        ta.value = draftContent ?? diskContent;
+        updateState();
+        renderPreview();
+        setStatus('Reverted to last draft/disk state');
+      });
+
+      // ── Save draft (Ctrl+S) ──────────────────────────────
+      function saveDraft() {
+        if (!activeId || ta.disabled) return;
+        setDraft(activeId, ta.value);
+        draftContent = ta.value;
+        renderList(); // refresh dot
+        updateState();
+        setStatus('Draft saved (in-app only)');
+      }
+      draftBtn.addEventListener('click', saveDraft);
+      ta.addEventListener('keydown', e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveDraft(); }
+      });
+
+      // ── Publish to disk ──────────────────────────────────
+      publishBtn.addEventListener('click', async () => {
+        if (!activeId || ta.disabled) return;
+        publishBtn.disabled = true;
+        const res = await kb.write(activeId, ta.value);
+        if (res.ok) {
+          diskContent  = ta.value;
+          draftContent = ta.value;
+          setDraft(activeId, ta.value); // keep draft in sync
+          renderList();
+          updateState();
+          setStatus('Published to disk ✓ — takes effect on next Claude session');
+        } else {
+          setStatus(res.error, true);
+          publishBtn.disabled = false;
+        }
+      });
+
+      // Auto-open first file
+      if (files.length) loadFile(files[0].id);
+    });
+  }
+
+  /* ── Agents wiring ────────────────────────────────────────── */
+  function wireAgentsPage() {
+    const form      = mainEl.querySelector('#agent-form');
+    const addBtn    = mainEl.querySelector('#agent-add-btn');
+    const listEl    = mainEl.querySelector('#agents-list');
+    const formTitle = mainEl.querySelector('#agent-form-title');
+
+    // Show/hide endpoint+apikey fields — not needed for built-in app type
+    function syncExternalFields() {
+      const type = mainEl.querySelector('#af-type')?.value;
+      const isBuiltIn = type === 'claude_code_mod';
+      mainEl.querySelectorAll('.af-external-field').forEach(el => {
+        el.style.display = isBuiltIn ? 'none' : '';
+      });
+    }
+    mainEl.querySelector('#af-type')?.addEventListener('change', syncExternalFields);
+
+    function showForm(idx = -1) {
+      const agents = loadAgents();
+      const a = idx >= 0 ? agents[idx] : {};
+      mainEl.querySelector('#af-idx').value      = idx;
+      mainEl.querySelector('#af-name').value     = a.name     || '';
+      mainEl.querySelector('#af-type').value     = a.type     || 'claude_code_mod';
+      mainEl.querySelector('#af-endpoint').value = a.endpoint || '';
+      mainEl.querySelector('#af-apikey').value   = a.apiKey   || '';
+      mainEl.querySelector('#af-model').value    = a.model    || '';
+      mainEl.querySelector('#af-color').value    = a.color    || '#7ab389';
+      mainEl.querySelector('#af-system').value   = a.system   || '';
+      mainEl.querySelector('#af-notes').value    = a.notes    || '';
+      formTitle.textContent = idx >= 0 ? 'Edit agent' : 'New agent';
+      form.style.display = 'block';
+      syncExternalFields();
+      mainEl.querySelector('#af-name').focus();
+    }
+    function hideForm() { form.style.display = 'none'; }
+
+    addBtn.addEventListener('click', () => showForm(-1));
+    mainEl.querySelector('#af-cancel').addEventListener('click', hideForm);
+    mainEl.querySelector('#af-save').addEventListener('click', () => {
+      try {
+        const agents  = loadAgents();
+        const idx     = parseInt(mainEl.querySelector('#af-idx').value);
+        const agent   = {
+          name:     mainEl.querySelector('#af-name').value.trim()     || 'Unnamed',
+          type:     mainEl.querySelector('#af-type').value            || 'claude_code_mod',
+          endpoint: mainEl.querySelector('#af-endpoint')?.value.trim() || '',
+          apiKey:   mainEl.querySelector('#af-apikey')?.value.trim()   || '',
+          model:    mainEl.querySelector('#af-model')?.value           || '',
+          system:   mainEl.querySelector('#af-system')?.value.trim()   || '',
+          color:    mainEl.querySelector('#af-color')?.value           || '#7ab389',
+          notes:    mainEl.querySelector('#af-notes')?.value.trim()    || '',
+        };
+        if (idx >= 0) agents[idx] = agent; else agents.push(agent);
+
+        // ① Save to localStorage immediately (always works, no async needed)
+        saveAgents(agents);
+        syncAgentPill?.();
+
+        // ② Navigate back right away so user sees the updated list
+        navigate('agents');
+
+        // ③ Fire-and-forget disk save (doesn't block navigation)
+        if (window.electronAPI?.agents?.save) {
+          window.electronAPI.agents.save(agents)
+            .then(res => { if (!res?.ok) console.warn('[agents] disk save failed:', res?.error); })
+            .catch(e  => console.warn('[agents] disk save error:', e));
+        }
+      } catch (err) {
+        console.error('[agents] save failed:', err);
+        alert('Save failed: ' + err.message);
+      }
+    });
+
+    listEl.addEventListener('click', e => {
+      const editBtn = e.target.closest('[data-agent-edit]');
+      const delBtn  = e.target.closest('[data-agent-del]');
+      if (editBtn) showForm(parseInt(editBtn.dataset.agentEdit));
+      if (delBtn) {
+        const i = parseInt(delBtn.dataset.agentDel);
+        const agents = loadAgents();
+        agents.splice(i, 1);
+        // If deleted agent was the active one, reset selection
+        if (activeAgentIdx !== null && activeAgentIdx >= agents.length) {
+          activeAgentIdx = null;
+          localStorage.removeItem(ACTIVE_AGENT_KEY);
+        }
+        saveAgents(agents);
+        syncAgentPill?.();
+        navigate('agents');
+      }
+    });
+  }
+
+  /* ── Nav wiring ───────────────────────────────────────────── */
+  overlay.querySelector('#console-nav').addEventListener('click', e => {
+    const btn = e.target.closest('[data-page]');
+    if (btn) navigate(btn.dataset.page);
+  });
+
+  /* ── Close ────────────────────────────────────────────────── */
+  overlay.querySelector('#console-close').addEventListener('click', closeConsole);
+  overlay.addEventListener('mousedown', e => { if (e.target === overlay) closeConsole(); });
+  document.addEventListener('keydown', onConsoleKey);
+  function onConsoleKey(e) { if (e.key === 'Escape') closeConsole(); }
+  function closeConsole() {
+    overlay.remove();
+    document.removeEventListener('keydown', onConsoleKey);
+  }
+
+  navigate(initialPage);
+}
+
+// ── Knowledge Base Editor ─────────────────────────────────────────────────────
+async function showKnowledgeBaseEditor() {
+  if (document.getElementById('kb-overlay')) return; // already open
+
+  // Build overlay shell immediately; populate files after IPC responds
+  const overlay = document.createElement('div');
+  overlay.id = 'kb-overlay';
+  overlay.className = 'kb-overlay';
+  overlay.innerHTML = `
+    <div class="kb-modal">
+      <div class="kb-modal__sidebar">
+        <div class="kb-modal__sidebar-head">
+          <span class="kb-modal__sidebar-title">Knowledge Base</span>
+          <button class="kb-modal__close" id="kb-close" title="Close">${iconSVG('x')}</button>
+        </div>
+        <div class="kb-modal__file-list" id="kb-file-list">
+          <div style="padding:16px;color:#5a5a63;font-size:12px">Loading…</div>
+        </div>
+        <div class="kb-modal__sidebar-foot">
+          <span style="font-size:11px;color:#5a5a63;line-height:1.4">
+            Files read by the Claude CLI each session.<br>Edit to change Claude's behaviour.
+          </span>
+        </div>
+      </div>
+      <div class="kb-modal__editor">
+        <div class="kb-modal__editor-head" id="kb-editor-head">
+          <span class="kb-modal__file-path" id="kb-file-path">Select a file</span>
+          <div class="kb-modal__editor-actions">
+            <span class="kb-modal__dirty-badge" id="kb-dirty" style="display:none">unsaved</span>
+            <button class="kb-modal__btn kb-modal__btn--save" id="kb-save" disabled>Save</button>
+          </div>
+        </div>
+        <div class="kb-modal__editor-body">
+          <textarea class="kb-modal__textarea" id="kb-textarea"
+            placeholder="Select a file from the left panel…"
+            spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+        </div>
+        <div class="kb-modal__status" id="kb-status"></div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  if (window.renderIcons) window.renderIcons(overlay);
+
+  let activeId   = null;
+  let savedContent = '';
+
+  const fileList  = overlay.querySelector('#kb-file-list');
+  const textarea  = overlay.querySelector('#kb-textarea');
+  const pathLabel = overlay.querySelector('#kb-file-path');
+  const saveBtn   = overlay.querySelector('#kb-save');
+  const dirtyBadge= overlay.querySelector('#kb-dirty');
+  const statusEl  = overlay.querySelector('#kb-status');
+
+  function setStatus(msg, isError = false) {
+    statusEl.textContent = msg;
+    statusEl.style.color = isError ? '#c96442' : '#7ab389';
+    if (msg) setTimeout(() => { if (statusEl.textContent === msg) statusEl.textContent = ''; }, 3000);
+  }
+
+  function markDirty(dirty) {
+    dirtyBadge.style.display = dirty ? 'inline-flex' : 'none';
+    saveBtn.disabled = !dirty;
+  }
+
+  // Load file list
+  const kb = window.electronAPI?.kb;
+  if (!kb) {
+    fileList.innerHTML = `<div style="padding:16px;color:#c96442;font-size:12px">KB API not available (dev mode?)</div>`;
+  } else {
+    const files = await kb.list();
+    fileList.innerHTML = files.map(f => `
+      <button class="kb-file-item" data-id="${f.id}">
+        <span class="kb-file-item__icon">${iconSVG(f.icon)}</span>
+        <span class="kb-file-item__label">${escapeHTML(f.label)}</span>
+      </button>`).join('');
+    if (window.renderIcons) window.renderIcons(fileList);
+
+    async function loadFile(id) {
+      if (activeId === id) return;
+      // Warn on unsaved changes
+      if (activeId && textarea.value !== savedContent) {
+        if (!confirm('Discard unsaved changes?')) return;
+      }
+      activeId = id;
+      fileList.querySelectorAll('.kb-file-item').forEach(b =>
+        b.classList.toggle('is-active', b.dataset.id === id));
+      textarea.value = ''; textarea.disabled = true;
+      pathLabel.textContent = 'Loading…';
+      markDirty(false);
+
+      const res = await kb.read(id);
+      if (!res.ok) {
+        setStatus(res.error, true);
+        return;
+      }
+      textarea.value   = res.content;
+      savedContent     = res.content;
+      pathLabel.textContent = res.path;
+      textarea.disabled = false;
+      markDirty(false);
+      textarea.focus();
+    }
+
+    fileList.addEventListener('click', e => {
+      const btn = e.target.closest('.kb-file-item');
+      if (btn) loadFile(btn.dataset.id);
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      if (!activeId) return;
+      saveBtn.disabled = true;
+      const res = await kb.write(activeId, textarea.value);
+      if (res.ok) {
+        savedContent = textarea.value;
+        markDirty(false);
+        setStatus('Saved ✓');
+      } else {
+        setStatus(res.error, true);
+        saveBtn.disabled = false;
+      }
+    });
+
+    textarea.addEventListener('input', () => markDirty(textarea.value !== savedContent));
+    // Ctrl+S / Cmd+S to save
+    textarea.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (!saveBtn.disabled) saveBtn.click();
+      }
+    });
+
+    // Auto-open first file
+    if (files.length) loadFile(files[0].id);
+  }
+
+  // Close handlers
+  overlay.querySelector('#kb-close').addEventListener('click', closeKB);
+  overlay.addEventListener('mousedown', e => { if (e.target === overlay) closeKB(); });
+  document.addEventListener('keydown', onKBKey);
+
+  function onKBKey(e) {
+    if (e.key === 'Escape') closeKB();
+  }
+  function closeKB() {
+    if (activeId && textarea.value !== savedContent) {
+      if (!confirm('Close without saving?')) return;
+    }
+    overlay.remove();
+    document.removeEventListener('keydown', onKBKey);
+  }
 }
 
 // ---------- Code-block actions (copy / download / preview) ----------
@@ -1363,6 +2752,22 @@ document.addEventListener('click', (e) => {
     openCodePreview(lang, code);
     return;
   }
+  if (action === 'open-in-panel') {
+    // Push this specific block into the panel (bypasses RENDERABLE filter)
+    window.__apercuOverride = { lang, code };
+    setRightPanelOpen(true);
+    setRightPanelTab('apercu');
+    // Force refresh if already on apercu
+    if (currentRightPanel === 'apercu') {
+      const bodyEl = document.getElementById('right-panel-body');
+      if (bodyEl) {
+        bodyEl.innerHTML = renderApercuPanel();
+        loadPhosphorIcons?.();
+        requestAnimationFrame(() => initApercuScaling(bodyEl));
+      }
+    }
+    return;
+  }
 });
 
 // Inline preview: cross-fade the code body out and slide an iframe in.
@@ -1380,7 +2785,9 @@ function togglePreviewInline(block, lang, code) {
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.className = 'code-block__preview';
-    overlay.innerHTML = `<iframe sandbox="allow-scripts" srcdoc="${buildPreviewSrcDoc(lang, code).replace(/"/g, '&quot;')}"></iframe>`;
+    const needsNetwork = ['jsx','tsx','react'].includes(lang);
+    const sandboxAttr  = needsNetwork ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+    overlay.innerHTML = `<iframe sandbox="${sandboxAttr}" srcdoc="${buildPreviewSrcDoc(lang, code).replace(/"/g, '&quot;')}"></iframe>`;
     block.appendChild(overlay);
   }
 
@@ -1443,9 +2850,150 @@ function buildPreviewSrcDoc(lang, code) {
         })();
       <` + `/script>`;
   }
+  if (lang === 'jsx' || lang === 'tsx' || lang === 'react') {
+    // Strip import/export statements — we inject the real modules ourselves.
+    // We keep type-only imports for TS but strip value imports (react, framer-motion, etc.)
+    const stripped = code
+      .replace(/^import\s+type\s+.*?from\s+['"].*?['"];?\s*$/gm, '')   // remove TS type imports
+      .replace(/^import\s+.*?from\s+['"].*?['"];?\s*$/gm, '')           // remove all other imports
+      .replace(/^export\s+default\s+/, '')
+      // Auto-fix: wrap unquoted CSS values that contain ${ } template expressions.
+      // Pattern: `someStyleProp: radial-gradient(...${...}...)` → wrap in backticks.
+      // Claude sometimes forgets to wrap dynamic CSS values in template literal strings.
+      .replace(/(:\s*)((?:[a-z-]+\(|#|[0-9])[^,\n"'`]*\$\{[^}]+\}[^,\n"'`]*)/g,
+               (_, colon, val) => `${colon}\`${val}\``)
+      .trim();
+
+    // Detect component name: `function Foo(`, `const Foo =`, `class Foo`
+    const nameMatch = stripped.match(/(?:function|class)\s+([A-Z][A-Za-z0-9_]*)/) ||
+                      stripped.match(/(?:const|let)\s+([A-Z][A-Za-z0-9_]*)\s*=/);
+    const compName  = nameMatch ? nameMatch[1] : null;
+
+    // Skip auto-mount if the code already calls createRoot / render / mountApp itself
+    // to prevent React error #299 ("container already passed to createRoot")
+    const hasManualMount = /createRoot\s*\(|ReactDOM\s*\.\s*render\s*\(|mountApp\s*\(/.test(stripped);
+    const mountLine = (compName && !hasManualMount)
+      ? `createRoot(document.getElementById('root')).render(React.createElement(${compName}));`
+      : '';
+
+    // Babel presets: add typescript for tsx
+    const babelPresets = (lang === 'tsx')
+      ? `['react', ['typescript', { allExtensions: true, isTSX: true }]]`
+      : `['react']`;
+
+    // Safely embed user code inside a <script> block in HTML.
+    // JSON.stringify handles quote/newline escaping; replace </ to avoid
+    // premature </script> tag termination in the HTML parser.
+    const safeCode  = JSON.stringify(stripped).replace(/<\//g, '<\\/');
+    const safeMount = JSON.stringify(mountLine).replace(/<\//g, '<\\/');
+
+    // ESM CDN — esm.sh serves proper ES modules. All three share the *same*
+    // React instance via the browser's module cache (identical URLs = same entry).
+    // Framer Motion, GSAP, etc. all resolve correctly this way.
+    // We expose every common hook/util so Claude-generated code just works
+    // without needing import statements.
+    const ESM_PREAMBLE = [
+      // React — every hook available as a top-level binding
+      "import React, { useState, useEffect, useRef, useCallback, useMemo,",
+      "  useContext, createContext, useReducer, useLayoutEffect,",
+      "  useImperativeHandle, forwardRef, Fragment, memo, lazy, Suspense",
+      "} from 'https://esm.sh/react@18';",
+      "import { createRoot } from 'https://esm.sh/react-dom@18/client';",
+      // Framer Motion — all common exports
+      "import {",
+      "  motion, AnimatePresence, LayoutGroup, Reorder,",
+      "  useAnimation, useMotionValue, useTransform, useSpring,",
+      "  useScroll, useVelocity, useInView, useDragControls,",
+      "  useMotionTemplate, useMotionValueEvent, LazyMotion, domAnimation,",
+      "  animate, stagger, m",
+      "} from 'https://esm.sh/framer-motion@11?deps=react@18,react-dom@18';",
+      // ── Compat shims so Claude-generated code "just works" ──────────────
+      // Guarded root — prevents React #299 "already passed to createRoot"
+      "let __root; const __getRoot = (c) => { if (!__root) __root = createRoot(c); return __root; };",
+      // React 17-style render() shim
+      "const render = (element, container) => __getRoot(container).render(element);",
+      "const ReactDOM = { render, createRoot: (c) => __getRoot(c), unmountComponentAtNode: () => {} };",
+      // Convenient mount-to-root helper
+      "const mountApp = (el) => __getRoot(document.getElementById('root')).render(el);",
+      "",
+    ].join('\n');
+
+    return `<!DOCTYPE html><html><head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
+      <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        /* Hide scrollbar — preview is a viewport, not a doc */
+        ::-webkit-scrollbar { display: none; }
+        html { scrollbar-width: none; }
+        html, body { margin: 0; padding: 0; min-height: 100vh;
+          font-family: ui-sans-serif, system-ui, sans-serif;
+          background: #0b0b0c; color: #e7e7ea; overflow: hidden; }
+        #preview-error {
+          padding: 16px; color: #f87171; font-size: 12.5px;
+          font-family: ui-monospace, monospace; white-space: pre-wrap;
+          background: rgba(248,113,113,.07); border-radius: 8px; margin: 16px;
+          display: none;
+        }
+      </style>
+    </head><body>
+      <div id="root"></div>
+      <div id="preview-error"></div>
+      <script>
+      /* ── Compile + mount via ESM blob ─────────────────────────────────────────
+         Strategy:
+           1. Babel (UMD, already loaded) compiles the user's JSX → plain JS.
+           2. We prepend ESM imports from esm.sh so React + Framer Motion are
+              available without the user writing a single import statement.
+           3. We create a Blob URL from the full module source and dynamically
+              import() it — this is the only way to get real ES module semantics
+              (importmaps, top-level await, etc.) in a sandboxed iframe.
+         Why not <script type="text/babel">?
+           Babel's text/babel runner evaluates code as a regular script, so you
+           cannot use ESM-only libs (framer-motion, @motionone/motion …) which
+           have no UMD builds. The blob approach gives full module support.
+      ──────────────────────────────────────────────────────────────────────── */
+      (async () => {
+        const errEl = document.getElementById('preview-error');
+        const show  = msg => { errEl.style.display = 'block'; errEl.textContent = msg; };
+        try {
+          const rawCode  = ${safeCode};
+          const mountSrc = ${safeMount};
+          const presets  = ${babelPresets};
+
+          // Compile JSX → JS (synchronous, Babel is already loaded)
+          const compiled = Babel.transform(rawCode, {
+            presets,
+            filename:        'app.jsx',
+            retainLines:     true,
+            sourceMaps:      false,
+          }).code;
+
+          // Build module source: preamble + compiled user code + mount call
+          const ESM_PREAMBLE = ${JSON.stringify(ESM_PREAMBLE)};
+          const fullModule   = ESM_PREAMBLE + compiled + '\\n' + mountSrc;
+
+          // Inject as a real ES module via Blob URL
+          const blob = new Blob([fullModule], { type: 'application/javascript' });
+          const url  = URL.createObjectURL(blob);
+          await import(url);
+          URL.revokeObjectURL(url);
+
+        } catch (e) {
+          // Show the compile/runtime error in the preview pane
+          const loc = e.loc ? \` (line \${e.loc.line})\` : '';
+          show('⚠️ ' + (e.message || String(e)) + loc);
+          console.error('[preview]', e);
+        }
+      })();
+      <\/script>
+    </body></html>`;
+  }
+
   return base + `
       <h1>Preview not available for <code>${lang}</code></h1>
-      <p>This preview currently renders <code>html</code>, <code>css</code>, and <code>javascript</code>.
+      <p>This preview currently renders <code>html</code>, <code>css</code>, <code>javascript</code>, and <code>jsx</code>.
       The raw code is shown below.</p>
       <pre class="demo">${code.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</pre>`;
 }
@@ -1455,7 +3003,9 @@ function openCodePreview(lang, code) {
   const body  = document.getElementById('code-preview-body');
   document.getElementById('code-preview-lang').textContent = lang;
   const doc = buildPreviewSrcDoc(lang, code);
-  body.innerHTML = `<iframe sandbox="allow-scripts" srcdoc="${doc.replace(/"/g, '&quot;')}"></iframe>`;
+  const needsNet = ['jsx','tsx','react'].includes(lang);
+  const sb = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+  body.innerHTML = `<iframe sandbox="${sb}" srcdoc="${doc.replace(/"/g, '&quot;')}"></iframe>`;
   modal.classList.remove('hidden');
 }
 // Close handlers (share with profile modal's Esc + backdrop)
@@ -1560,13 +3110,14 @@ attachBtn?.addEventListener('click', (e) => {
 // ---------- Composer: model dropdown ----------
 const modelChipBtn = document.getElementById('model-chip');
 const modelState = {
-  currentModel: 'opus-4.7-1m',
+  currentModel: 'claude-sonnet-4-6',
   currentEffort: 'tres-eleve',
   models: [
-    { id: 'opus-4.7',      label: 'Opus 4.7',      shortcut: '1' },
-    { id: 'opus-4.7-1m',   label: 'Opus 4.7 1M',   shortcut: '2' },
-    { id: 'sonnet-4.6',    label: 'Sonnet 4.6',    shortcut: '3' },
-    { id: 'haiku-4.5',     label: 'Haiku 4.5',     shortcut: '4' },
+    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6',  shortcut: '1' },
+    { id: 'claude-sonnet-4-5', label: 'Sonnet 4.5',  shortcut: '2' },
+    { id: 'claude-opus-4-5',   label: 'Opus 4.5',    shortcut: '3' },
+    { id: 'claude-opus-4',     label: 'Opus 4',      shortcut: '4' },
+    { id: 'claude-haiku-3-5',  label: 'Haiku 3.5',   shortcut: '5' },
   ],
   efforts: [
     { id: 'faible',     labelKey: 'eff_faible'    },
@@ -1623,6 +3174,120 @@ function syncModelChip() {
   const tail = parts.slice(2).join(' ');
   modelChipBtn.querySelector('.model-chip__name').textContent = name;
   modelChipBtn.querySelector('.model-chip__meta').textContent = (tail ? tail + ' · ' : '') + tEffort(ef);
+}
+
+// ---------- Context strip: Agent chip ----------
+const agentPillBtn  = document.getElementById('agent-pill');
+const agentPillDot  = document.getElementById('agent-pill-dot');
+const agentPillName = document.getElementById('agent-pill-name');
+const ACTIVE_AGENT_KEY = 'ccmod.activeAgent'; // stores agent index or null
+let activeAgentIdx = (() => {
+  const v = localStorage.getItem(ACTIVE_AGENT_KEY);
+  return v === null ? null : Number(v);
+})();
+
+function syncAgentPill() {
+  const agents = loadAgents();
+  const agent  = (activeAgentIdx !== null && agents[activeAgentIdx]) ? agents[activeAgentIdx] : null;
+  if (agentPillDot)  agentPillDot.style.background  = agent ? (agent.color || '#7ab389') : '#3a3a44';
+  if (agentPillName) agentPillName.textContent       = agent ? agent.name : 'Default';
+  agentPillBtn?.classList.toggle('is-active', !!agent);
+}
+syncAgentPill();
+
+// Agent dropdown uses its own element (independent of the shared ctx/ctxmenu)
+let _agentDropEl = null;
+function closeAgentDropdown() {
+  if (_agentDropEl) { _agentDropEl.remove(); _agentDropEl = null; }
+}
+
+function showAgentDropdown(anchor) {
+  closeAgentDropdown();
+  hideCtx();
+  const agents = loadAgents();
+  const rect   = anchor.getBoundingClientRect();
+
+  const checkSvg = `<svg class="agent-dropdown__check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 8 7 12 13 4"/></svg>`;
+
+  const itemHtml = (idx, agent) => `
+    <div class="agent-dropdown__item${activeAgentIdx === idx ? ' is-selected' : ''}" data-agent-pick="${idx}">
+      <span class="agent-dropdown__dot" style="background:${agent.color || '#7ab389'}"></span>
+      <div class="agent-dropdown__info">
+        <div class="agent-dropdown__name">${escapeHTML(agent.name)}</div>
+        <div class="agent-dropdown__meta">${escapeHTML(agent.type || '')}${agent.model ? ' · ' + escapeHTML(agent.model) : ''}</div>
+      </div>
+      ${checkSvg}
+    </div>`;
+
+  const drop = document.createElement('div');
+  drop.className = 'agent-dropdown';
+  drop.innerHTML = `
+    <div class="agent-dropdown__head">AI Agent</div>
+    <div class="agent-dropdown__item${activeAgentIdx === null ? ' is-selected' : ''}" data-agent-pick="null">
+      <span class="agent-dropdown__dot" style="background:#3a3a44"></span>
+      <div class="agent-dropdown__info">
+        <div class="agent-dropdown__name">Default</div>
+        <div class="agent-dropdown__meta">No agent — chat directly with Claude</div>
+      </div>
+      ${checkSvg}
+    </div>
+    ${agents.length
+      ? agents.map((a, i) => itemHtml(i, a)).join('')
+      : `<div style="padding:8px 10px;font-size:12px;color:#5a5a63">No agents yet — <span style="color:#d97757;cursor:pointer" id="adrop-go-create">create one →</span></div>`}
+    <div class="agent-dropdown__sep"></div>
+    <div class="agent-dropdown__manage" id="adrop-manage">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/>
+      </svg>
+      Manage agents…
+    </div>`;
+
+  // Position above the pill
+  drop.style.left   = rect.left + 'px';
+  drop.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+  drop.style.top    = 'auto';
+  document.body.appendChild(drop);
+  _agentDropEl = drop;
+
+  drop.addEventListener('click', e => {
+    const item = e.target.closest('[data-agent-pick]');
+    if (item) {
+      const pick = item.dataset.agentPick;
+      activeAgentIdx = pick === 'null' ? null : Number(pick);
+      if (activeAgentIdx === null) localStorage.removeItem(ACTIVE_AGENT_KEY);
+      else localStorage.setItem(ACTIVE_AGENT_KEY, String(activeAgentIdx));
+      syncAgentPill();
+      closeAgentDropdown();
+      return;
+    }
+    if (e.target.closest('#adrop-manage') || e.target.closest('#adrop-go-create')) {
+      closeAgentDropdown();
+      showConsole('agents');
+    }
+  });
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', function outside(e) {
+      if (!drop.contains(e.target) && e.target !== agentPillBtn && !agentPillBtn?.contains(e.target)) {
+        closeAgentDropdown();
+        document.removeEventListener('click', outside);
+      }
+    });
+  }, 0);
+}
+
+agentPillBtn?.addEventListener('click', e => {
+  e.stopPropagation();
+  if (_agentDropEl) { closeAgentDropdown(); return; }
+  showAgentDropdown(agentPillBtn);
+});
+
+// Helper: get active agent object (or null)
+function getActiveAgent() {
+  if (activeAgentIdx === null) return null;
+  const agents = loadAgents();
+  return agents[activeAgentIdx] || null;
 }
 
 // ---------- Composer: tokens / usage dropdown (distinct from session kebab menu) ----------
@@ -1765,87 +3430,136 @@ function renderShortcutsPanel() {
     </div>
   `;
 }
+// ---------- Live preview helpers ----------
+
+// Scan chat history (newest-first) for the last assistant message that contains
+// an HTML / JSX / CSS / JS code block — returns { lang, code } or null.
+function getLastRenderableCodeBlock() {
+  if (!window.__chatHistory || !window.__chatHistory.length) return null;
+  const RENDERABLE = ['html', 'jsx', 'tsx', 'react', 'css', 'javascript', 'js'];
+  for (let i = window.__chatHistory.length - 1; i >= 0; i--) {
+    const msg = window.__chatHistory[i];
+    if (msg.role !== 'assistant') continue;
+    const rx = /```([\w\-+#.]*)\n?([\s\S]*?)```/g;
+    const matches = [...(msg.content || '').matchAll(rx)];
+    // Walk matches newest-first within this message
+    for (let j = matches.length - 1; j >= 0; j--) {
+      const lang = (matches[j][1] || '').toLowerCase().trim();
+      const code = (matches[j][2] || '').trimEnd();
+      if (RENDERABLE.includes(lang)) return { lang, code };
+    }
+  }
+  return null;
+}
+
 // ---------- Aperçu (Preview) panel ----------
+const RENDERABLE_LANGS = ['html', 'css', 'javascript', 'js', 'jsx', 'tsx', 'react'];
+
 function renderApercuPanel() {
-  const mockUrl = 'localhost:5182';
-  return `
-    <div class="preview-panel">
-      <!-- Browser-style toolbar -->
-      <div class="preview-toolbar">
-        <div class="preview-toolbar__nav">
-          <button class="icon-btn icon-btn--sm" title="Back" disabled style="opacity:.3"><i data-phosphor="arrow-left"></i></button>
-          <button class="icon-btn icon-btn--sm" title="Forward" disabled style="opacity:.3"><i data-phosphor="arrow-right"></i></button>
-          <button class="icon-btn icon-btn--sm" title="Reload"><i data-phosphor="arrow-clockwise"></i></button>
-        </div>
-        <div class="preview-addressbar">
-          <i data-phosphor="lock-simple" class="preview-addressbar__lock"></i>
-          <span class="preview-addressbar__url">${mockUrl}</span>
-        </div>
-        <div class="preview-toolbar__actions">
-          <button class="icon-btn icon-btn--sm" title="Desktop view" class="is-active"><i data-phosphor="monitor"></i></button>
-          <button class="icon-btn icon-btn--sm" title="Mobile view"><i data-phosphor="device-mobile"></i></button>
-          <button class="icon-btn icon-btn--sm" title="Open in browser"><i data-phosphor="arrow-square-out"></i></button>
-        </div>
-      </div>
-      <!-- Preview viewport -->
-      <div class="preview-viewport">
-        <div class="preview-frame">
-          <!-- Mock rendered app content -->
-          <div class="preview-mock">
-            <div class="preview-mock__nav">
-              <span class="preview-mock__logo">◆ MyApp</span>
-              <span class="preview-mock__nav-links">
-                <span>Dashboard</span><span>Reports</span><span>Settings</span>
-              </span>
-            </div>
-            <div class="preview-mock__body">
-              <div class="preview-mock__sidebar">
-                <div class="preview-mock__menu-item is-active">Overview</div>
-                <div class="preview-mock__menu-item">Analytics</div>
-                <div class="preview-mock__menu-item">Users</div>
-                <div class="preview-mock__menu-item">Exports</div>
-              </div>
-              <div class="preview-mock__main">
-                <div class="preview-mock__card preview-mock__card--wide">
-                  <div class="preview-mock__card-label">Total sessions</div>
-                  <div class="preview-mock__card-val">1,284</div>
-                  <div class="preview-mock__sparkline">
-                    <svg viewBox="0 0 80 24" preserveAspectRatio="none" width="80" height="24">
-                      <polyline points="0,20 12,16 24,18 36,10 48,13 60,6 72,4 80,2" fill="none" stroke="#7ab389" stroke-width="1.5"/>
-                    </svg>
-                  </div>
-                </div>
-                <div class="preview-mock__card">
-                  <div class="preview-mock__card-label">Active users</div>
-                  <div class="preview-mock__card-val">342</div>
-                </div>
-                <div class="preview-mock__card">
-                  <div class="preview-mock__card-label">Errors</div>
-                  <div class="preview-mock__card-val preview-mock__card-val--warn">7</div>
-                </div>
-                <div class="preview-mock__table-wrap">
-                  <div class="preview-mock__table-head">Recent Activity</div>
-                  ${[
-                    ['index.html',   'Modified', '#7ab389'],
-                    ['app.js',       'Modified', '#7ab389'],
-                    ['style.css',    'Modified', '#7ab389'],
-                    ['icons.js',     'Unchanged','#5a5a63'],
-                  ].map(([f,s,c]) => `
-                    <div class="preview-mock__table-row">
-                      <span class="preview-mock__table-file">${f}</span>
-                      <span class="preview-mock__table-status" style="color:${c}">${s}</span>
-                    </div>`).join('')}
-                </div>
-              </div>
-            </div>
+  // Explicit override from "Open in panel" button takes priority
+  const block = window.__apercuOverride || getLastRenderableCodeBlock() || getLastAnyCodeBlock();
+  // Clear the override after consuming it
+  if (window.__apercuOverride) window.__apercuOverride = null;
+
+  if (!block) {
+    return `
+      <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center">
+        <div style="opacity:.25">${iconSVG('eye')}</div>
+        <p style="font-size:13px;color:#5a5a63;margin:0;line-height:1.5">
+          Preview will appear here when Claude generates code.
+        </p>
+      </div>`;
+  }
+
+  const langLabel = (block.lang || 'code').toUpperCase();
+  const canRender = RENDERABLE_LANGS.includes((block.lang || '').toLowerCase());
+
+  // ── Live iframe preview (HTML/CSS/JS/React) ──────────────────────────────
+  if (canRender) {
+    const doc = buildPreviewSrcDoc(block.lang, block.code);
+    const needsNet = ['jsx', 'tsx', 'react'].includes(block.lang);
+    const sb = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+    return `
+      <div class="preview-panel preview-panel--live" style="display:flex;flex-direction:column;height:100%">
+        <div class="preview-toolbar" style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #1e1e24;flex-shrink:0">
+          <span style="font-size:10.5px;font-weight:600;color:#5a5a63;text-transform:uppercase;letter-spacing:.06em;padding:0 4px">${escapeHTML(langLabel)}</span>
+          <div class="preview-addressbar" style="flex:1;display:flex;align-items:center;gap:5px;background:#0e0e10;border:1px solid #1e1e24;border-radius:6px;padding:3px 9px">
+            <i data-phosphor="circle-wavy-check" style="color:#7ab389;font-size:11px"></i>
+            <span style="font-size:11.5px;color:#6a6a72">Claude · live preview</span>
           </div>
+          <span id="apercu-zoom-label" style="font-size:10.5px;color:#5a5a63;min-width:28px;text-align:right"></span>
+          <button class="icon-btn icon-btn--sm" id="apercu-reload"      title="Reload"><i data-phosphor="arrow-clockwise"></i></button>
+          <button class="icon-btn icon-btn--sm" id="apercu-fullscreen"  title="Full-screen"><i data-phosphor="arrows-out"></i></button>
         </div>
-        <div class="preview-viewport__footer">
-          <span class="preview-viewport__info"><i data-phosphor="circle-wavy-check" style="color:#7ab389"></i> Live · auto-refresh on save</span>
-          <span class="preview-viewport__size">1280 × 720</span>
+        <div id="apercu-vp-wrap" style="flex:1;position:relative;overflow:hidden;min-height:0">
+          <iframe id="apercu-iframe" sandbox="${sb}"
+                  srcdoc="${doc.replace(/"/g, '&quot;')}"
+                  style="position:absolute;top:0;left:0;width:1280px;height:900px;border:none;transform-origin:top left;background:#0b0b0c">
+          </iframe>
         </div>
+      </div>`;
+  }
+
+  // ── Code view (Python, Bash, SQL, etc.) ──────────────────────────────────
+  const copyId = 'apercu-code-copy-' + Date.now();
+  return `
+    <div class="preview-panel preview-panel--code" style="display:flex;flex-direction:column;height:100%">
+      <div class="preview-toolbar" style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #1e1e24;flex-shrink:0">
+        <span style="font-size:10.5px;font-weight:600;color:#5a5a63;text-transform:uppercase;letter-spacing:.06em;padding:0 4px">${escapeHTML(langLabel)}</span>
+        <div class="preview-addressbar" style="flex:1;display:flex;align-items:center;gap:5px;background:#0e0e10;border:1px solid #1e1e24;border-radius:6px;padding:3px 9px">
+          <i data-phosphor="code" style="color:#6a6a72;font-size:11px"></i>
+          <span style="font-size:11.5px;color:#6a6a72">Claude · code output</span>
+        </div>
+        <button class="icon-btn icon-btn--sm" id="${copyId}" title="Copy code"><i data-phosphor="copy"></i></button>
+      </div>
+      <div style="flex:1;overflow:auto;padding:16px">
+        <pre style="margin:0;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;color:#d4d4d8;white-space:pre-wrap;word-break:break-word">${escapeHTML(block.code)}</pre>
       </div>
     </div>`;
+}
+
+// Scale the apercu iframe to match the panel width (desktop viewport simulation).
+// The iframe renders at 1280×900 virtual px; we scale it down to fit the wrapper.
+// Called after any DOM insertion that contains the apercu panel.
+function initApercuScaling(container) {
+  const root  = container || document;
+  const wrap  = root.getElementById?.('apercu-vp-wrap')  || root.querySelector?.('#apercu-vp-wrap');
+  const frame = root.getElementById?.('apercu-iframe')   || root.querySelector?.('#apercu-iframe');
+  const label = root.getElementById?.('apercu-zoom-label') || root.querySelector?.('#apercu-zoom-label');
+  if (!wrap || !frame) return;
+
+  const VIRTUAL_W = 1280;
+
+  function applyScale() {
+    const w = wrap.clientWidth;
+    if (!w) return;
+    const scale = w / VIRTUAL_W;
+    frame.style.transform = `scale(${scale})`;
+    if (label) label.textContent = Math.round(scale * 100) + '%';
+  }
+
+  applyScale();
+  // Watch for panel resize (sidebar drag, window resize)
+  const ro = new ResizeObserver(applyScale);
+  ro.observe(wrap);
+  // Stash so we can disconnect if panel is swapped out
+  wrap._apercuRO = ro;
+}
+
+// Returns any code block (used for the panel code view)
+function getLastAnyCodeBlock() {
+  if (!window.__chatHistory?.length) return null;
+  for (let i = window.__chatHistory.length - 1; i >= 0; i--) {
+    const msg = window.__chatHistory[i];
+    if (msg.role !== 'assistant') continue;
+    const rx = /```([\w\-+#.]*)\n?([\s\S]*?)```/g;
+    const matches = [...(msg.content || '').matchAll(rx)];
+    for (let j = matches.length - 1; j >= 0; j--) {
+      const code = (matches[j][2] || '').trimEnd();
+      if (code) return { lang: (matches[j][1] || '').toLowerCase().trim() || 'code', code };
+    }
+  }
+  return null;
 }
 
 // ---------- Tâches (Tasks) panel — Kanban board ----------
@@ -2252,60 +3966,85 @@ function renderContextPanel() {
     </div>`;
 }
 
-let _planExpandedIdx = 2; // active task expanded by default
+let _planExpandedIdx = -1; // expanded task index (-1 = none forced)
+
+// Live todos from Claude's TodoWrite tool calls — null means use placeholder
+window.__planTodos = null;
 
 function renderPlanPanel() {
-  const tasks = [
-    { status: 'done',    title: 'Read existing sidebar styles',        note: 'Analysed 2 107 lines of CSS' },
-    { status: 'done',    title: 'Map CSS custom-property cascade',     note: '--accent propagation confirmed' },
-    { status: 'active',  title: 'Refactor SessionRow component',       note: 'Adding --accent-tint & --accent-border',
-      subs: [
-        { status: 'done',    title: 'Extract color tokens to vars',   color: PROJECT_COLORS[0] },
-        { status: 'done',    title: 'Remove hardcoded hex values',    color: PROJECT_COLORS[2] },
-        { status: 'active',  title: 'Refactor props interface',       color: PROJECT_COLORS[3] },
-        { status: 'pending', title: 'Wire --accent-tint variable',    color: PROJECT_COLORS[4] },
-        { status: 'pending', title: 'Update snapshot tests',          color: PROJECT_COLORS[5] },
-      ]
-    },
-    { status: 'pending', title: 'Update ProjectRow color forwarding',  note: '',
-      subs: [
-        { status: 'pending', title: 'Audit ProjectRow CSS',           color: PROJECT_COLORS[1] },
-        { status: 'pending', title: 'Forward --c via data-attr',      color: PROJECT_COLORS[6] },
-      ]
-    },
-    { status: 'pending', title: 'Add transition animations',           note: '200ms ease on background & color' },
-    { status: 'pending', title: 'Write tests for color-mix fallbacks', note: '' },
-  ];
+  // ── Status map ───────────────────────────────────────────────────────────
+  function mapStatus(s) {
+    if (!s) return 'pending';
+    s = s.toLowerCase().trim();
+    if (s === 'completed' || s === 'done' || s === 'complete' || s === 'finished' || s === 'closed') return 'done';
+    if (s === 'in_progress' || s === 'in-progress' || s === 'active' || s === 'wip' || s === 'doing') return 'active';
+    if (s === 'cancelled' || s === 'canceled' || s === 'skipped') return 'cancelled';
+    if (s === 'blocked'   || s === 'waiting' || s === 'on-hold') return 'blocked';
+    if (s === 'review'    || s === 'in-review' || s === 'reviewing' || s === 'pr') return 'review';
+    return 'pending';
+  }
 
-  const done = tasks.filter(t => t.status === 'done').length;
-  const pct  = Math.round(done / tasks.length * 100);
-  const statusIcon = { done: 'check-circle', active: 'circle-dashed', pending: 'circle' };
-  const subStatusIcon = { done: 'check-circle', active: 'circle-dashed', pending: 'circle' };
+  const STATUS_ICON  = { done: 'check-circle', active: 'circle-dashed', pending: 'circle', cancelled: 'x-circle', blocked: 'warning', review: 'magnifying-glass' };
+  const STATUS_LABEL = { done: 'Done', active: 'In Progress', pending: '', cancelled: 'Cancelled', blocked: 'Blocked', review: 'In Review' };
+  const chevronSVG   = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M2.5 1.5L5.5 4L2.5 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  const liveTodos = window.__planTodos;
+
+  if (!liveTodos || liveTodos.length === 0) {
+    return `
+      <div class="plan-empty">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".3">
+          <rect x="3" y="5" width="18" height="2" rx="1"/><rect x="3" y="11" width="14" height="2" rx="1"/>
+          <rect x="3" y="17" width="10" height="2" rx="1"/>
+        </svg>
+        <p class="plan-empty__title">No plan yet</p>
+        <p class="plan-empty__hint">Ask Claude to create a plan — it will output a <code>plan</code> block that auto-populates this panel.</p>
+      </div>`;
+  }
+
+  const tasks = liveTodos.map(t => ({
+    status:   mapStatus(t.status),
+    title:    t.content || t.title || '(task)',
+    priority: (t.priority || 'medium').toLowerCase(),
+    time:     t.time || t.timeRange || null,
+    note:     t.note || null,
+    subs:     (t.subtasks || t.subs || []).map(s => ({
+      status: mapStatus(typeof s === 'string' ? 'pending' : (s.status || 'pending')),
+      title:  typeof s === 'string' ? s : (s.content || s.title || s),
+    })),
+    id: t.id,
+  }));
+
+  if (_planExpandedIdx === -1) {
+    const firstActive = tasks.findIndex(t => t.status === 'active' && t.subs?.length);
+    _planExpandedIdx = firstActive;
+  }
+
+  const done   = tasks.filter(t => t.status === 'done' || t.status === 'cancelled').length;
+  const active = tasks.filter(t => t.status === 'active').length;
+  const pct    = tasks.length ? Math.round(done / tasks.length * 100) : 0;
 
   function renderSubtasks(subs) {
-    if (!subs || !subs.length) return '';
+    if (!subs?.length) return '';
     return `
       <div class="plan-subtasks-wrap">
         <div class="plan-subtasks-inner">
           <div class="plan-subtasks">
             ${subs.map(s => `
               <div class="plan-subtask plan-subtask--${s.status}">
-                <span class="plan-subtask__dot" style="--c:${s.color}"></span>
-                <span class="plan-subtask__icon"><i data-phosphor="${subStatusIcon[s.status]}"></i></span>
+                <span class="plan-subtask__dot"></span>
+                <span class="plan-subtask__icon"><i data-phosphor="${STATUS_ICON[s.status] || 'circle'}"></i></span>
                 <span class="plan-subtask__title">${escapeHTML(s.title)}</span>
-              </div>
-            `).join('')}
+              </div>`).join('')}
           </div>
         </div>
       </div>`;
   }
 
-  const chevronSVG = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.5 1.5L5.5 4L2.5 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-
   return `
-    <div class="plan-view">
+    <div class="plan-view plan-view--live">
       <div class="plan-header">
-        <span class="plan-header__title">Refactor color cascade</span>
+        <span class="plan-header__title">Current tasks <span style="font-weight:400;color:#5a5a6a">${active > 0 ? `· ${active} active` : ''}</span></span>
         <span class="plan-header__meta">${done} / ${tasks.length}</span>
       </div>
       <div class="plan-progress">
@@ -2313,22 +4052,25 @@ function renderPlanPanel() {
       </div>
       <div class="plan-tasks">
         ${tasks.map((task, i) => {
-          const hasSubs = task.subs && task.subs.length > 0;
+          const hasSubs    = task.subs?.length > 0;
           const isExpanded = hasSubs && _planExpandedIdx === i;
+          const statusLabel = STATUS_LABEL[task.status] || '';
           const cls = [
-            'plan-task',
-            `plan-task--${task.status}`,
+            'plan-task', `plan-task--${task.status}`,
             hasSubs ? 'plan-task--has-subs' : '',
             isExpanded ? 'plan-task--expanded' : '',
           ].filter(Boolean).join(' ');
           return `
-          <div class="${cls}" data-plan-idx="${i}">
+          <div class="${cls}" data-plan-idx="${i}" data-priority="${task.priority}">
             <span class="plan-task__num">${i + 1}</span>
-            <span class="plan-task__icon"><i data-phosphor="${statusIcon[task.status]}"></i></span>
+            <span class="plan-task__icon" title="${task.status}"><i data-phosphor="${STATUS_ICON[task.status]}"></i></span>
             <div class="plan-task__body">
-              <div class="plan-task__title-row${hasSubs ? '' : ''}">
+              <div class="plan-task__title-row">
                 ${hasSubs ? `<span class="plan-task__chevron">${chevronSVG}</span>` : ''}
                 <span class="plan-task__title">${escapeHTML(task.title)}</span>
+                ${task.time ? `<span class="plan-task__time">${escapeHTML(task.time)}</span>` : ''}
+                ${statusLabel ? `<span class="plan-task__status-pill">${statusLabel}</span>` : ''}
+                <span class="plan-task__pri plan-task__pri--${task.priority}" title="${task.priority} priority"></span>
               </div>
               ${task.note ? `<div class="plan-task__note">${escapeHTML(task.note)}</div>` : ''}
               ${hasSubs ? renderSubtasks(task.subs) : ''}
@@ -2528,6 +4270,9 @@ function setRightPanelOpen(open) {
     if (saved >= RP_MIN && saved <= RP_MAX) {
       rightPanelEl.style.width = saved + 'px';
     }
+  } else {
+    // Clear inline width so CSS 'width: 0' takes effect
+    rightPanelEl.style.width = '';
   }
   localStorage.setItem(RIGHT_PANEL_KEY + '.open', open ? '1' : '0');
 }
@@ -2549,6 +4294,9 @@ function setRightPanelTab(id) {
     wireSplitPaneTabs(bodyEl);
     wirePlanTabEvents(_splitTopTab, document.getElementById('split-content-top'));
     wirePlanTabEvents(_splitBottomTab, document.getElementById('split-content-bottom'));
+    if (_splitTopTab === 'apercu' || _splitBottomTab === 'apercu') {
+      requestAnimationFrame(() => initApercuScaling(bodyEl));
+    }
   } else {
     bodyEl.classList.remove('is-split');
     // Edge-to-edge modes
@@ -2557,6 +4305,7 @@ function setRightPanelTab(id) {
     bodyEl.innerHTML = renderPanelContent(id);
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(id, bodyEl);
+    if (id === 'apercu') requestAnimationFrame(() => initApercuScaling(bodyEl));
   }
 
   // Sync context-strip chips
@@ -2827,9 +4576,12 @@ function duplicateSession(id) {
   const found = findSession(id);
   if (!found) return;
   const src = found.list[found.index];
-  const copy = { ...src, id: 'dup' + Math.random().toString(36).slice(2, 6), title: src.title + ' (copy)', time: 'now' };
-  found.list.splice(found.index, 0, copy);
-  state.activeId = copy.id;
+  const newS = createNewSession({ projectId: src.projectId, title: src.title + ' (copy)' });
+  // Copy messages too
+  const msgs = loadSessionMessages(id);
+  saveSessionMessages(newS.id, [...msgs]);
+  window.__chatHistory = loadSessionMessages(newS.id);
+  switchToSession(newS.id);
   render();
 }
 
@@ -2941,9 +4693,14 @@ let _streamInterval = setInterval(() => {
   if (!chatConv || !composerInput || !sendBtn) return;
 
   // ── State ─────────────────────────────────────────────────────────────────
-  let history       = [];   // [{role:'user'|'assistant', content:string}]
+  // history is a live reference to window.__chatHistory (per-session, persisted)
+  // We read it fresh each send() so session switches are reflected automatically.
   let isStreaming   = false;
   let mockCleared   = false;
+  let _retryTimer   = null;   // active countdown timer (null when idle)
+
+  // Expose mdToHtml globally so _renderChatForSession can use it before the IIFE finishes
+  // (hoisted via function declaration below — but for safety we also assign at the start)
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -2954,20 +4711,34 @@ let _streamInterval = setInterval(() => {
   function clearMock() {
     if (mockCleared) return;
     clearInterval(_streamInterval); // stop mock state cycling
-    chatConv.innerHTML = '';
+    // Only wipe the conv element if it still has mock/demo content
+    // (real messages are rendered by _renderChatForSession at startup)
+    if (!window.__chatHistory || window.__chatHistory.length === 0) {
+      chatConv.innerHTML = '';
+    }
     mockCleared = true;
   }
 
   // Very simple Markdown → HTML renderer (handles the most common Claude output patterns)
   function mdToHtml(raw) {
     // 1. Fenced code blocks  ```lang\ncode\n```
+    const RENDERABLE_LANGS = ['html', 'css', 'javascript', 'js', 'jsx', 'tsx', 'react'];
     let out = raw.replace(/```([\w\-+#.]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-      const l = escapeHTML(lang.trim() || 'code');
-      const c = escapeHTML(code.trimEnd());
+      const l    = escapeHTML(lang.trim() || 'code');
+      const lRaw = lang.trim().toLowerCase();
+      const c    = escapeHTML(code.trimEnd());
+      const canPreview = RENDERABLE_LANGS.includes(lRaw);
+      // Preview inline only makes sense for renderable types
+      const previewBtn = canPreview
+        ? `<button class="code-block__btn" data-action="preview" title="Preview inline"><i data-phosphor="eye"></i></button>`
+        : '';
       return `<div class="code-block"><div class="code-block__head">`
            + `<span class="code-block__lang">${l}</span>`
            + `<span class="code-block__actions">`
-           + `<button class="code-block__btn" data-action="copy" title="Copy"><i data-phosphor="copy"></i></button>`
+           + `<button class="code-block__btn" data-action="copy"          title="Copy"><i data-phosphor="copy"></i></button>`
+           + `<button class="code-block__btn" data-action="download"      title="Download"><i data-phosphor="download-simple"></i></button>`
+           + previewBtn
+           + `<button class="code-block__btn" data-action="open-in-panel" title="Open in panel"><i data-phosphor="browsers"></i></button>`
            + `</span></div><pre class="code-block__body">${c}</pre></div>`;
     });
 
@@ -3025,20 +4796,91 @@ let _streamInterval = setInterval(() => {
     scrollBottom();
   }
 
-  function addAssistantBubble() {
+  function addAssistantBubble(agent = null) {
     const div = document.createElement('div');
     div.className = 'msg msg--assistant msg--streaming';
+
+    // Agent chip — shown when a sub-agent is handling this turn
+    const agentChip = agent ? `
+      <div class="msg__agent-chip" style="--agent-color:${agent.color || '#7ab389'}">
+        <span class="msg__agent-chip__pulse"></span>
+        <span class="msg__agent-chip__label">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style="opacity:.7"><circle cx="8" cy="5" r="3"/><path d="M2 14c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>
+          Using agent: <strong>${escapeHTML(agent.name)}</strong>${agent.model ? ` <span style="opacity:.55">· ${escapeHTML(agent.model)}</span>` : ''}
+        </span>
+      </div>` : '';
+
     div.innerHTML = `
+      ${agentChip}
       <div class="msg__head">
         <div class="msg__dot msg__dot--thinking"></div>
         <span>Claude</span>
         <span class="msg__meta msg__meta--streaming">generating a response</span>
       </div>
+      <div class="msg__activity"></div>
       <div class="msg__body"></div>`;
     chatConv.appendChild(div);
     if (window.renderIcons) window.renderIcons(div);
     scrollBottom();
     return div;
+  }
+
+  // ── Tool activity chips ─────────────────────────────────────────────────
+  // Chips are injected via \x01ACT:{json}\x02 markers piggybacked on claude:chunk.
+  // addActivityChip() is the single injection point; the onChunk handler calls it.
+  const _activitySeen = new Set(); // dedupe across the whole streaming turn
+  let   _activityDiv  = null;      // the bubble div for the current turn
+
+  function addActivityChip(targetDiv, { type, file, tool, isSkill }) {
+    const activity = targetDiv?.querySelector('.msg__activity');
+    if (!activity) return;
+
+    let key, html;
+
+    if (type === 'read' && file) {
+      key = 'read:' + file;
+      if (_activitySeen.has(key)) return;
+      _activitySeen.add(key);
+      const icon  = isSkill ? 'book-open' : 'file-text';
+      const label = isSkill ? `Reading skill <strong>${escapeHTML(file)}</strong>`
+                            : `Reading <strong>${escapeHTML(file)}</strong>`;
+      html = `
+        <div class="msg__activity-chip msg__activity-chip--read">
+          <span class="msg__activity-chip__shimmer"></span>
+          <i data-phosphor="${icon}" class="msg__activity-chip__icon"></i>
+          <span class="msg__activity-chip__label">${label}</span>
+        </div>`;
+    } else if (type === 'tool' && tool) {
+      key = 'tool:' + tool;
+      if (_activitySeen.has(key)) return;
+      _activitySeen.add(key);
+      html = `
+        <div class="msg__activity-chip msg__activity-chip--tool">
+          <span class="msg__activity-chip__shimmer"></span>
+          <i data-phosphor="wrench" class="msg__activity-chip__icon"></i>
+          <span class="msg__activity-chip__label">Using <strong>${escapeHTML(tool)}</strong></span>
+        </div>`;
+    }
+
+    if (html) {
+      activity.insertAdjacentHTML('beforeend', html);
+      window.renderIcons?.(activity);
+      scrollBottom();
+    }
+  }
+
+  function startActivityListener(targetDiv) {
+    // Reset dedup set + store target for the chunk handler
+    _activitySeen.clear();
+    _activityDiv = targetDiv;
+    // Legacy onToolActivity path (only works if preload was reloaded):
+    const api = window.electronAPI;
+    if (api?.onToolActivity) {
+      api.onToolActivity(data => addActivityChip(targetDiv, data));
+    }
+  }
+  function stopActivityListener() {
+    _activityDiv = null;
   }
 
   function streamToAssistantBubble(div, text) {
@@ -3075,9 +4917,9 @@ let _streamInterval = setInterval(() => {
     if (body) body.innerHTML = `<p style="color:#c96442">${escapeHTML(message)}</p>`;
   }
 
-  // ── API key setup modal ───────────────────────────────────────────────────
+  // ── Auth modal (OAuth sign-in + optional API key fallback) ──────────────────
 
-  function showApiKeyModal(onSaved) {
+  function showAuthModal(onConnected) {
     const overlay = document.createElement('div');
     overlay.className = 'apikey-overlay';
     overlay.innerHTML = `
@@ -3085,44 +4927,118 @@ let _streamInterval = setInterval(() => {
         <div class="apikey-card__ico">
           <svg viewBox="0 0 24 24" fill="#d97757" width="32" height="32"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg>
         </div>
-        <h2 class="apikey-card__title">Connect Claude</h2>
-        <p class="apikey-card__desc">Paste your Anthropic API key to start chatting.<br>It's encrypted and stored only on this device.</p>
-        <div class="apikey-card__field">
-          <input id="apikey-input" type="password" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false"/>
-        </div>
-        <p class="apikey-card__hint">Get a key at <span style="color:#6a86c3">console.anthropic.com</span></p>
-        <div class="apikey-card__actions">
-          <button class="modal__btn" id="apikey-cancel">Later</button>
-          <button class="modal__btn modal__btn--primary" id="apikey-save">Connect →</button>
+        <h2 class="apikey-card__title">Connect to Claude</h2>
+        <p class="apikey-card__desc">Sign in with your Claude account to use your subscription, or paste an API key.</p>
+
+        <button class="modal__btn modal__btn--primary modal__btn--full" id="auth-oauth-btn">
+          Sign in with Claude account →
+        </button>
+        <p id="auth-waiting" style="display:none;color:#8a8a92;font-size:12px;margin:8px 0 0;text-align:center">
+          Waiting for browser sign-in…
+        </p>
+
+        <details class="apikey-details" style="margin-top:16px">
+          <summary style="cursor:pointer;font-size:12px;color:#8a8a92;user-select:none">Use API key instead</summary>
+          <div style="margin-top:10px">
+            <div class="apikey-card__field">
+              <input id="apikey-input" type="password" placeholder="sk-ant-api03-…" autocomplete="off" spellcheck="false"/>
+            </div>
+            <p class="apikey-card__hint">Get a key at <span style="color:#6a86c3">console.anthropic.com</span></p>
+            <div class="apikey-card__actions" style="margin-top:8px">
+              <button class="modal__btn modal__btn--primary" id="apikey-save">Save key →</button>
+            </div>
+          </div>
+        </details>
+
+        <div class="apikey-card__actions" style="margin-top:12px;justify-content:center">
+          <button class="modal__btn" id="auth-cancel">Later</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
 
-    const inp      = overlay.querySelector('#apikey-input');
-    const saveBtn  = overlay.querySelector('#apikey-save');
-    const cancelBtn= overlay.querySelector('#apikey-cancel');
+    const oauthBtn  = overlay.querySelector('#auth-oauth-btn');
+    const waiting   = overlay.querySelector('#auth-waiting');
+    const apikeyInp = overlay.querySelector('#apikey-input');
+    const saveBtn   = overlay.querySelector('#apikey-save');
+    const cancelBtn = overlay.querySelector('#auth-cancel');
 
-    setTimeout(() => inp.focus(), 50);
+    // Listen for auth-complete push from main process
+    let unsubAuth = null;
+    if (window.electronAPI?.onAuthComplete) {
+      unsubAuth = window.electronAPI.onAuthComplete((status) => {
+        if (status?.valid) {
+          overlay.remove();
+          updateAccountBadge(status);
+          onConnected?.();
+        }
+      });
+    }
 
-    const doSave = async () => {
-      const key = inp.value.trim();
-      if (!key) { inp.classList.add('is-error'); return; }
-      inp.classList.remove('is-error');
+    oauthBtn.addEventListener('click', async () => {
+      oauthBtn.disabled = true;
+      oauthBtn.textContent = 'Opening browser…';
+      waiting.style.display = 'block';
+      try {
+        await window.electronAPI.signIn();
+        // The onAuthComplete handler will close the modal on success
+        // If signIn() rejects, we show an error
+      } catch (err) {
+        console.error('[auth] sign-in failed:', err);
+        oauthBtn.disabled = false;
+        oauthBtn.textContent = 'Sign in with Claude account →';
+        waiting.style.display = 'none';
+        waiting.textContent = 'Sign-in failed. Try again or use an API key.';
+        waiting.style.color = '#c96442';
+        waiting.style.display = 'block';
+      }
+    });
+
+    const doSaveKey = async () => {
+      const key = apikeyInp.value.trim();
+      if (!key) { apikeyInp.classList.add('is-error'); return; }
+      apikeyInp.classList.remove('is-error');
       saveBtn.disabled = true;
       saveBtn.textContent = 'Saving…';
       await window.electronAPI.setApiKey(key);
+      unsubAuth?.();
       overlay.remove();
-      onSaved?.();
+      updateAccountBadge({ mode: 'apikey', valid: true });
+      onConnected?.();
     };
 
-    saveBtn.addEventListener('click', doSave);
-    cancelBtn.addEventListener('click', () => overlay.remove());
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') doSave(); });
+    saveBtn?.addEventListener('click', doSaveKey);
+    apikeyInp?.addEventListener('keydown', e => { if (e.key === 'Enter') doSaveKey(); });
+    cancelBtn.addEventListener('click', () => { unsubAuth?.(); overlay.remove(); });
   }
+
+  // ── Update sidebar account badge after auth ───────────────────────────────
+
+  function updateAccountBadge(status) {
+    const emailEl = document.getElementById('account-email');
+    if (!emailEl) return;
+    if (status?.mode === 'oauth' && status.valid) {
+      const tier = status.subscriptionType || status.rateLimitTier || 'Max';
+      const tierLabel = tier === 'claude_max_20x' ? 'Max · 20×'
+                      : tier === 'claude_max_5x'  ? 'Max · 5×'
+                      : tier === 'max'            ? 'Max'
+                      : tier === 'pro'            ? 'Pro'
+                      : tier;
+      emailEl.textContent = `${tierLabel} · hlaro…@gmail.com`;
+    } else if (status?.mode === 'apikey' && status.valid) {
+      emailEl.textContent = 'API Key · hlaro…@gmail.com';
+    } else {
+      emailEl.textContent = 'Not connected · hlaro…@gmail.com';
+    }
+  }
+
+  // Alias for legacy call-sites that still reference showApiKeyModal
+  function showApiKeyModal(onSaved) { showAuthModal(onSaved); }
 
   // ── Core send ─────────────────────────────────────────────────────────────
 
-  async function send(text) {
+  // opts.skipUI = true → don't re-add user bubble or push to history (used by rate-limit retry)
+  // opts.existingBubble → reuse an already-created assistant bubble
+  async function send(text, opts = {}) {
     text = text.trim();
     if (!text || isStreaming) return;
 
@@ -3139,44 +5055,234 @@ let _streamInterval = setInterval(() => {
       return;
     }
 
-    // Check for API key
-    const hasKey = await window.electronAPI.hasApiKey();
-    if (!hasKey) {
-      showApiKeyModal(() => send(text));
+    // Check for valid auth — ensureAuth() will silently refresh if expired
+    const ensureFn = window.electronAPI.ensureAuth || window.electronAPI.getAuthStatus;
+    const authStatus = await ensureFn();
+    if (!authStatus?.valid) {
+      showAuthModal(() => send(text));
       return;
     }
 
     // ----- Send -----
     clearMock();
     isStreaming = true;
-    sendBtn.disabled = true;
+    sendBtn.disabled = false;   // stays enabled — click during streaming = abort
     sendBtn.classList.add('is-streaming');
 
-    history.push({ role: 'user', content: text });
-    addUserBubble(text);
-    composerInput.value = '';
-    composerInput.style.height = '';
+    // Use the per-session history (window.__chatHistory)
+    const sessionId  = state.activeId;
+    const history    = window.__chatHistory;
+    const isFirstMsg = history.length === 0 && !opts.skipUI;
 
-    const aDiv = addAssistantBubble();
+    if (!opts.skipUI) {
+      // Remove empty-state placeholder the moment the user sends
+      document.getElementById('chat-scroll')?.querySelector('.chat-empty')?.remove();
+      history.push({ role: 'user', content: text });
+      addUserBubble(text);
+      composerInput.value = '';
+      composerInput.style.height = '';
+
+      // Auto-name the session from the first message (truncated to 50 chars)
+      if (isFirstMsg) {
+        const autoTitle = text.trim().slice(0, 50) + (text.length > 50 ? '…' : '');
+        updateSessionTitle(sessionId, autoTitle);
+        const activeRow = document.querySelector(`.session[data-session-id="${sessionId}"] .session__title`);
+        if (activeRow) activeRow.textContent = autoTitle;
+      }
+    }
+
+    // ── Agent resolution (must happen BEFORE bubble is created) ─────────────
+    // Priority: @agentname prefix in message > pill selection > default
+    let resolvedAgent = getActiveAgent?.() || null;
+    {
+      const messageText = history[history.length - 1]?.content || text || '';
+      const atMatch = messageText.match(/^@([\w\- ]+?)[\s,:]/i) ||
+                      messageText.match(/^@([\w\-]+)$/i) ||
+                      messageText.match(/use sub[\s-]?agent\s+([\w\- ]+?)(?:\s+to|\s*$)/i);
+      if (atMatch) {
+        const requestedName = atMatch[1].trim().toLowerCase();
+        const allAgents = loadAgents();
+        const found = allAgents.find(a => a.name.toLowerCase() === requestedName);
+        if (found) resolvedAgent = found;
+      }
+    }
+
+    // Reuse existing bubble (retry path) or create a fresh one
+    const aDiv = opts.existingBubble || addAssistantBubble(resolvedAgent);
     let responseText = '';
 
     // Subscribe to chunks before invoking (avoid race condition)
     const unsubChunk = window.electronAPI.onChunk(chunk => {
+      // Activity markers piggybacked on the chunk channel: \x01ACT:{json}\x02
+      if (chunk.charCodeAt(0) === 1 && chunk.charCodeAt(chunk.length - 1) === 2) {
+        try {
+          const data = JSON.parse(chunk.slice(5, -1)); // strip \x01ACT: (5 chars) and \x02 (1 char)
+          addActivityChip(aDiv, data);
+        } catch (_) {}
+        return; // don't append to responseText
+      }
       responseText += chunk;
       streamToAssistantBubble(aDiv, responseText);
     });
 
+    // Start listening for tool activity (skill reads, tool calls)
+    startActivityListener(aDiv);
+
+    // Subscribe to live todo updates from Claude's TodoWrite tool calls
+    const unsubTodo = window.electronAPI.onTodoUpdate?.(todos => {
+      window.__planTodos = todos;
+      // Reset expanded-task tracking so we re-auto-expand the active task
+      _planExpandedIdx = -1;
+      // If the Plan panel is currently visible, refresh it in place
+      if (currentRightPanel === 'plan') {
+        const body = document.querySelector('.right-panel__body');
+        if (body) {
+          body.innerHTML = renderPlanPanel();
+          renderIcons = window.renderIcons;
+          renderIcons?.();
+        }
+      }
+    });
+
     try {
+      // Read the full session entry from localStorage (findSession returns {list,index,source},
+      // NOT the session object itself — so we must use loadSessionList directly).
+      const sessionList  = loadSessionList();
+      const sessionEntry = sessionList.find(s => s.id === sessionId);
+      const cliSessionId = sessionEntry?.cliSessionId || null;
+
+      const agentModel     = resolvedAgent?.model?.trim() || null;
+      const effectiveModel = agentModel || modelState?.currentModel || 'claude-sonnet-4-6';
+      let effectiveSystem  = cliSessionId ? null : CHAT_SYSTEM_PROMPT;
+      if (resolvedAgent) {
+        const agentContext = [
+          resolvedAgent.system ? resolvedAgent.system : `You are an AI agent named "${resolvedAgent.name}".`,
+          resolvedAgent.notes  ? resolvedAgent.notes : null,
+        ].filter(Boolean).join('\n\n');
+        effectiveSystem = (effectiveSystem ? effectiveSystem + '\n\n' : '') + agentContext;
+      }
+
       const result = await window.electronAPI.sendMessage(
         history,
-        modelState?.currentModel?.id || 'claude-opus-4-5',
-        null
+        effectiveModel,
+        effectiveSystem,
+        cliSessionId
       );
       history.push({ role: 'assistant', content: responseText || result?.text || '' });
+      // Persist messages after successful exchange
+      saveSessionMessages(sessionId, history);
+      // Update session timestamp + store returned CLI session ID for next turn
+      // Re-read the list (could have changed) and update entry
+      const list  = loadSessionList();
+      const entry = list.find(s => s.id === sessionId);
+      if (entry) {
+        entry.ts = Date.now();
+        // Save the CLI session ID so future turns can --resume the same CLI session.
+        // Allow updating cliSessionId in case the CLI assigned a new one (resumed → new).
+        if (result?.cliSessionId) {
+          entry.cliSessionId = result.cliSessionId;
+        }
+        saveSessionList(list);
+      }
+      stopActivityListener();
       finalizeAssistantBubble(aDiv, result);
+
+      // ── Plan block detection (raw markdown, reliable) ─────────────────────
+      // Check AFTER finalize so the bubble is done, but on the raw responseText
+      // (not the rendered DOM — backticks are gone after mdToHtml).
+      const planTodos = parsePlanBlock(responseText);
+      if (planTodos?.length) {
+        window.__planTodos = planTodos;
+        _planExpandedIdx = -1;
+        const planBody = document.querySelector('.right-panel__body');
+        if (planBody && currentRightPanel === 'plan') {
+          planBody.innerHTML = renderPlanPanel();
+          window.renderIcons?.();
+        }
+        // Auto-open Plan panel
+        setRightPanelOpen(true);
+        setRightPanelTab('plan');
+      }
+
+      // Auto-open the Preview panel if the response contains renderable code
+      // (only if we didn't just open the Plan panel)
+      if (!planTodos?.length) {
+        const liveBlock = getLastRenderableCodeBlock();
+        if (liveBlock) {
+          setRightPanelOpen(true);
+          setRightPanelTab('apercu');
+        }
+      }
     } catch (err) {
-      if (err.message === 'NO_API_KEY' || err.message?.includes('NO_API_KEY')) {
-        showErrorBubble(aDiv, 'No API key set. Click the key icon in settings to add one.');
+      stopActivityListener();
+      if (err.message === 'NO_CREDENTIAL' || err.message?.includes('NO_CREDENTIAL') ||
+          err.message === 'NO_API_KEY'    || err.message?.includes('NO_API_KEY')) {
+        showErrorBubble(aDiv, 'Not connected. Sign in via the account menu.');
+        setTimeout(() => showAuthModal(() => send(text)), 300);
+      } else if (err.code === 'RATE_LIMIT' || err.message?.includes('429') || err.message?.includes('rate_limit')) {
+        const rawSec = err.retryAfter
+          || (() => { const m = err.message?.match(/Retry after (\d+)s/i); return m ? Number(m[1]) : null; })();
+
+        // If retryAfter is null (no header — CF burst block), use 120s.
+        // Retrying sooner just resets the burst window and keeps us blocked forever.
+        const waitSec = rawSec ? Math.max(rawSec, 10) : 120;
+        const isRetry = opts.skipUI; // true = this is already a retry attempt
+
+        history.pop(); // remove user msg from history
+
+        if (_retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
+
+        const bodyEl = aDiv.querySelector('.msg__body');
+        const metaEl = aDiv.querySelector('.msg__meta');
+        const dotEl  = aDiv.querySelector('.msg__dot');
+        aDiv.classList.remove('msg--streaming');
+        if (dotEl)  dotEl.className = 'msg__dot';
+        if (metaEl) { metaEl.className = 'msg__meta'; metaEl.textContent = 'Rate limited'; }
+
+        if (isRetry) {
+          // Already retried once and still 429 — stop looping, show manual button
+          if (bodyEl) bodyEl.innerHTML = `
+            <p style="color:#c96442;font-size:13px;margin:0 0 8px">
+              Still rate limited. Wait a few minutes before trying again.
+            </p>
+            <button id="rl-retry-btn" style="font-size:12px;padding:4px 12px;background:#1e1e24;
+              border:1px solid #c96442;color:#c96442;border-radius:6px;cursor:pointer">
+              Try again manually
+            </button>`;
+          bodyEl?.querySelector('#rl-retry-btn')?.addEventListener('click', () => {
+            aDiv.remove();
+            send(text);
+          });
+        } else {
+          // First 429 — countdown then one auto-retry
+          let sec = waitSec;
+          const updateWait = () => {
+            if (bodyEl) bodyEl.innerHTML =
+              `<p style="color:#c96442;font-size:13px">Rate limited — retrying in <strong>${sec}s</strong>…<br>
+              <span style="color:#5a5a63;font-size:11px">(waiting longer avoids resetting the rate-limit window)</span></p>`;
+          };
+          updateWait();
+
+          _retryTimer = setInterval(() => {
+            sec--;
+            if (sec <= 0) {
+              clearInterval(_retryTimer); _retryTimer = null;
+              aDiv.classList.add('msg--streaming');
+              if (dotEl)  dotEl.className = 'msg__dot msg__dot--thinking';
+              if (metaEl) { metaEl.className = 'msg__meta msg__meta--streaming'; metaEl.textContent = 'generating a response'; }
+              if (bodyEl) bodyEl.innerHTML = '';
+              send(text, { skipUI: true, existingBubble: aDiv }); // one retry
+            } else {
+              updateWait();
+            }
+          }, 1000);
+        }
+        // Skip the history.pop() below (already done above)
+        return;
+      } else if (err.message?.includes('401') || err.message?.includes('authentication')) {
+        showErrorBubble(aDiv, 'Authentication error. Try signing out and back in.');
+      } else if (err.message?.includes('529') || err.message?.includes('overloaded')) {
+        showErrorBubble(aDiv, 'Claude is overloaded right now — please try again in a moment.');
       } else {
         showErrorBubble(aDiv, err.message || 'Unknown error');
       }
@@ -3184,15 +5290,21 @@ let _streamInterval = setInterval(() => {
       history.pop();
     } finally {
       unsubChunk?.();
+      unsubTodo?.();
       isStreaming = false;
-      sendBtn.disabled = false;
       sendBtn.classList.remove('is-streaming');
     }
   }
 
   // ── Composer wiring ───────────────────────────────────────────────────────
 
-  sendBtn.addEventListener('click', () => send(composerInput.value));
+  sendBtn.addEventListener('click', () => {
+    if (isStreaming) {
+      window.electronAPI?.abort?.();   // kill subprocess — close fires, partial text kept
+    } else {
+      send(composerInput.value);
+    }
+  });
 
   composerInput.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -3207,15 +5319,303 @@ let _streamInterval = setInterval(() => {
     composerInput.style.height = Math.min(composerInput.scrollHeight, 200) + 'px';
   });
 
-  // ── Startup: check for API key ────────────────────────────────────────────
+  // ── Startup: silently refresh if expired, then check, prompt if needed ───────
 
   if (window.electronAPI?.isElectron) {
-    window.electronAPI.hasApiKey().then(has => {
-      if (!has) {
-        // Show key modal after a brief delay so the UI renders first
-        setTimeout(() => showApiKeyModal(), 800);
+    // ensureAuth() calls getCredential() which auto-refreshes expired tokens,
+    // then returns the updated status — no sign-in modal for normal expiry.
+    const ensureFn = window.electronAPI.ensureAuth || window.electronAPI.getAuthStatus;
+    ensureFn().then(status => {
+      updateAccountBadge(status);
+      if (!status?.valid) {
+        setTimeout(() => showAuthModal(), 800);
       }
+    });
+
+    // Listen for auth-complete pushes at the top level too (after sign-in)
+    window.electronAPI.onAuthComplete?.(status => {
+      updateAccountBadge(status);
     });
   }
 
+  // ── Desktop notification when response finishes while window is in bg ────────
+
+  // ── Plan-block parser ─────────────────────────────────────────────────────
+  // Detects ```plan ... ``` blocks in the response and populates the Plan panel.
+  // This is a reliable fallback when TodoWrite IPC isn't available.
+  function parsePlanBlock(responseText) {
+    const rx = /```(?:plan|tasks|todo(?:list)?)\r?\n([\s\S]*?)```/gi;
+    let match;
+    let todos = null;
+
+    while ((match = rx.exec(responseText)) !== null) {
+      const raw = match[1].trim();
+
+      // ── JSON array ──────────────────────────────────────────────────────
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          todos = parsed.map((t, i) => ({
+            id:       String(t.id ?? i + 1),
+            content:  t.content || t.task || t.title || String(t),
+            status:   t.status   || 'pending',
+            priority: t.priority || 'medium',
+            time:     t.time     || t.timeRange || null,
+            note:     t.note     || null,
+            subtasks: (t.subtasks || t.subs || []),
+          }));
+          break;
+        }
+      } catch { /* not JSON */ }
+
+      // ── Markdown task list with optional subtasks (indented lines) ──────
+      // Status map: [ ] pending  [~] in_progress  [x]/[X] done
+      //             [-] cancelled  [!] blocked  [/] review
+      const STATUS_MAP = {
+        ' ': 'pending', '': 'pending',
+        '~': 'in_progress', 'x': 'completed', 'X': 'completed',
+        '-': 'cancelled', '!': 'blocked', '/': 'review',
+      };
+
+      const rawLines = raw.split(/\r?\n/);
+      const result   = [];
+      let   current  = null;
+
+      for (const rawLine of rawLines) {
+        if (!rawLine.trim()) continue;
+
+        // Detect indentation level (2+ spaces or a tab = subtask)
+        const isSubtask = /^(?:  +|\t)/.test(rawLine);
+        const line      = rawLine.trim();
+
+        // Parse checkbox: - [x] or [x] or * [x]
+        const cbMatch = line.match(/^(?:[-*]\s*)?\[([^\]]*)\]\s*(.*)/);
+        const bullet  = !cbMatch && /^[-*]\s+/.test(line);
+
+        let status   = 'pending';
+        let content  = line;
+
+        if (cbMatch) {
+          const marker = cbMatch[1].trim();
+          status  = STATUS_MAP[marker] ?? 'pending';
+          content = cbMatch[2].trim();
+        } else if (bullet) {
+          content = line.replace(/^[-*]\s+/, '').trim();
+        } else {
+          // Numbered list: "1. ..." or plain text
+          content = line.replace(/^\d+[.)]\s*/, '').trim();
+        }
+
+        // Strip **bold** and *italic* markdown
+        content = content.replace(/\*{1,2}([^*]+)\*{1,2}/g, '$1').trim();
+
+        // Extract time range from content: "8:00-9:00 | Task title | priority"
+        // or "08:00 – 10:00 Task title"
+        let time     = null;
+        let priority = 'medium';
+
+        const pipeMatch = content.match(/^([\d:]+\s*[-–]\s*[\d:]+)\s*[|:]\s*(.*?)(?:\s*[|:]\s*(high|medium|low))?$/i);
+        if (pipeMatch) {
+          time     = pipeMatch[1].trim();
+          content  = pipeMatch[2].trim();
+          priority = (pipeMatch[3] || 'medium').toLowerCase();
+        } else {
+          // Try "8:00-9:00 Task" format (time at start without pipe)
+          const timePrefix = content.match(/^([\d:]+\s*[-–]\s*[\d:]+)\s+(.*)/);
+          if (timePrefix) {
+            time    = timePrefix[1].trim();
+            content = timePrefix[2].trim();
+          }
+          // Try inline priority suffix: "Task title | high"
+          const priMatch = content.match(/^(.*)\s*[|:]\s*(high|medium|low)$/i);
+          if (priMatch) {
+            content  = priMatch[1].trim();
+            priority = priMatch[2].toLowerCase();
+          }
+        }
+
+        if (!content) continue;
+
+        if (isSubtask && current) {
+          current.subtasks.push({ content, status });
+        } else {
+          current = { id: String(result.length + 1), content, status, priority, time, note: null, subtasks: [] };
+          result.push(current);
+        }
+      }
+
+      if (result.length) { todos = result; break; }
+    }
+
+    return todos?.length ? todos : null;
+  }
+
+  const origFinalize = finalizeAssistantBubble;
+  function finalizeAssistantBubbleWrapped(div, stats) {
+    origFinalize(div, stats);
+    if (window.electronAPI?.notify && document.hidden) {
+      window.electronAPI.notify('Claude Code', 'Response ready');
+    }
+  }
+
+  // ── Expose mdToHtml globally so _renderChatForSession can use it ─────────────
+  // (_renderChatForSession is called from outside this IIFE on session switches)
+  window.mdToHtml = mdToHtml;
+
+  // ── Startup render: show saved messages (removes the empty-state placeholder) ─
+  // Without this, the "How can I help you today?" persists even if the session
+  // has prior messages — because _renderChatForSession is only called on switches.
+  clearInterval(_streamInterval); // stop the demo state cycle immediately
+  mockCleared = true;
+  _renderChatForSession(state.activeId);
+
 })(); // end initLiveChat
+
+// ── Global keyboard shortcuts (renderer-side) ─────────────────────────────────
+
+(function initGlobalKeys() {
+  if (!window.electronAPI?.isElectron) return;
+
+  // Find-in-page bar
+  let findBar = null;
+  function showFindBar() {
+    if (findBar) { findBar.querySelector('input')?.focus(); return; }
+    findBar = document.createElement('div');
+    findBar.className = 'find-bar';
+    findBar.innerHTML = `
+      <input id="find-input" type="text" placeholder="Find in page…" autocomplete="off" spellcheck="false"/>
+      <button id="find-prev" title="Previous (Shift+Enter)">▲</button>
+      <button id="find-next" title="Next (Enter)">▼</button>
+      <button id="find-close" title="Close (Esc)">✕</button>
+    `;
+    document.body.appendChild(findBar);
+    const inp = findBar.querySelector('#find-input');
+    const closeFn = () => {
+      window.electronAPI.findStop();
+      findBar.remove();
+      findBar = null;
+    };
+    inp.addEventListener('input', () => window.electronAPI.findStart(inp.value));
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && e.shiftKey)  window.electronAPI.findPrev(inp.value);
+      else if (e.key === 'Enter')            window.electronAPI.findNext(inp.value);
+      else if (e.key === 'Escape')           closeFn();
+    });
+    findBar.querySelector('#find-next').addEventListener('click', () => window.electronAPI.findNext(inp.value));
+    findBar.querySelector('#find-prev').addEventListener('click', () => window.electronAPI.findPrev(inp.value));
+    findBar.querySelector('#find-close').addEventListener('click', closeFn);
+    setTimeout(() => inp.focus(), 30);
+  }
+
+  document.addEventListener('keydown', e => {
+    // Ctrl+F → Find
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      e.preventDefault();
+      showFindBar();
+    }
+    // Ctrl+, → Settings/Profile
+    if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+      e.preventDefault();
+      if (typeof openProfileModal === 'function') openProfileModal('profile');
+    }
+    // Ctrl+` → Console
+    if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+      e.preventDefault();
+      showConsole();
+    }
+  });
+
+  document.getElementById('console-btn')?.addEventListener('click', () => showConsole());
+})();
+
+// ── Ctrl + Scroll zoom ───────────────────────────────────────────────────────
+
+(function initZoom() {
+  const api    = window.electronAPI;
+  if (!api?.zoom) return;
+
+  const ZOOM_KEY  = 'ccmod.zoom';
+  const ZOOM_MIN  = 0.5;
+  const ZOOM_MAX  = 2.5;
+  const ZOOM_STEP = 0.08;
+
+  // Restore persisted zoom
+  const saved = parseFloat(localStorage.getItem(ZOOM_KEY));
+  if (!isNaN(saved)) api.zoom.set(saved);
+
+  // HUD overlay
+  let _hudTimer = null;
+  const hud = document.createElement('div');
+  hud.id = 'zoom-hud';
+  hud.style.cssText = [
+    'position:fixed', 'bottom:48px', 'left:50%', 'transform:translateX(-50%)',
+    'background:rgba(20,20,22,0.88)', 'border:1px solid #27272c',
+    'color:#e7e7ea', 'font-size:13px', 'font-weight:500',
+    'padding:5px 14px', 'border-radius:20px', 'pointer-events:none',
+    'opacity:0', 'transition:opacity 0.15s', 'z-index:99999',
+    'backdrop-filter:blur(6px)', '-webkit-backdrop-filter:blur(6px)',
+  ].join(';');
+  document.body.appendChild(hud);
+
+  function showHud(factor) {
+    hud.textContent = `${Math.round(factor * 100)}%`;
+    hud.style.opacity = '1';
+    clearTimeout(_hudTimer);
+    _hudTimer = setTimeout(() => { hud.style.opacity = '0'; }, 1200);
+  }
+
+  // Ctrl + Wheel
+  window.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+
+    const current = api.zoom.get();
+    const delta   = e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
+    const next    = Math.round(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, current + delta)) * 100) / 100;
+
+    api.zoom.set(next);
+    localStorage.setItem(ZOOM_KEY, next);
+    showHud(next);
+  }, { passive: false });
+
+  // Ctrl+0 → reset to 100 %
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === '0') {
+      e.preventDefault();
+      api.zoom.set(1);
+      localStorage.setItem(ZOOM_KEY, 1);
+      showHud(1);
+    }
+  });
+})();
+
+// ── Custom title bar ──────────────────────────────────────────────────────────
+
+(function initTitleBar() {
+  const api = window.electronAPI;
+
+  // Mark body so CSS can show/hide the bar
+  if (api?.isElectron) document.body.classList.add('is-electron');
+
+  const tbClose    = document.getElementById('tb-close');
+  const tbMinimize = document.getElementById('tb-minimize');
+  const tbMaximize = document.getElementById('tb-maximize');
+
+  if (!tbClose) return; // bar not present (non-Electron or old HTML)
+
+  tbClose   ?.addEventListener('click', () => api?.closeWindow?.());
+  tbMinimize?.addEventListener('click', () => api?.minimize?.());
+  tbMaximize?.addEventListener('click', () => api?.maximize?.());
+
+  // Sync the restore icon on the maximize button
+  function setMaxState(isMax) {
+    tbMaximize?.classList.toggle('is-maximized', isMax);
+    tbMaximize?.setAttribute('title', isMax ? 'Restore' : 'Maximize');
+  }
+
+  // Query initial state
+  api?.isMaximized?.().then?.(setMaxState);
+
+  // Listen for subsequent changes
+  api?.onMaximizeChange?.(setMaxState);
+})();
