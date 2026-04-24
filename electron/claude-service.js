@@ -1,129 +1,694 @@
 'use strict';
 
-const Anthropic = require('@anthropic-ai/sdk');
-const { safeStorage, app }  = require('electron');
-const path = require('path');
-const fs   = require('fs');
+const Anthropic  = require('@anthropic-ai/sdk');
+const { safeStorage, app, shell } = require('electron');
+const http   = require('http');
+const crypto = require('crypto');
+const path   = require('path');
+const fs     = require('fs');
+const https  = require('https');
+const { spawn, execSync } = require('child_process');
 
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const OAUTH_CLIENT_ID  = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+// claude.ai/oauth/authorize — for Max subscribers (has existing session in system browser)
+const AUTH_URL         = 'https://claude.ai/oauth/authorize';
+// Token endpoint is always platform.claude.com regardless of which authorize URL was used
+const TOKEN_URL        = 'https://platform.claude.com/v1/oauth/token';
+const CREATE_KEY_URL   = 'https://api.anthropic.com/api/oauth/claude_cli/create_api_key';
+const SCOPES           = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
+
+// Where the Claude Code CLI stores OAuth credentials
+const CLI_CREDS_PATH   = path.join(
+  process.env.USERPROFILE || process.env.HOME || '~',
+  '.claude', '.credentials.json'
+);
+
+// Our own encrypted API-key config (for users who paste a raw key instead of OAuth)
 const CONFIG_PATH = path.join(app.getPath('userData'), 'claude-desktop-config.json');
 
-// ── Config persistence ──────────────────────────────────────────────────────
+// ── Config helpers ───────────────────────────────────────────────────────────
 
 function readConfig() {
   try   { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
   catch { return {}; }
 }
-
 function writeConfig(cfg) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8');
 }
 
-// ── API key (encrypted with OS keychain via safeStorage) ────────────────────
+// ── Raw API-key storage (encrypted, for manual-key flow) ─────────────────────
 
-function getApiKey() {
+function getRawApiKey() {
   const cfg = readConfig();
   if (!cfg.encryptedKey) return null;
   try {
     const buf = Buffer.from(cfg.encryptedKey, 'base64');
-    if (safeStorage.isEncryptionAvailable()) {
-      return safeStorage.decryptString(buf);
-    }
-    // Fallback (no OS keychain): plain base64
-    return buf.toString('utf8');
+    return safeStorage.isEncryptionAvailable()
+      ? safeStorage.decryptString(buf)
+      : buf.toString('utf8');
   } catch { return null; }
 }
-
-function setApiKey(key) {
+function setRawApiKey(key) {
   const cfg = readConfig();
-  if (safeStorage.isEncryptionAvailable()) {
-    cfg.encryptedKey = safeStorage.encryptString(key).toString('base64');
-  } else {
-    // No OS keychain — store as plain base64 (less secure, but still local-only)
-    cfg.encryptedKey = Buffer.from(key, 'utf8').toString('base64');
-  }
+  cfg.encryptedKey = safeStorage.isEncryptionAvailable()
+    ? safeStorage.encryptString(key).toString('base64')
+    : Buffer.from(key, 'utf8').toString('base64');
   writeConfig(cfg);
 }
-
-function hasApiKey() {
-  return !!getApiKey();
-}
-
-function clearApiKey() {
+function clearRawApiKey() {
   const cfg = readConfig();
   delete cfg.encryptedKey;
   writeConfig(cfg);
 }
 
-// ── Model ID normalization ──────────────────────────────────────────────────
+// ── CLI credential helpers ───────────────────────────────────────────────────
 
-const MODEL_MAP = {
-  'claude-opus-4-5':          'claude-opus-4-5',
-  'claude-opus-4':            'claude-opus-4-5',
-  'claude-sonnet-4-5':        'claude-sonnet-4-5',
-  'claude-sonnet-4':          'claude-sonnet-4-5',
-  'claude-haiku-3-5':         'claude-haiku-3-5-20241022',
-  'claude-haiku-3.5':         'claude-haiku-3-5-20241022',
-  'claude-3-5-sonnet':        'claude-3-5-sonnet-20241022',
-  'claude-3-5-haiku':         'claude-3-5-haiku-20241022',
-};
-
-function resolveModel(id) {
-  if (!id) return 'claude-opus-4-5';
-  return MODEL_MAP[id] || id;
+function readCliCreds() {
+  try   { return JSON.parse(fs.readFileSync(CLI_CREDS_PATH, 'utf8')); }
+  catch { return null; }
+}
+function writeCliCreds(creds) {
+  const dir = path.dirname(CLI_CREDS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(CLI_CREDS_PATH, JSON.stringify(creds, null, 2), 'utf8');
 }
 
-// ── Streaming chat ──────────────────────────────────────────────────────────
+function getOAuthEntry() {
+  const creds = readCliCreds();
+  return creds?.claudeAiOauth ?? null;
+}
 
-/**
- * Stream a message to Claude and forward chunks to the renderer via IPC.
- * @param {Electron.IpcMainInvokeEvent} event
- * @param {Array<{role:'user'|'assistant', content:string}>} messages
- * @param {string} modelId
- * @param {string|null} systemPrompt
- */
-async function streamMessage(event, messages, modelId, systemPrompt) {
-  const key = getApiKey();
-  if (!key) {
-    const err = new Error('NO_API_KEY');
-    err.code  = 'NO_API_KEY';
-    throw err;
+function isTokenValid(oauth) {
+  if (!oauth?.accessToken) return false;
+  // expiresAt is in milliseconds
+  const expiresMs = Number(oauth.expiresAt);
+  return expiresMs > Date.now() + 30_000; // 30s buffer
+}
+
+// ── Token refresh ────────────────────────────────────────────────────────────
+
+// OAuth token endpoints require application/x-www-form-urlencoded (RFC 6749).
+// Pass useForm=true for token/refresh calls; false for JSON APIs.
+async function httpPost(url, body, useForm = false) {
+  return new Promise((resolve, reject) => {
+    const payload = useForm
+      ? Object.entries(body).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+      : JSON.stringify(body);
+    const contentType = useForm ? 'application/x-www-form-urlencoded' : 'application/json';
+    const u = new URL(url);
+    const opts = {
+      hostname: u.hostname,
+      path:     u.pathname + u.search,
+      method:   'POST',
+      headers:  {
+        'Content-Type':   contentType,
+        'Content-Length': Buffer.byteLength(payload),
+        'User-Agent':     'claude-code-desktop/0.1.0',
+      },
+    };
+    const req = https.request(opts, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try   { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function refreshOAuthToken(refreshToken) {
+  const body = {
+    grant_type:    'refresh_token',
+    refresh_token: refreshToken,
+    client_id:     OAUTH_CLIENT_ID,
+  };
+  const res = await httpPost(TOKEN_URL, body, true); // form-encoded
+  if (res.status !== 200 || !res.body.access_token) {
+    throw new Error(`Token refresh failed: ${JSON.stringify(res.body)}`);
+  }
+  return {
+    accessToken:  res.body.access_token,
+    refreshToken: res.body.refresh_token || refreshToken,
+    expiresAt:    Date.now() + (res.body.expires_in ?? 3600) * 1000,
+  };
+}
+
+// ── Exchange OAuth access token for a real Anthropic API key ─────────────────
+
+async function exchangeForApiKey(accessToken) {
+  // This endpoint requires Bearer auth
+  return new Promise((resolve, reject) => {
+    const u = new URL(CREATE_KEY_URL);
+    const opts = {
+      hostname: u.hostname,
+      path:     u.pathname,
+      method:   'POST',
+      headers:  {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type':  'application/json',
+        'User-Agent':    'claude-code-desktop/0.1.0',
+        'anthropic-version': '2023-06-01',
+      },
+    };
+    const req = https.request(opts, res2 => {
+      let data = '';
+      res2.on('data', c => data += c);
+      res2.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          if (j.api_key) resolve(j.api_key);
+          else           reject(new Error(JSON.stringify(j)));
+        } catch { reject(new Error(data)); }
+      });
+    });
+    req.on('error', reject);
+    req.write('{}');
+    req.end();
+  });
+}
+
+// ── Get a valid auth credential for the Anthropic SDK ───────────────────────
+// Max/Pro subscribers use OAuth Bearer auth. The API requires the header
+// 'x-app: cli' to accept Bearer tokens (same as Claude Code CLI does).
+// API-key users (platform.claude.com) fall back to raw key auth.
+
+async function getCredential() {
+  // 1. Try CLI OAuth credentials (subscription auth)
+  const oauth = getOAuthEntry();
+  if (oauth) {
+    if (isTokenValid(oauth)) {
+      return { authToken: oauth.accessToken, mode: 'oauth', subscriptionType: oauth.subscriptionType };
+    }
+    // Expired — try to refresh
+    if (oauth.refreshToken) {
+      try {
+        const fresh = await refreshOAuthToken(oauth.refreshToken);
+        const creds = readCliCreds() || {};
+        creds.claudeAiOauth = {
+          ...oauth,
+          accessToken:  fresh.accessToken,
+          refreshToken: fresh.refreshToken,
+          expiresAt:    fresh.expiresAt,
+        };
+        writeCliCreds(creds);
+        return { authToken: fresh.accessToken, mode: 'oauth', subscriptionType: oauth.subscriptionType };
+      } catch (err) {
+        console.error('[auth] refresh failed:', err.message);
+        // Fall through to raw API key
+      }
+    }
   }
 
-  const client = new Anthropic({ apiKey: key });
+  // 2. Fall back to manually-entered raw API key
+  const rawKey = getRawApiKey();
+  if (rawKey) return { apiKey: rawKey, mode: 'apikey' };
+
+  // 3. Nothing available
+  const err = new Error('NO_CREDENTIAL');
+  err.code = 'NO_CREDENTIAL';
+  throw err;
+}
+
+// ── Auth status (safe to expose to renderer) ─────────────────────────────────
+
+function getAuthStatus() {
+  const oauth = getOAuthEntry();
+  if (oauth) {
+    const valid   = isTokenValid(oauth);
+    const expired = !valid && !!oauth.accessToken;
+    return {
+      mode:             'oauth',
+      valid,
+      expired,
+      subscriptionType: oauth.subscriptionType,
+      rateLimitTier:    oauth.rateLimitTier,
+      scopes:           oauth.scopes,
+    };
+  }
+  const hasKey = !!getRawApiKey();
+  return { mode: hasKey ? 'apikey' : 'none', valid: hasKey, expired: false };
+}
+
+// ── Full OAuth PKCE sign-in flow ─────────────────────────────────────────────
+// Opens claude.ai/oauth/authorize in the user's DEFAULT system browser so it
+// can reuse the existing claude.ai session (no magic-link needed).
+// Spins up a local HTTP server on localhost (not 127.0.0.1 — the whitelist is
+// hostname-specific) to receive the callback.
+
+async function startOAuthSignIn(senderWindow) {
+  const verifier  = crypto.randomBytes(32).toString('base64url');
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  const state     = crypto.randomBytes(16).toString('hex');
+
+  return new Promise((resolve, reject) => {
+    const server = http.createServer();
+    server.listen(0, '127.0.0.1', async () => {
+      const port        = server.address().port;
+      const redirectUri = `http://localhost:${port}/callback`; // ← localhost, not 127.0.0.1
+
+      let handled = false;
+      server.on('request', async (req, res) => {
+        if (handled) return;
+        const url = new URL(req.url, `http://localhost:${port}`);
+        if (url.pathname !== '/callback') return;
+        handled = true;
+        server.close();
+
+        // Show a success page in the browser
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Claude — signed in</title>
+<style>body{font-family:system-ui;background:#0b0b0c;color:#e7e7ea;display:flex;align-items:center;
+justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px}
+h1{font-size:22px}p{color:#8a8a92;font-size:14px}</style></head>
+<body><h1>✓ Connected to Claude</h1><p>You can close this tab and return to the app.</p></body></html>`);
+
+        const code = url.searchParams.get('code');
+        const st   = url.searchParams.get('state');
+        if (!code || st !== state) { reject(new Error('Invalid OAuth callback')); return; }
+
+        try {
+          // Exchange authorization code for tokens (form-encoded per RFC 6749)
+          const tokenRes = await httpPost(TOKEN_URL, {
+            grant_type:    'authorization_code',
+            code,
+            redirect_uri:  redirectUri,
+            client_id:     OAUTH_CLIENT_ID,
+            code_verifier: verifier,
+            state,
+          }, true); // ← form-encoded
+          if (tokenRes.status !== 200 || !tokenRes.body.access_token) {
+            throw new Error(`Token exchange failed (${tokenRes.status}): ${JSON.stringify(tokenRes.body)}`);
+          }
+
+          const { access_token, refresh_token, expires_in } = tokenRes.body;
+
+          // Persist to CLI credentials file
+          const existing = readCliCreds() || {};
+          existing.claudeAiOauth = {
+            ...(existing.claudeAiOauth || {}),
+            accessToken:  access_token,
+            refreshToken: refresh_token,
+            expiresAt:    Date.now() + (expires_in ?? 3600) * 1000,
+            scopes:       SCOPES.split(' '),
+          };
+          writeCliCreds(existing);
+
+          resolve({ accessToken: access_token });
+          senderWindow?.webContents?.send('claude:auth-complete', getAuthStatus());
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      // Build auth URL and open in the user's default browser (has existing claude.ai session)
+      const authUrl = new URL(AUTH_URL);
+      authUrl.searchParams.set('response_type',         'code');
+      authUrl.searchParams.set('client_id',             OAUTH_CLIENT_ID);
+      authUrl.searchParams.set('redirect_uri',          redirectUri);
+      authUrl.searchParams.set('scope',                 SCOPES);
+      authUrl.searchParams.set('state',                 state);
+      authUrl.searchParams.set('code_challenge',        challenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+
+      shell.openExternal(authUrl.toString());
+    });
+
+    server.on('error', reject);
+    setTimeout(() => { server.close(); reject(new Error('OAuth timeout (5 min)')); }, 5 * 60 * 1000);
+  });
+}
+
+// ── CLI subprocess helpers ───────────────────────────────────────────────────
+
+// Locate the real claude CLI binary. Prefers the .exe on Windows (no shell overhead).
+// Called once and cached — we don't want to `execSync where` on every message.
+let _cachedCliBinary = undefined;
+
+// Track the currently running subprocess so we can kill it on user abort
+let _currentProc = null;
+
+function abortCurrentStream() {
+  if (_currentProc) {
+    try { _currentProc.kill(); } catch {}
+    _currentProc = null;
+    return true;
+  }
+  return false;
+}
+
+function findClaudeBinary() {
+  // Direct known paths (fastest — no shell)
+  const candidates = [
+    process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.local', 'bin', 'claude.exe'),
+    process.env.APPDATA     && path.join(process.env.APPDATA, 'npm', 'claude.cmd'),
+    process.env.USERPROFILE && path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm', 'claude.cmd'),
+  ].filter(Boolean);
+
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+
+  // Fallback: ask the shell
+  for (const query of ['where claude.exe 2>nul', 'where claude 2>nul']) {
+    try {
+      const out   = execSync(query, { encoding: 'utf8', timeout: 2000 }).trim();
+      const lines = out.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const exe   = lines.find(l => l.endsWith('.exe'));
+      const cmd   = lines.find(l => l.endsWith('.cmd'));
+      const hit   = exe || cmd || lines[0];
+      if (hit) { try { if (fs.existsSync(hit)) return hit; } catch {} }
+    } catch {}
+  }
+
+  return null;
+}
+
+function getCliBinary() {
+  if (_cachedCliBinary === undefined) {
+    _cachedCliBinary = findClaudeBinary();
+    if (_cachedCliBinary) console.log(`[claude-cli] found binary: ${_cachedCliBinary}`);
+    else                   console.warn('[claude-cli] binary not found — falling back to SDK');
+  }
+  return _cachedCliBinary;
+}
+
+// Stream a message through the real claude CLI subprocess.
+// Uses --output-format stream-json --verbose so we get session_id and incremental text.
+// cliSessionId (if set) is passed as --resume so the CLI maintains conversation context.
+async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary) {
+  const model   = resolveModel(modelId);
+  const lastMsg = messages[messages.length - 1];
+  if (!lastMsg || lastMsg.role !== 'user') throw new Error('Last message must be from user');
+
+  const args = [
+    '-p', lastMsg.content,
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--model', model,
+  ];
+  if (cliSessionId)  args.push('--resume', cliSessionId);
+  // For the very first turn we can optionally inject system context
+  if (systemPrompt && !cliSessionId) args.push('--system-prompt', systemPrompt);
+
+  const isCmd = binary.endsWith('.cmd');
+  console.log(`[claude-cli] spawn ${isCmd ? '(shell)' : '(exe)'}  model=${model}  resume=${cliSessionId || 'new'}`);
+
+  return new Promise((resolve, reject) => {
+    // Set cwd to the app root so the CLI picks up CLAUDE.md + skills/ automatically
+    const appRoot = path.resolve(__dirname, '..');
+    const proc = spawn(binary, args, {
+      cwd:         appRoot,
+      env:         { ...process.env },
+      windowsHide: true,
+      shell:       isCmd,    // .cmd files need shell=true on Windows; .exe does not
+      stdio:       ['ignore', 'pipe', 'pipe'],  // close stdin so CLI doesn't wait for pipe data
+    });
+    _currentProc = proc;
+
+    let buffer       = '';
+    let fullText     = '';
+    let lastTextLen  = 0;   // assistant events are cumulative — diff to get incremental chunks
+    let newSessionId = cliSessionId || null;
+    let inputTokens  = 0;
+    let outputTokens = 0;
+    let settled      = false;
+
+    const settle = (ok, val) => {
+      if (settled) return;
+      settled = true;
+      if (ok) resolve(val); else reject(val);
+    };
+
+    const processLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let ev;
+      try { ev = JSON.parse(trimmed); } catch { return; }
+
+      switch (ev.type) {
+        case 'system':
+          if (ev.subtype === 'init' && ev.session_id) {
+            newSessionId = ev.session_id;
+            console.log(`[claude-cli] session=${newSessionId}  model=${ev.model}`);
+          }
+          break;
+
+        case 'assistant': {
+          const content = ev.message?.content || [];
+          // Text blocks are cumulative — send only the new delta
+          const text    = content.filter(c => c.type === 'text').map(c => c.text).join('');
+          const newPart = text.slice(lastTextLen);
+          if (newPart) {
+            fullText   += newPart;
+            lastTextLen = text.length;
+            event.sender.send('claude:chunk', newPart);
+          }
+          // Tool-use blocks — watch for TodoWrite + skill reads
+          for (const block of content) {
+            if (block.type === 'tool_use') {
+              console.log(`[claude-cli] tool_use: name=${block.name}  input=${JSON.stringify(block.input)?.slice(0, 200)}`);
+
+              // TodoWrite → live Plan panel update
+              if (
+                (block.name === 'TodoWrite' || block.name === 'todo_write') &&
+                (Array.isArray(block.input?.todos) || Array.isArray(block.input))
+              ) {
+                const todos = Array.isArray(block.input?.todos) ? block.input.todos : block.input;
+                event.sender.send('claude:todo-update', todos);
+              }
+
+              // File reads → inject activity marker into the chunk stream
+              // (reuses existing claude:chunk IPC — no preload change needed)
+              const readNames = ['read', 'read_file', 'readfile', 'view', 'cat'];
+              if (readNames.includes((block.name || '').toLowerCase())) {
+                const fp      = block.input?.file_path || block.input?.path || block.input?.filename || '';
+                const name    = fp.split(/[/\\]/).pop();
+                const isSkill = fp.includes('skills/') || fp.includes('skills\\') || name.endsWith('.md');
+                if (name) {
+                  const payload = JSON.stringify({ type: 'read', file: name, isSkill });
+                  event.sender.send('claude:chunk', '\x01ACT:' + payload + '\x02');
+                }
+              }
+
+              // Any other non-todo tool → generic activity ping
+              const skipGeneric = ['TodoWrite', 'todo_write', 'Read', 'read_file', 'read', 'cat', 'view'];
+              if (!skipGeneric.includes((block.name || '').toLowerCase())) {
+                const payload = JSON.stringify({ type: 'tool', tool: block.name });
+                event.sender.send('claude:chunk', '\x01ACT:' + payload + '\x02');
+              }
+            }
+          }
+          break;
+        }
+
+        // Some CLI versions emit tool_use as a top-level event
+        case 'tool_use': {
+          console.log(`[claude-cli] top-level tool_use: name=${ev.name}  input=${JSON.stringify(ev.input)?.slice(0, 200)}`);
+          if (
+            (ev.name === 'TodoWrite' || ev.name === 'todo_write') &&
+            (Array.isArray(ev.input?.todos) || Array.isArray(ev.input))
+          ) {
+            const todos = Array.isArray(ev.input?.todos) ? ev.input.todos : ev.input;
+            event.sender.send('claude:todo-update', todos);
+          }
+          break;
+        }
+
+        case 'rate_limit_event':
+          // status 'allowed' = fine; other statuses warn but don't block
+          if (ev.rate_limit_info?.status && ev.rate_limit_info.status !== 'allowed') {
+            console.warn('[claude-cli] rate_limit_event:', JSON.stringify(ev.rate_limit_info));
+          }
+          break;
+
+        case 'result':
+          if (ev.usage) {
+            inputTokens  = ev.usage.input_tokens  || 0;
+            outputTokens = ev.usage.output_tokens || 0;
+          }
+          if (ev.is_error || ev.subtype === 'error_during_execution') {
+            const msg = ev.result || ev.error || 'CLI reported an error';
+            const errStr = typeof msg === 'string' ? msg : JSON.stringify(msg);
+            if (/rate.?limit|429/i.test(errStr)) {
+              const e = new Error('429: Rate limited.'); e.code = 'RATE_LIMIT'; e.retryAfter = null;
+              settle(false, e);
+            } else {
+              settle(false, new Error(errStr));
+            }
+          }
+          break;
+      }
+    };
+
+    proc.stdout.on('data', chunk => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop();           // keep last (possibly incomplete) line
+      lines.forEach(processLine);
+    });
+
+    proc.stderr.on('data', data => {
+      const msg = data.toString().trim();
+      if (msg) console.error('[claude-cli] stderr:', msg);
+    });
+
+    proc.on('close', code => {
+      _currentProc = null;
+      if (buffer.trim()) processLine(buffer); // flush
+      if (!settled) {
+        // Deliver whatever partial text we have (covers both normal end and user abort)
+        event.sender.send('claude:done', { inputTokens, outputTokens });
+        settle(true, { text: fullText, inputTokens, outputTokens, cliSessionId: newSessionId });
+      }
+    });
+
+    proc.on('error', err => {
+      _currentProc = null;
+      console.error('[claude-cli] spawn error:', err.message);
+      settle(false, err);
+    });
+  });
+}
+
+// ── Streaming chat ───────────────────────────────────────────────────────────
+
+const MODEL_MAP = {
+  // Latest subscription models (no date suffix — resolved server-side)
+  'claude-sonnet-4-6':  'claude-sonnet-4-6',
+  'claude-sonnet-4-5':  'claude-sonnet-4-5',
+  'claude-sonnet-4':    'claude-sonnet-4-6',
+  'claude-opus-4-5':    'claude-opus-4-5',
+  'claude-opus-4':      'claude-opus-4-5',
+  // Haiku — subscription tokens use the dated ID
+  'claude-haiku-3-5':   'claude-3-5-haiku-20241022',
+  // Legacy fallbacks
+  'claude-3-5-sonnet':  'claude-3-5-sonnet-20241022',
+  'claude-3-5-haiku':   'claude-3-5-haiku-20241022',
+};
+function resolveModel(id) { return MODEL_MAP[id] || id || 'claude-sonnet-4-6'; }
+
+// Public entry point — tries real CLI first, falls back to direct Anthropic SDK.
+async function streamMessage(event, messages, modelId, systemPrompt, cliSessionId) {
+  const binary = getCliBinary();
+  if (binary) {
+    return streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary);
+  }
+  console.warn('[claude] CLI unavailable — using SDK fallback');
+  return streamMessageViaSDK(event, messages, modelId, systemPrompt);
+}
+
+async function streamMessageViaSDK(event, messages, modelId, systemPrompt) {
+  const cred = await getCredential();
+
+  // OAuth Bearer requires 'anthropic-beta: oauth-2025-04-20' to be accepted.
+  // Raw API keys use standard x-api-key auth (no extra headers needed).
+  // Match the headers sent by the real Claude Code CLI so Cloudflare and Anthropic's
+  // gateway treat us as a legitimate subscription client (not a random API script).
+  // oauth-2025-04-20    → accept Bearer token auth
+  // claude-code-20250219 → route request to Claude Code subscription tier (higher limits)
+  const CLI_HEADERS = {
+    'anthropic-beta':    'oauth-2025-04-20,claude-code-20250219',
+    'x-app':             'cli',
+    'user-agent':        'claude-code/1.0.17',   // matches real CLI user-agent format
+    'anthropic-version': '2023-06-01',
+  };
+  const clientOpts = cred.authToken
+    ? { authToken: cred.authToken, defaultHeaders: CLI_HEADERS }
+    : { apiKey: cred.apiKey, defaultHeaders: { 'user-agent': 'claude-code/1.0.17', 'anthropic-version': '2023-06-01' } };
+
+  // maxRetries: 0 — we handle retries ourselves with a proper countdown.
+  // The SDK default is 2 (= 3 total attempts), which would hammer the API
+  // 3× per countdown expiry and keep the Cloudflare burst window reset indefinitely.
+  const client = new Anthropic({ ...clientOpts, maxRetries: 0 });
+  const resolvedModel = resolveModel(modelId);
+  const authMode = cred.authToken ? `oauth` : 'apikey';
+  console.log(`[claude] model: ${resolvedModel}  auth: ${authMode}`);
 
   const params = {
-    model:      resolveModel(modelId),
+    model:      resolvedModel,
     max_tokens: 8192,
     messages,
     stream:     true,
   };
   if (systemPrompt) params.system = systemPrompt;
 
-  const stream = await client.messages.create(params);
+  try {
+    const stream = await client.messages.create(params);
+    let fullText = '', inputTokens = 0, outputTokens = 0;
 
-  let fullText = '';
-  let inputTokens  = 0;
-  let outputTokens = 0;
-
-  for await (const chunk of stream) {
-    switch (chunk.type) {
-      case 'content_block_delta':
-        if (chunk.delta.type === 'text_delta') {
-          fullText += chunk.delta.text;
-          event.sender.send('claude:chunk', chunk.delta.text);
-        }
-        break;
-      case 'message_start':
-        inputTokens = chunk.message?.usage?.input_tokens ?? 0;
-        break;
-      case 'message_delta':
-        outputTokens = chunk.usage?.output_tokens ?? 0;
-        break;
+    for await (const chunk of stream) {
+      switch (chunk.type) {
+        case 'content_block_delta':
+          if (chunk.delta.type === 'text_delta') {
+            fullText += chunk.delta.text;
+            event.sender.send('claude:chunk', chunk.delta.text);
+          }
+          break;
+        case 'message_start':  inputTokens  = chunk.message?.usage?.input_tokens  ?? 0; break;
+        case 'message_delta':  outputTokens = chunk.usage?.output_tokens            ?? 0; break;
+      }
     }
-  }
 
-  event.sender.send('claude:done', { inputTokens, outputTokens });
-  return { text: fullText, inputTokens, outputTokens };
+    event.sender.send('claude:done', { inputTokens, outputTokens });
+    return { text: fullText, inputTokens, outputTokens };
+
+  } catch (err) {
+    if (err.status === 429) {
+      // SDK exposes a Fetch Headers object — must use .forEach(), not Object.entries()
+      const hdrs = {};
+      if (err.headers) {
+        try {
+          if (typeof err.headers.forEach === 'function') {
+            err.headers.forEach((v, k) => { hdrs[k] = v; });
+          } else if (typeof err.headers.entries === 'function') {
+            for (const [k, v] of err.headers.entries()) hdrs[k] = v;
+          } else {
+            Object.assign(hdrs, err.headers);
+          }
+        } catch (_) { /* headers not iterable */ }
+      }
+      console.error('[claude] 429 headers:', JSON.stringify(hdrs, null, 2));
+      const errBody = err.error || {};
+      console.error('[claude] 429 body:', JSON.stringify(errBody));
+      console.error('[claude] 429 message:', errBody?.error?.message || errBody?.message || err.message);
+
+      // retry-after → seconds; x-ratelimit-reset-* → ISO-8601 timestamp
+      let retrySeconds = null;
+      const retryAfterRaw = hdrs['retry-after'];
+      const resetRequests  = hdrs['x-ratelimit-reset-requests'];
+      const resetTokens    = hdrs['x-ratelimit-reset-tokens'];
+      if (retryAfterRaw) {
+        retrySeconds = Math.ceil(Number(retryAfterRaw));
+      } else if (resetRequests) {
+        const ms = new Date(resetRequests).getTime() - Date.now();
+        if (ms > 0) retrySeconds = Math.ceil(ms / 1000);
+      } else if (resetTokens) {
+        const ms = new Date(resetTokens).getTime() - Date.now();
+        if (ms > 0) retrySeconds = Math.ceil(ms / 1000);
+      }
+
+      const enriched = new Error(`429: Rate limited.${retrySeconds ? ` Retry after ${retrySeconds}s.` : ''}`);
+      enriched.code = 'RATE_LIMIT';
+      enriched.retryAfter = retrySeconds;
+      throw enriched;
+    }
+    // Log unexpected errors too
+    console.error('[claude] API error:', err.status, err.message);
+    throw err;
+  }
 }
 
-module.exports = { getApiKey, setApiKey, hasApiKey, clearApiKey, streamMessage };
+module.exports = {
+  // Raw API key
+  getRawApiKey, setRawApiKey, clearRawApiKey,
+  // OAuth
+  getAuthStatus, startOAuthSignIn, getCredential,
+  // Chat
+  streamMessage, abortCurrentStream,
+};
