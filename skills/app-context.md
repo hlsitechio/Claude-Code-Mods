@@ -163,3 +163,44 @@ For `jsx` blocks, see `skills/jsx-code-blocks.md`.
 - Chat history persists in localStorage per session
 - CLI session IDs are preserved via `--resume` for context continuity across turns
 - The Plan panel persists the last plan for the active session
+
+---
+
+## Workspace awareness
+
+The app injects a `━━ WORKSPACE CONTEXT ━━` block into your system prompt on every turn.
+Use it directly — **never read localStorage, LevelDB, or binary files** to answer workspace questions.
+
+It contains:
+- **Active project** and **active chat** title
+- **All projects** with their chat titles listed
+- **Recent / pinned chats** with titles
+- **Total chat count** (projects + recent + pinned)
+- **Current model** and **effort level**
+- **Permission mode** (bypass / accept / plan / default)
+- **Available agents** (invoke with `@agentname`)
+- **Messages so far** in this chat
+
+A live snapshot is also written to `workspace-index.json` at the project root.
+If you need the data outside a chat context (e.g. in a sub-agent), read that file:
+
+```bash
+cat workspace-index.json
+```
+
+### UI quick reference (tell users these)
+
+| Action | How |
+|--------|-----|
+| Rename project | Double-click the project name in the sidebar |
+| Rename chat | Double-click the chat title in the sidebar |
+| New project | Click **+** in the Projects section |
+| Move chat to project | Drag from Recent into the project |
+| Switch permission mode | Click the shield icon in the composer |
+| Change model | Click the model chip in the composer |
+| Switch agent | Type `@agentname` in the message |
+
+### Sub-agent inheritance
+
+This system prompt is passed on every CLI spawn including `--resume` sessions.
+Sub-agents launched by this Claude instance inherit it automatically — no extra setup needed.
