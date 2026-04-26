@@ -1,4 +1,43 @@
+# Dependencies
 node_modules/
-.claude/
+
+# Build output
 dist/
 release/
+
+# Claude CLI internal state
+.claude/
+
+# ── Personal / instance-specific data ─────────────────────────────────────────
+# Chat session history (personal conversations)
+sessions/*.json
+
+# User memory files (personal profile, preferences)
+memory/*.md
+
+# Saved code block artifacts (personal exports)
+codeblocks/*/
+codeblocks/*.html
+codeblocks/.counter.json
+
+# Live notes (personal scratchpad)
+notes/*.md
+
+# Personal agent configs that reference private infrastructure
+agents/crowbyte-ops.json
+agents/Crowbyte_Ops.json
+
+# Duplicate legacy-capitalized agent files (lowercase versions are canonical)
+agents/Code_Reviewer.json
+agents/Hacker.json
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

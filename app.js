@@ -172,10 +172,11 @@ function applyLanguage() {
 }
 
 // ---------- Session persistence layer ----------
-// Sessions and their message histories are persisted to localStorage.
-// Key "ccmod.sessions"  → array of session metadata (id, title, pinned, ts, projectId)
-// Key "ccmod.msgs.<id>" → JSON array of {role,content} messages for that session
-// Key "ccmod.state"     → {activeId, projects}
+// Primary: localStorage (fast, synchronous access during rendering).
+// Backup:  Disk files under full_install/sessions/ (survives localStorage clearing).
+//
+// Write-through: every save also writes to disk asynchronously.
+// Recovery:      on startup, if localStorage is empty, load from disk and restore.
 
 const PROJECT_COLORS = ['#c96442', '#d97757', '#6a86c3', '#7ab389', '#b48ead', '#c9a96e', '#5aa1a1'];
 
@@ -188,15 +189,39 @@ IMPORTANT RULES:
 - You are in a CHAT interface, not a coding agent. There is no project, no filesystem, no codebase to explore.
 - Respond directly and immediately. Never say "let me explore the project" or "let me check the current setup" — there is nothing to explore.
 - When asked to generate code, produce complete, working code immediately in a single code block.
-- When asked to create UI components, generate the full HTML/CSS/JSX code right away.
 - Be conversational, concise, and helpful. Markdown is rendered — use it freely.
-- Do NOT use bash commands or try to read/write files. Just respond.
+- Do NOT use bash commands or try to read/write files unless the Filesystem MCP tool is available.
+
+USER MEMORY — persistent facts about the user:
+- Memory files live at: G:\\claude_code_mod\\full_install\\memory\\
+- The main file is user.md — it already contains facts about the user (injected above as [USER MEMORY]).
+- When the user asks you to "remember", "save", "add to memory", or "update memory" → use the Filesystem MCP tool to read G:\\claude_code_mod\\full_install\\memory\\user.md, append the new fact, and write it back. Do NOT explore the codebase. Do NOT use skills or bash.
+- Format new facts as clean markdown bullet points under the relevant section (or create a new section).
+- After saving, confirm: "Got it, I've saved that to your memory."
+- NEVER say "let me find where memory is stored" — you already know: G:\\claude_code_mod\\full_install\\memory\\user.md
+
+CANVAS ARTIFACT FORMAT — choose automatically based on what's being built:
+- Use \`\`\`tsx  → React + TypeScript. DEFAULT for: components, dashboards, interactive UI, data viz, animations, games, tools, anything with state or props.
+- Use \`\`\`jsx  → React without TypeScript. Use only if the user explicitly says "no TypeScript" or "plain JS".
+- Use \`\`\`html → Plain HTML/CSS/JS. Use only for: simple static pages, pure CSS demos, or when the user explicitly asks for vanilla HTML.
+- NEVER wrap a React component inside an HTML boilerplate — output the component code only. The app compiles and runs it automatically with Babel + React 18 + Framer Motion already available.
+- Available in TSX/JSX without importing: React, useState, useEffect, useRef, useMemo, useCallback, motion, AnimatePresence (framer-motion).
 
 PLAN PANEL — TodoWrite:
 - This app has a Plan panel (right side) that displays a live task board fed by TodoWrite.
 - When the user asks you to "create a plan", "put it in the plan panel", "show tasks", or anything similar → call TodoWrite IMMEDIATELY with the tasks. Never ask for clarification first.
 - If the user references something from earlier in the conversation (e.g. "it", "the plan above", "that list") → use those items as your TodoWrite tasks. Re-read the conversation history and act.
-- For any multi-step task (3+ steps), proactively call TodoWrite at the start, then update statuses as you complete each step.`;
+- For any multi-step task (3+ steps), proactively call TodoWrite at the start, then update statuses as you complete each step.
+
+CODEBLOCK LIBRARY — persistent canvas artifacts:
+- Every canvas artifact you create is auto-saved to disk with a unique ID like codeblock_000001.
+- When you see [CODEBLOCK CONTEXT — codeblock_XXXXXX · LANG] in the message, that is the CURRENT source of an existing saved canvas — the user is asking you to MODIFY it, not create something new.
+- CRITICAL — when editing a codeblock, you MUST return the COMPLETE updated source in a single fenced code block matching the original language (e.g. \`\`\`tsx, \`\`\`jsx, \`\`\`html). The ENTIRE file — no truncation, no diffs, no snippets. Only a complete code block causes the file to be updated on disk.
+- NEVER create a new canvas when [CODEBLOCK CONTEXT] is present — always update the existing one.
+- Only create a brand-new canvas if the user explicitly asks for a new/different/separate component and no [CODEBLOCK CONTEXT] is in the message.
+- Do NOT say "it's confirmed fixed" or "the file has been updated" — you cannot verify disk writes. Just output the full updated source.
+- You can reference codeblock IDs in your responses (e.g. "I've updated codeblock_000001").`;
+
 
 // ── Filesystem folder helpers ─────────────────────────────────────────────────
 function sanitizeFolderName(name) {
@@ -374,6 +399,23 @@ function buildSessionContext(sessionId) {
   return lines.join('\n');
 }
 
+// ── Memory context ────────────────────────────────────────────────────────────
+// Loads all .md files from full_install/memory/ and returns them as a system-
+// prompt block. Cached in window.__memoryContext; cleared when any memory file
+// is edited so the next send picks up the latest content.
+let _memoryCacheTs = 0;
+async function _loadMemoryContext() {
+  if (!window.electronAPI?.memory) return '';
+  try {
+    const raw = await window.electronAPI.memory.loadAll();
+    if (!raw?.trim()) return '';
+    return `---\n[USER MEMORY — always apply these facts in every response]\n${raw.trim()}\n---`;
+  } catch { return ''; }
+}
+function _invalidateMemoryCache() {
+  _memoryCacheTs = 0;   // reserved for future cache invalidation
+}
+
 const SESSION_KEY    = 'ccmod.sessions';
 const STATE_META_KEY = 'ccmod.state';
 const MAX_SESSIONS   = 60;
@@ -395,8 +437,11 @@ function loadSessionList() {
   catch { return []; }
 }
 function saveSessionList(list) {
-  try { localStorage.setItem(SESSION_KEY, JSON.stringify(list.slice(0, MAX_SESSIONS))); }
-  catch (e) { console.warn('[sessions] save failed', e); }
+  const trimmed = list.slice(0, MAX_SESSIONS);
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(trimmed)); }
+  catch (e) { console.warn('[sessions] localStorage save failed', e); }
+  // Write-through backup to disk
+  _diskSaveMeta();
 }
 
 // Load/save per-session message history
@@ -406,10 +451,13 @@ function loadSessionMessages(id) {
 }
 function saveSessionMessages(id, msgs) {
   try { localStorage.setItem('ccmod.msgs.' + id, JSON.stringify(msgs)); }
-  catch (e) { console.warn('[sessions] msgs save failed', e); }
+  catch (e) { console.warn('[sessions] localStorage msgs save failed', e); }
+  // Write-through backup to disk
+  window.electronAPI?.sessions?.saveMsgs(id, msgs).catch(() => {});
 }
 function deleteSessionMessages(id) {
   try { localStorage.removeItem('ccmod.msgs.' + id); } catch {}
+  window.electronAPI?.sessions?.deleteMsgs(id).catch(() => {});
 }
 
 // Load or initialise the main app state (projects + activeId)
@@ -429,7 +477,65 @@ function saveStateMeta() {
         sessions: p.sessions.map(s => s.id),
       })),
     }));
-  } catch (e) { console.warn('[state] save failed', e); }
+  } catch (e) { console.warn('[state] localStorage save failed', e); }
+  // Write-through backup to disk
+  _diskSaveMeta();
+}
+
+// ── Disk backup helpers (fire-and-forget) ────────────────────────────────────
+function _diskSaveMeta() {
+  if (!window.electronAPI?.sessions) return;
+  try {
+    const sessions = loadSessionList();
+    const stateMeta = {
+      activeId: (typeof state !== 'undefined') ? state.activeId : null,
+      projects: (typeof state !== 'undefined') ? state.projects.map(p => ({
+        id: p.id, name: p.name, color: p.color, open: p.open,
+        sessions: p.sessions.map(s => s.id),
+      })) : [],
+    };
+    const meta = { sessions, stateMeta };
+    window.electronAPI.sessions.saveMeta(meta).catch(() => {});
+  } catch (e) { console.warn('[sessions] disk meta save failed', e); }
+}
+
+// On app startup: if localStorage is empty but disk has data, restore from disk.
+// This recovers chat history after localStorage is cleared (e.g. reinstall, cache wipe).
+async function _recoverFromDisk() {
+  if (!window.electronAPI?.sessions) return false;
+  try {
+    const existing = loadSessionList();
+    if (existing.length > 0) return false; // localStorage is fine, nothing to recover
+
+    const diskMeta = await window.electronAPI.sessions.loadMeta();
+    if (!diskMeta?.sessions?.length) return false;
+
+    console.log('[sessions] localStorage empty — restoring from disk backup');
+
+    // Restore session list
+    localStorage.setItem(SESSION_KEY, JSON.stringify(diskMeta.sessions));
+
+    // Restore app state
+    if (diskMeta.stateMeta) {
+      localStorage.setItem(STATE_META_KEY, JSON.stringify(diskMeta.stateMeta));
+    }
+
+    // Restore all message histories
+    const ids = diskMeta.sessions.map(s => s.id);
+    await Promise.all(ids.map(async (id) => {
+      try {
+        const msgs = await window.electronAPI.sessions.loadMsgs(id);
+        if (msgs?.length) {
+          localStorage.setItem('ccmod.msgs.' + id, JSON.stringify(msgs));
+        }
+      } catch {}
+    }));
+
+    return true; // signals caller to re-init and re-render
+  } catch (e) {
+    console.warn('[sessions] disk recovery failed:', e);
+    return false;
+  }
 }
 
 // Build state from persisted data, falling back to defaults
@@ -486,6 +592,16 @@ const state = {
   activeId: window.__defaultState.activeId,
 };
 delete window.__defaultState;
+
+// ── Global App bridge (used by split-chat panels, workspace, etc.) ────────────
+window.App = {
+  getActiveSessionId: () => state.activeId,
+  getActiveTitle: () => {
+    const all = [...state.pinned, ...state.recent,
+                 ...state.projects.flatMap(p => p.sessions)];
+    return all.find(s => s.id === state.activeId)?.title || 'Main session';
+  },
+};
 
 // ── Session CRUD helpers ──────────────────────────────────────────────────────
 
@@ -584,9 +700,12 @@ function switchToSession(id, skipRender = false) {
   window.__chatHistory = loadSessionMessages(id);
 
   // Reset plan panel + context stats — each session has its own state
-  window.__planTodos    = null;
-  window.__contextStats = null;
-  _planExpandedIdx      = -1;
+  window.__planTodos       = null;
+  window.__contextStats    = null;
+  window.__lastPinnedCbId   = null;   // new session = no active canvas
+  window.__lastPinnedCbLang = null;
+  window.__lastPinnedCbName = null;
+  _planExpandedIdx          = -1;
   // Reset context chip to zero for the new session
   const _ctxVal  = document.getElementById('ctx-ctx-val');
   const _ctxFill = document.querySelector('#ctx-chip-context .ctx-chip__bar-fill');
@@ -1186,7 +1305,9 @@ document.getElementById('new-project-name')?.addEventListener('keydown', e => {
 });
 
 // File-tree click handler (delegated) — expand dirs lazily, open files
-document.getElementById('right-panel-body')?.addEventListener('click', async e => {
+// Attached to #workspace-dock so it survives the per-panel id migration done by workspace.js
+document.getElementById('workspace-dock')?.addEventListener('click', async e => {
+  if (!e.target.closest('.right-panel__body')) return;
   // Dir expand/collapse with lazy child load
   const expandRow = e.target.closest('[data-ft-expand]');
   if (expandRow) {
@@ -1242,39 +1363,76 @@ sidebarToggle.addEventListener('click', () => {
   setSidebarCollapsed(!sidebarEl.classList.contains('is-collapsed'));
 });
 
-// Sidebar resize (drag right edge). Hidden handle, reveals on hover.
-const resizer = document.getElementById('sidebar-resizer');
+// Sidebar resize (drag handle on the inner edge).
+// The handle is the dockview splitter now — we just restore saved width on load.
 const SIDEBAR_WIDTH_KEY = 'ccmod.sidebarWidth';
-const SIDEBAR_MIN = 220;
+const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 520;
 const savedWidth = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
 if (savedWidth >= SIDEBAR_MIN && savedWidth <= SIDEBAR_MAX && !sidebarEl.classList.contains('is-collapsed')) {
   sidebarEl.style.width = savedWidth + 'px';
 }
 
-let dragState = null;
-resizer.addEventListener('mousedown', (e) => {
+// Manual resize via drag on the sidebar's inner border edge.
+// Works for both left and right side: we track delta from mouse start.
+let _sidebarDrag = null;
+sidebarEl.addEventListener('mousedown', (e) => {
+  const side  = sidebarEl.dataset.sidebarSide || 'left';
+  const rect  = sidebarEl.getBoundingClientRect();
+  const edge  = side === 'left' ? rect.right : rect.left;
+  if (Math.abs(e.clientX - edge) > 6) return;   // only near the inner edge
   e.preventDefault();
-  const rect = sidebarEl.getBoundingClientRect();
-  dragState = { startX: e.clientX, startW: rect.width };
+  _sidebarDrag = { startX: e.clientX, startW: rect.width, side };
   sidebarEl.classList.add('is-resizing');
-  resizer.classList.add('is-dragging');
   document.body.classList.add('is-resizing-sidebar');
 });
 document.addEventListener('mousemove', (e) => {
-  if (!dragState) return;
-  const delta = e.clientX - dragState.startX;
-  const w = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, dragState.startW + delta));
+  if (!_sidebarDrag) return;
+  const delta = _sidebarDrag.side === 'left'
+    ? e.clientX - _sidebarDrag.startX
+    : _sidebarDrag.startX - e.clientX;
+  const w = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, _sidebarDrag.startW + delta));
   sidebarEl.style.width = w + 'px';
 });
 document.addEventListener('mouseup', () => {
-  if (!dragState) return;
-  dragState = null;
+  if (!_sidebarDrag) return;
+  _sidebarDrag = null;
   sidebarEl.classList.remove('is-resizing');
-  resizer.classList.remove('is-dragging');
   document.body.classList.remove('is-resizing-sidebar');
   const w = parseInt(sidebarEl.style.width, 10);
   if (w) localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
+});
+
+// ── Sidebar left ↔ right swap ─────────────────────────────────────────────
+const SIDEBAR_SIDE_KEY = 'ccmod.sidebarSide';
+const appShell = document.getElementById('app-shell');
+const mainDock = document.getElementById('main-dock');
+
+const sidebarPosBtn = document.getElementById('sidebar-pos');
+
+function setSidebarSide(side) {
+  sidebarEl.dataset.sidebarSide = side;
+
+  // Reorder DOM: left → aside before main-dock; right → aside after
+  if (side === 'right') {
+    appShell.appendChild(sidebarEl);
+  } else {
+    appShell.insertBefore(sidebarEl, mainDock);
+  }
+
+  // Animate the indicator — update data-side so CSS transitions fire
+  if (sidebarPosBtn) sidebarPosBtn.dataset.side = side;
+
+  localStorage.setItem(SIDEBAR_SIDE_KEY, side);
+}
+
+// Restore saved side on load (default: left)
+const savedSide = localStorage.getItem(SIDEBAR_SIDE_KEY);
+setSidebarSide(savedSide === 'right' ? 'right' : 'left');
+
+// Click toggles between the two positions
+sidebarPosBtn?.addEventListener('click', () => {
+  setSidebarSide((sidebarEl.dataset.sidebarSide || 'left') === 'left' ? 'right' : 'left');
 });
 
 // ── New session button (top of sidebar quick-actions) ────────────────────────
@@ -1918,12 +2076,33 @@ function handleSettingsAction(group, id) {
   }
 }
 
-// ── Agents store (localStorage) — module-level so any code can call loadAgents() ──
+// ── Agents store ──────────────────────────────────────────────────────────────
+// Primary source: G:\claude_code_mod\full_install\agents\ (disk-backed, survives reloads)
+// Secondary:      localStorage ccmod.agents (fast sync cache)
 const AGENTS_KEY = 'ccmod.agents';
+
 function loadAgents() {
   try { return JSON.parse(localStorage.getItem(AGENTS_KEY) || '[]'); } catch { return []; }
 }
-function saveAgents(list) { localStorage.setItem(AGENTS_KEY, JSON.stringify(list)); }
+function saveAgents(list) {
+  localStorage.setItem(AGENTS_KEY, JSON.stringify(list));
+  // Also persist to disk (agents/ directory via IPC)
+  window.electronAPI?.agents?.save?.(list).catch(() => {});
+}
+
+// On startup: load agents from disk and sync into localStorage so loadAgents() is fresh.
+(async function _syncAgentsFromDisk() {
+  try {
+    const diskAgents = await window.electronAPI?.agents?.loadAll?.();
+    if (Array.isArray(diskAgents) && diskAgents.length) {
+      // Merge: disk wins for known names, keep any localStorage-only entries
+      const local = loadAgents();
+      const merged = new Map(local.map(a => [a.name, a]));
+      diskAgents.forEach(a => { if (a.name) merged.set(a.name, a); });
+      localStorage.setItem(AGENTS_KEY, JSON.stringify([...merged.values()]));
+    }
+  } catch (_) {}
+})();
 
 // ── Console (full settings dashboard) ────────────────────────────────────────
 function showConsole(initialPage = 'overview') {
@@ -1933,6 +2112,7 @@ function showConsole(initialPage = 'overview') {
   const NAV = [
     { id: 'overview',    icon: 'lightning',        label: 'Overview'      },
     { id: 'knowledge',   icon: 'list-checks',      label: 'Knowledge Base'},
+    { id: 'memory',      icon: 'push-pin',         label: 'Memory'        },
     { id: 'agents',      icon: 'gear-six',         label: 'AI Agents'     },
     { id: 'models',      icon: 'circle-wavy-check',label: 'Models'        },
     { id: 'appearance',  icon: 'eye',              label: 'Appearance'    },
@@ -1985,6 +2165,22 @@ function showConsole(initialPage = 'overview') {
   if (srcAvatar) avatarEl.textContent = srcAvatar.textContent;
   if (srcName)   nameEl.textContent   = srcName.textContent;
   if (srcEmail)  emailEl.textContent  = srcEmail.textContent;
+  // Override name from memory/user.md if it contains a name
+  if (window.electronAPI?.memory) {
+    window.electronAPI.memory.read('user.md').then(res => {
+      if (!res?.ok) return;
+      const m = res.content.match(/\*\*Name\*\*[:\s]+([^\n\r*]+)/i)
+             || res.content.match(/name[:\s]+([^\n\r*]+)/i);
+      if (m) {
+        const memName = m[1].trim();
+        nameEl.textContent = memName;
+        if (avatarEl) {
+          const initials = memName.split(/\s+/).map(w => w[0]).slice(0,2).join('').toUpperCase();
+          avatarEl.textContent = initials || avatarEl.textContent;
+        }
+      }
+    }).catch(() => {});
+  }
 
   /* ── Page renderers ───────────────────────────────────────── */
   function pageOverview() {
@@ -2168,6 +2364,47 @@ function showConsole(initialPage = 'overview') {
       </div>`;
   }
 
+  function pageMemory() {
+    return `
+      <div class="console-page console-page--memory">
+        <div class="console-page__head">
+          <h1 class="console-page__title">Memory</h1>
+          <p class="console-page__sub">
+            Facts injected into every chat automatically — Claude always knows who you are, your preferences, and project context.
+            Files live at <code style="font-size:11px;color:#d97757">full_install/memory/</code>.
+          </p>
+        </div>
+
+        <div class="mem-layout">
+          <!-- Sidebar: file list + new button -->
+          <div class="mem-sidebar" id="mem-sidebar">
+            <div class="mem-sidebar__head">
+              <span>Files</span>
+              <button class="mem-add-btn" id="mem-new-btn" title="New memory file">+</button>
+            </div>
+            <div class="mem-file-list" id="mem-file-list">
+              <div style="padding:10px 12px;color:#5a5a63;font-size:12px">Loading…</div>
+            </div>
+          </div>
+
+          <!-- Editor panel -->
+          <div class="mem-editor" id="mem-editor-panel">
+            <div class="mem-editor__bar">
+              <span class="mem-editor__filename" id="mem-filename">Select a file</span>
+              <div style="display:flex;gap:7px;align-items:center;flex-shrink:0">
+                <button class="console-btn console-btn--sm console-btn--danger" id="mem-delete-btn" disabled>Delete</button>
+                <button class="console-btn console-btn--sm console-btn--publish" id="mem-save-btn" disabled>Save →</button>
+              </div>
+            </div>
+            <textarea class="mem-textarea" id="mem-textarea"
+              placeholder="Select a file on the left or create a new one…"
+              spellcheck="false" autocorrect="off"></textarea>
+            <div class="mem-status" id="mem-status"></div>
+          </div>
+        </div>
+      </div>`;
+  }
+
   function pageAgents() {
     const agents = loadAgents();
     const agentTypes = [
@@ -2199,70 +2436,143 @@ function showConsole(initialPage = 'overview') {
               ${iconSVG('gear-six')}
               <p>No agents configured yet.</p>
             </div>` :
-          agents.map((a, i) => `
+          agents.map((a, i) => {
+            const permLabels = { bypass: 'Full auto', accept: 'Auto-approve', default: 'Manual' };
+            const permClass  = { bypass: 'ac-perm--bypass', accept: 'ac-perm--accept', default: 'ac-perm--default' };
+            const perm = a.permMode || 'bypass';
+            const mcpList  = Array.isArray(a.mcpServers) ? a.mcpServers : (a.mcpServers ? String(a.mcpServers).split(',').map(s=>s.trim()).filter(Boolean) : []);
+            const skillList = Array.isArray(a.skills) ? a.skills : (a.skills ? String(a.skills).split(',').map(s=>s.trim()).filter(Boolean) : []);
+            return `
             <div class="agent-card" data-agent-idx="${i}">
               <div class="agent-card__head">
                 <span class="agent-card__dot" style="background:${a.color||'#7ab389'}"></span>
                 <strong class="agent-card__name">${escapeHTML(a.name)}</strong>
                 <span class="agent-card__type">${escapeHTML(a.type)}</span>
+                <span class="ac-perm ${permClass[perm]||'ac-perm--bypass'}">${escapeHTML(permLabels[perm]||'Full auto')}</span>
                 <div style="flex:1"></div>
                 <button class="agent-card__edit" data-agent-edit="${i}">${iconSVG('pencil-simple')}</button>
                 <button class="agent-card__del" data-agent-del="${i}">${iconSVG('trash')}</button>
               </div>
               <div class="agent-card__body">
-                ${a.model    ? `<div class="agent-card__row"><span class="agent-card__key">Model</span><span class="agent-card__val">${escapeHTML(a.model)}</span></div>` : ''}
-                ${a.system   ? `<div class="agent-card__row"><span class="agent-card__key">System</span><span class="agent-card__val" style="font-style:italic;opacity:.7">${escapeHTML(a.system.slice(0,80))}${a.system.length>80?'…':''}</span></div>` : ''}
-                ${a.endpoint ? `<div class="agent-card__row"><span class="agent-card__key">Endpoint</span><span class="agent-card__val">${escapeHTML(a.endpoint)}</span></div>` : ''}
-                ${a.notes    ? `<div class="agent-card__row"><span class="agent-card__key">Notes</span><span class="agent-card__val">${escapeHTML(a.notes)}</span></div>` : ''}
+                ${a.model  ? `<div class="agent-card__row"><span class="agent-card__key">Model</span><span class="agent-card__val">${escapeHTML(a.model)}</span></div>` : ''}
+                ${a.cwd    ? `<div class="agent-card__row"><span class="agent-card__key">Codebase</span><span class="agent-card__val">${escapeHTML(a.cwd)}</span></div>` : ''}
+                ${a.system ? `<div class="agent-card__row"><span class="agent-card__key">System</span><span class="agent-card__val" style="font-style:italic;opacity:.7">${escapeHTML(a.system.slice(0,90))}${a.system.length>90?'...':''}</span></div>` : ''}
+                ${mcpList.length  ? '<div class="agent-card__row"><span class="agent-card__key">MCP</span><span class="agent-card__val ac-chips">'   + mcpList.map(m  => '<span class="ac-chip ac-chip--mcp">'   + escapeHTML(m) + '</span>').join('') + '</span></div>' : ''}
+                ${skillList.length ? '<div class="agent-card__row"><span class="agent-card__key">Skills</span><span class="agent-card__val ac-chips">' + skillList.map(s => '<span class="ac-chip ac-chip--skill">' + escapeHTML(s) + '</span>').join('') + '</span></div>' : ''}
+                ${a.notes  ? `<div class="agent-card__row"><span class="agent-card__key">Notes</span><span class="agent-card__val" style="opacity:.65">${escapeHTML(a.notes)}</span></div>` : ''}
               </div>
-            </div>`).join('')}
+            </div>`;
+          }).join('')}
         </div>
         <button class="console-btn console-btn--primary" id="agent-add-btn" style="margin-top:20px">
           ${iconSVG('plus')}<span>Add agent</span>
         </button>
 
-        <!-- Inline agent form (hidden) -->
         <div class="agent-form" id="agent-form" style="display:none">
           <div class="console-section-title" id="agent-form-title">New agent</div>
           <input type="hidden" id="af-idx" value="-1">
-          <div class="agent-form__grid">
 
+          <div class="af-section-label">Identity</div>
+          <div class="agent-form__grid">
             <label class="agent-form__label">Name
-              <input class="agent-form__input" id="af-name" placeholder="e.g. researcher">
+              <input class="agent-form__input" id="af-name" placeholder="e.g. Code Reviewer" autocomplete="off">
             </label>
             <label class="agent-form__label">Type
               <select class="agent-form__input" id="af-type">
                 ${agentTypes.map(t => `<option value="${t.id}">${t.label}</option>`).join('')}
               </select>
             </label>
+            <label class="agent-form__label">Color
+              <input class="agent-form__input agent-form__input--color" id="af-color" type="color" value="#7ab389">
+            </label>
+            <label class="agent-form__label">Description
+              <input class="agent-form__input" id="af-notes" placeholder="Brief description shown in card">
+            </label>
+          </div>
 
+          <div class="af-section-label" style="margin-top:16px">Runtime</div>
+          <div class="agent-form__grid">
             <label class="agent-form__label">Model
               <select class="agent-form__input" id="af-model">
                 ${agentModels.map(m => `<option value="${m.id}">${m.label}</option>`).join('')}
               </select>
             </label>
-            <label class="agent-form__label">Color
-              <input class="agent-form__input agent-form__input--color" id="af-color" type="color" value="#7ab389">
+            <label class="agent-form__label">Permission mode
+              <select class="agent-form__input" id="af-perm">
+                <option value="bypass">Full auto - no confirmations</option>
+                <option value="accept">Auto-approve edits</option>
+                <option value="default">Manual - ask for each tool</option>
+              </select>
             </label>
+            <label class="agent-form__label" style="grid-column:1/-1">Working directory (codebase)
+              <input class="agent-form__input" id="af-cwd" placeholder="C:\\projects\\myapp  (leave blank to use app default)">
+            </label>
+          </div>
 
-            <label class="agent-form__label af-external-field" id="af-endpoint-wrap">Endpoint / Gateway URL
+          <div class="af-section-label" style="margin-top:16px">Context</div>
+          <div class="agent-form__grid">
+            <label class="agent-form__label">Linked project
+              <select class="agent-form__input" id="af-project">
+                <option value="">-- none --</option>
+              </select>
+            </label>
+            <label class="agent-form__label">Linked chat session
+              <select class="agent-form__input" id="af-session">
+                <option value="">-- none --</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="af-section-label" style="margin-top:16px">Tools</div>
+          <div class="af-tools-grid">
+            <div class="agent-form__label">MCP servers
+              <div class="af-chip-wrap" id="af-mcp-wrap">
+                <div class="af-chips" id="af-mcp-chips"></div>
+                <input class="af-chip-input" id="af-mcp-input" placeholder="Add server..." autocomplete="off">
+                <input type="hidden" id="af-mcp">
+              </div>
+              <div class="af-chip-suggestions" id="af-mcp-sugg">
+                <span class="af-chip-sugg-label">Known:</span>
+                <button type="button" class="af-sugg-btn" data-sugg="filesystem">filesystem</button>
+                <button type="button" class="af-sugg-btn" data-sugg="memory-engine">memory-engine</button>
+                <button type="button" class="af-sugg-btn" data-sugg="pinpoint">pinpoint</button>
+                <button type="button" class="af-sugg-btn" data-sugg="Desktop_Commander">Desktop Commander</button>
+                <button type="button" class="af-sugg-btn" data-sugg="Claude_Preview">Claude Preview</button>
+              </div>
+            </div>
+            <div class="agent-form__label">Skills
+              <div class="af-chip-wrap" id="af-skills-wrap">
+                <div class="af-chips" id="af-skills-chips"></div>
+                <input class="af-chip-input" id="af-skills-input" placeholder="Add skill name..." autocomplete="off">
+                <input type="hidden" id="af-skills">
+              </div>
+              <div class="af-chip-suggestions" id="af-skills-sugg">
+                <span class="af-chip-sugg-label">Common:</span>
+                <button type="button" class="af-sugg-btn" data-sugg="web-artifacts-builder">web-artifacts-builder</button>
+                <button type="button" class="af-sugg-btn" data-sugg="code-review">code-review</button>
+                <button type="button" class="af-sugg-btn" data-sugg="adb">adb</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="af-section-label" style="margin-top:16px">System prompt</div>
+          <label class="agent-form__label" style="display:block">
+            <textarea class="agent-form__input agent-form__textarea" id="af-system"
+              placeholder="You are a specialized agent. Describe its role, constraints, and focus area..."
+              rows="4" spellcheck="true"></textarea>
+          </label>
+
+          <div class="af-section-label af-external-field" style="margin-top:16px">External connection</div>
+          <div class="agent-form__grid">
+            <label class="agent-form__label af-external-field" id="af-endpoint-wrap">Gateway URL
               <input class="agent-form__input" id="af-endpoint" placeholder="https://...supabase.co/functions/v1/gateway">
             </label>
             <label class="agent-form__label af-external-field" id="af-apikey-wrap">API Key
               <input class="agent-form__input" id="af-apikey" type="password" placeholder="agk_...">
             </label>
-
-            <label class="agent-form__label" style="grid-column:1/-1">System prompt
-              <textarea class="agent-form__input agent-form__textarea" id="af-system"
-                placeholder="You are a specialized research agent. Focus on accuracy and cite sources…"
-                rows="3" spellcheck="true"></textarea>
-            </label>
-            <label class="agent-form__label" style="grid-column:1/-1">Notes
-              <input class="agent-form__input" id="af-notes" placeholder="Optional description shown in card">
-            </label>
-
           </div>
-          <div style="display:flex;gap:8px;margin-top:14px;align-items:center">
+
+          <div style="display:flex;gap:8px;margin-top:18px;align-items:center">
             <button class="console-btn console-btn--primary" id="af-save">Save agent</button>
             <button class="console-btn" id="af-cancel">Cancel</button>
             <span class="af-save-status" id="af-save-status" style="font-size:11.5px;color:#7ab389;margin-left:8px;opacity:0;transition:opacity .4s"></span>
@@ -2415,8 +2725,8 @@ function showConsole(initialPage = 'overview') {
       </div>`;
   }
 
-  const PAGES = { overview: pageOverview, knowledge: pageKnowledge, agents: pageAgents,
-    models: pageModels, appearance: pageAppearance, sessions: pageSessions,
+  const PAGES = { overview: pageOverview, knowledge: pageKnowledge, memory: pageMemory,
+    agents: pageAgents, models: pageModels, appearance: pageAppearance, sessions: pageSessions,
     permissions: pagePermissions, about: pageAbout };
 
   /* ── Routing ──────────────────────────────────────────────── */
@@ -2446,6 +2756,9 @@ function showConsole(initialPage = 'overview') {
 
     /* Knowledge Base */
     if (pageId === 'knowledge') wireKBPage();
+
+    /* Memory */
+    if (pageId === 'memory') wireMemoryPage();
 
     /* Agents */
     if (pageId === 'agents') wireAgentsPage();
@@ -2744,6 +3057,148 @@ function showConsole(initialPage = 'overview') {
     });
   }
 
+  /* ── Memory wiring ───────────────────────────────────────── */
+  function wireMemoryPage() {
+    const api       = window.electronAPI?.memory;
+    if (!api) return;
+
+    const listEl    = mainEl.querySelector('#mem-file-list');
+    const textarea  = mainEl.querySelector('#mem-textarea');
+    const filenameEl= mainEl.querySelector('#mem-filename');
+    const saveBtn   = mainEl.querySelector('#mem-save-btn');
+    const deleteBtn = mainEl.querySelector('#mem-delete-btn');
+    const newBtn    = mainEl.querySelector('#mem-new-btn');
+    const statusEl  = mainEl.querySelector('#mem-status');
+
+    let currentFile = null;
+    let isDirty = false;
+
+    function setStatus(msg, ok = true) {
+      statusEl.textContent = msg;
+      statusEl.style.color = ok ? '#7ab389' : '#e07070';
+      setTimeout(() => { statusEl.textContent = ''; }, 3000);
+    }
+
+    function markDirty() {
+      isDirty = true;
+      saveBtn.disabled = false;
+      filenameEl.textContent = (currentFile || '') + ' •';
+    }
+
+    function markClean() {
+      isDirty = false;
+      saveBtn.disabled = false;
+      filenameEl.textContent = currentFile || '';
+    }
+
+    async function loadFileList(selectId) {
+      listEl.innerHTML = '<div style="padding:10px 12px;color:#5a5a63;font-size:12px">Loading…</div>';
+      const files = await api.list();
+      if (!files.length) {
+        listEl.innerHTML = '<div style="padding:10px 12px;color:#5a5a63;font-size:12px">No memory files yet. Click + to create one.</div>';
+        return;
+      }
+      listEl.innerHTML = files.map(f =>
+        `<button class="mem-file-item${f.id === selectId ? ' is-active' : ''}" data-id="${f.id}">${iconSVG('push-pin')}<span>${f.label}</span></button>`
+      ).join('');
+      if (window.renderIcons) window.renderIcons(listEl);
+      listEl.querySelectorAll('.mem-file-item').forEach(btn => {
+        btn.addEventListener('click', () => openFile(btn.dataset.id));
+      });
+    }
+
+    async function openFile(id) {
+      currentFile = id;
+      listEl.querySelectorAll('.mem-file-item').forEach(b =>
+        b.classList.toggle('is-active', b.dataset.id === id));
+      filenameEl.textContent = id;
+      textarea.disabled = false;
+      deleteBtn.disabled = false;
+      const res = await api.read(id);
+      textarea.value = res?.ok ? (res.content || '') : '';
+      isDirty = false;
+      saveBtn.disabled = false;
+    }
+
+    async function saveFile() {
+      if (!currentFile) return;
+      const res = await api.write(currentFile, textarea.value);
+      if (res?.ok) {
+        markClean();
+        setStatus('Saved ✓');
+        _invalidateMemoryCache();
+      } else {
+        setStatus('Save failed: ' + (res?.error || '?'), false);
+      }
+    }
+
+    // Events
+    textarea.addEventListener('input', markDirty);
+
+    saveBtn.addEventListener('click', saveFile);
+
+    deleteBtn.addEventListener('click', async () => {
+      if (!currentFile) return;
+      if (!confirm(`Delete memory file "${currentFile}"?`)) return;
+      await api.delete(currentFile);
+      currentFile = null;
+      textarea.value = '';
+      textarea.disabled = true;
+      saveBtn.disabled = true;
+      deleteBtn.disabled = true;
+      filenameEl.textContent = 'Select a file';
+      _invalidateMemoryCache();
+      loadFileList(null);
+    });
+
+    newBtn.addEventListener('click', () => {
+      // Show inline input at the top of the file list
+      if (listEl.querySelector('.mem-new-input-row')) return; // already open
+      const row = document.createElement('div');
+      row.className = 'mem-new-input-row';
+      row.innerHTML =
+        `<input class="mem-new-input" type="text" placeholder="filename" spellcheck="false" autocorrect="off">` +
+        `<span class="mem-new-ext">.md</span>`;
+      listEl.prepend(row);
+      const input = row.querySelector('.mem-new-input');
+      input.focus();
+
+      async function confirmCreate() {
+        const raw = input.value.trim().replace(/\.md$/i, '');
+        row.remove();
+        if (!raw) return;
+        const id = raw + '.md';
+        await api.write(id, `# ${raw}\n\n`);
+        await loadFileList(id);
+        openFile(id);
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter')  { e.preventDefault(); confirmCreate(); }
+        if (e.key === 'Escape') { row.remove(); }
+      });
+      input.addEventListener('blur', () => {
+        // Small delay so Enter click on a button doesn't also trigger blur-cancel
+        setTimeout(() => { if (row.isConnected && !input.value.trim()) row.remove(); }, 150);
+      });
+    });
+
+    // Ctrl+S to save
+    textarea.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveFile(); }
+    });
+
+    // Initial load
+    loadFileList(null).then(() => {
+      // Auto-open user.md if it exists, otherwise first file
+      const files = listEl.querySelectorAll('.mem-file-item');
+      if (files.length) {
+        const userFile = [...files].find(f => f.dataset.id === 'user.md');
+        openFile(userFile ? 'user.md' : files[0].dataset.id);
+      }
+    });
+  }
+
   /* ── Agents wiring ────────────────────────────────────────── */
   function wireAgentsPage() {
     const form      = mainEl.querySelector('#agent-form');
@@ -2751,7 +3206,62 @@ function showConsole(initialPage = 'overview') {
     const listEl    = mainEl.querySelector('#agents-list');
     const formTitle = mainEl.querySelector('#agent-form-title');
 
-    // Show/hide endpoint+apikey fields — not needed for built-in app type
+    // ── Chip input helper ────────────────────────────────────────────
+    function initChipInput(chipsId, inputId, hiddenId, suggId) {
+      const chipsEl  = mainEl.querySelector('#' + chipsId);
+      const inputEl  = mainEl.querySelector('#' + inputId);
+      const hiddenEl = mainEl.querySelector('#' + hiddenId);
+      const suggEl   = mainEl.querySelector('#' + suggId);
+      if (!chipsEl || !inputEl || !hiddenEl) return null;
+
+      function getValues() {
+        return (hiddenEl.value || '').split(',').map(s => s.trim()).filter(Boolean);
+      }
+      function setValues(arr) {
+        hiddenEl.value = arr.join(',');
+        renderChips();
+      }
+      function renderChips() {
+        const vals = getValues();
+        chipsEl.innerHTML = vals.map(v =>
+          `<span class="af-chip">${escapeHTML(v)}<button type="button" class="af-chip__x" data-val="${escapeHTML(v)}">×</button></span>`
+        ).join('');
+        if (suggEl) suggEl.querySelectorAll('.af-sugg-btn').forEach(b => {
+          b.classList.toggle('af-sugg-btn--used', vals.includes(b.dataset.sugg));
+        });
+      }
+      function addValue(v) {
+        v = v.trim();
+        if (!v) return;
+        const vals = getValues();
+        if (!vals.includes(v)) setValues([...vals, v]);
+      }
+      chipsEl.addEventListener('click', e => {
+        const x = e.target.closest('.af-chip__x');
+        if (x) setValues(getValues().filter(v => v !== x.dataset.val));
+      });
+      inputEl.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ',') {
+          e.preventDefault(); addValue(inputEl.value); inputEl.value = '';
+        }
+        if (e.key === 'Backspace' && !inputEl.value) {
+          const vals = getValues(); if (vals.length) setValues(vals.slice(0, -1));
+        }
+      });
+      inputEl.addEventListener('blur', () => {
+        if (inputEl.value.trim()) { addValue(inputEl.value); inputEl.value = ''; }
+      });
+      if (suggEl) suggEl.addEventListener('click', e => {
+        const b = e.target.closest('.af-sugg-btn');
+        if (b && !b.classList.contains('af-sugg-btn--used')) addValue(b.dataset.sugg);
+      });
+      return { setValues, renderChips };
+    }
+
+    const mcpChip    = initChipInput('af-mcp-chips',    'af-mcp-input',    'af-mcp',    'af-mcp-sugg');
+    const skillsChip = initChipInput('af-skills-chips', 'af-skills-input', 'af-skills', 'af-skills-sugg');
+
+    // ── Show/hide external fields ────────────────────────────────────
     function syncExternalFields() {
       const type = mainEl.querySelector('#af-type')?.value;
       const isBuiltIn = type === 'claude_code_mod';
@@ -2761,21 +3271,66 @@ function showConsole(initialPage = 'overview') {
     }
     mainEl.querySelector('#af-type')?.addEventListener('change', syncExternalFields);
 
+    // ── Populate project / session dropdowns ─────────────────────────
+    function populateContextDropdowns(currentProjectId, currentSessionId) {
+      const projSel = mainEl.querySelector('#af-project');
+      const sessSel = mainEl.querySelector('#af-session');
+      if (!projSel || !sessSel) return;
+
+      projSel.innerHTML = '<option value="">— none —</option>';
+      (state?.projects || []).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id; opt.textContent = p.name || p.id;
+        if (p.id === currentProjectId) opt.selected = true;
+        projSel.appendChild(opt);
+      });
+
+      sessSel.innerHTML = '<option value="">— none —</option>';
+      const seen = new Set();
+      const allSessions = [
+        ...(state?.recent  || []),
+        ...(state?.pinned  || []),
+        ...(state?.projects || []).flatMap(p => p.sessions || []),
+      ];
+      allSessions.forEach(s => {
+        if (seen.has(s.id)) return; seen.add(s.id);
+        const opt = document.createElement('option');
+        opt.value = s.id; opt.textContent = (s.title || s.id).slice(0, 60);
+        if (s.id === currentSessionId) opt.selected = true;
+        sessSel.appendChild(opt);
+      });
+    }
+
+    // ── showForm ─────────────────────────────────────────────────────
     function showForm(idx = -1) {
       const agents = loadAgents();
       const a = idx >= 0 ? agents[idx] : {};
+
       mainEl.querySelector('#af-idx').value      = idx;
       mainEl.querySelector('#af-name').value     = a.name     || '';
       mainEl.querySelector('#af-type').value     = a.type     || 'claude_code_mod';
-      mainEl.querySelector('#af-endpoint').value = a.endpoint || '';
-      mainEl.querySelector('#af-apikey').value   = a.apiKey   || '';
       mainEl.querySelector('#af-model').value    = a.model    || '';
+      mainEl.querySelector('#af-perm').value     = a.permMode || 'bypass';
+      mainEl.querySelector('#af-cwd').value      = a.cwd      || '';
       mainEl.querySelector('#af-color').value    = a.color    || '#7ab389';
       mainEl.querySelector('#af-system').value   = a.system   || '';
       mainEl.querySelector('#af-notes').value    = a.notes    || '';
+      mainEl.querySelector('#af-endpoint').value = a.endpoint || '';
+      mainEl.querySelector('#af-apikey').value   = a.apiKey   || '';
+
+      const mcpArr    = Array.isArray(a.mcpServers) ? a.mcpServers
+        : (a.mcpServers ? String(a.mcpServers).split(',').map(s=>s.trim()).filter(Boolean) : []);
+      const skillsArr = Array.isArray(a.skills) ? a.skills
+        : (a.skills ? String(a.skills).split(',').map(s=>s.trim()).filter(Boolean) : []);
+      mainEl.querySelector('#af-mcp').value    = mcpArr.join(',');
+      mainEl.querySelector('#af-skills').value = skillsArr.join(',');
+      mcpChip?.renderChips();
+      skillsChip?.renderChips();
+
       formTitle.textContent = idx >= 0 ? 'Edit agent' : 'New agent';
       form.style.display = 'block';
       syncExternalFields();
+      populateContextDropdowns(a.projectId || '', a.sessionId || '');
       mainEl.querySelector('#af-name').focus();
     }
     function hideForm() { form.style.display = 'none'; }
@@ -2784,17 +3339,25 @@ function showConsole(initialPage = 'overview') {
     mainEl.querySelector('#af-cancel').addEventListener('click', hideForm);
     mainEl.querySelector('#af-save').addEventListener('click', () => {
       try {
-        const agents  = loadAgents();
-        const idx     = parseInt(mainEl.querySelector('#af-idx').value);
-        const agent   = {
-          name:     mainEl.querySelector('#af-name').value.trim()     || 'Unnamed',
-          type:     mainEl.querySelector('#af-type').value            || 'claude_code_mod',
-          endpoint: mainEl.querySelector('#af-endpoint')?.value.trim() || '',
-          apiKey:   mainEl.querySelector('#af-apikey')?.value.trim()   || '',
-          model:    mainEl.querySelector('#af-model')?.value           || '',
-          system:   mainEl.querySelector('#af-system')?.value.trim()   || '',
-          color:    mainEl.querySelector('#af-color')?.value           || '#7ab389',
-          notes:    mainEl.querySelector('#af-notes')?.value.trim()    || '',
+        const agents    = loadAgents();
+        const idx       = parseInt(mainEl.querySelector('#af-idx').value);
+        const mcpRaw    = mainEl.querySelector('#af-mcp')?.value    || '';
+        const skillsRaw = mainEl.querySelector('#af-skills')?.value || '';
+        const agent     = {
+          name:       mainEl.querySelector('#af-name').value.trim()      || 'Unnamed',
+          type:       mainEl.querySelector('#af-type').value             || 'claude_code_mod',
+          model:      mainEl.querySelector('#af-model')?.value           || '',
+          permMode:   mainEl.querySelector('#af-perm')?.value            || 'bypass',
+          cwd:        mainEl.querySelector('#af-cwd')?.value.trim()      || '',
+          projectId:  mainEl.querySelector('#af-project')?.value         || '',
+          sessionId:  mainEl.querySelector('#af-session')?.value         || '',
+          mcpServers: mcpRaw    ? mcpRaw.split(',').map(s=>s.trim()).filter(Boolean)    : [],
+          skills:     skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [],
+          system:     mainEl.querySelector('#af-system')?.value.trim()   || '',
+          color:      mainEl.querySelector('#af-color')?.value           || '#7ab389',
+          notes:      mainEl.querySelector('#af-notes')?.value.trim()    || '',
+          endpoint:   mainEl.querySelector('#af-endpoint')?.value.trim() || '',
+          apiKey:     mainEl.querySelector('#af-apikey')?.value.trim()   || '',
         };
         if (idx >= 0) agents[idx] = agent; else agents.push(agent);
 
@@ -3008,9 +3571,37 @@ async function showKnowledgeBaseEditor() {
   }
 }
 
-// ---------- Code-block actions (copy / download / preview) ----------
+// ---------- Code-block actions (copy / download / preview / pin-canvas) ----------
 const langToExt = { css: 'css', javascript: 'js', typescript: 'ts', html: 'html',
                     json: 'json', markdown: 'md', python: 'py', bash: 'sh', sh: 'sh' };
+
+/**
+ * Infer a human-readable title from code content.
+ * Tries <title>, first heading, component/function name, leading comment.
+ */
+function inferArtifactTitle(lang, code) {
+  // HTML <title>...</title>
+  const titleTag = code.match(/<title[^>]*>([^<]{2,50})<\/title>/i);
+  if (titleTag) return titleTag[1].trim();
+
+  // Leading single-line comment  // My Widget  or  # My Widget
+  const comment = code.match(/^(?:\/\/|#)\s*([^\n]{3,48})/m);
+  if (comment && !/^!/.test(comment[1])) return comment[1].trim();
+
+  // Block comment  /* Pomodoro Timer */
+  const blockComment = code.match(/^\/\*+\s*\n?\s*\*?\s*([^\n*]{3,48})/m);
+  if (blockComment) return blockComment[1].trim();
+
+  // React / JS: function MyComponent or const MyComponent =
+  const comp = code.match(/(?:function|const|class)\s+([A-Z][a-zA-Z0-9]{2,})/);
+  if (comp) return comp[1];
+
+  // Markdown heading # Title
+  const heading = code.match(/^#{1,2}\s+(.{3,48})/m);
+  if (heading) return heading[1].trim();
+
+  return null;
+}
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.code-block__btn');
   if (!btn) return;
@@ -3039,6 +3630,15 @@ document.addEventListener('click', (e) => {
     setTimeout(() => btn.classList.remove('is-flashed'), 900);
     return;
   }
+  if (action === 'toggle-code') {
+    const isHidden = block.classList.toggle('is-code-hidden');
+    btn.title = isHidden ? 'Show code' : 'Hide code';
+    // Swap icon: rows (show) ↔ minus (hide)
+    const ico = btn.querySelector('i[data-phosphor]');
+    if (ico) ico.setAttribute('data-phosphor', isHidden ? 'rows' : 'minus');
+    window.renderIcons?.();
+    return;
+  }
   if (action === 'preview') {
     togglePreviewInline(block, lang, code);
     return;
@@ -3047,10 +3647,21 @@ document.addEventListener('click', (e) => {
     openCodePreview(lang, code);
     return;
   }
-  if (action === 'expand') {
-    const expanded = block.classList.toggle('is-expanded');
-    const label = btn.querySelector('.code-block__expand-label');
-    if (label) label.textContent = expanded ? 'Show less' : 'Show more';
+  if (action === 'pin-canvas') {
+    // Build the srcdoc and pin as a live Canvas panel in dockview
+    const rawCode   = body?.innerText || code;
+    const html      = buildPreviewSrcDoc(lang, rawCode);
+    const needsNet  = ['jsx','tsx','react'].includes(lang);
+    const sandbox   = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+    const title     = inferArtifactTitle(lang, rawCode) || null;
+    // Normalise lang for storage
+    const saveLang  = lang === 'javascript' ? 'js' : lang === 'react' ? 'jsx' : lang;
+    if (window.Workspace?.pinArtifact) {
+      window.Workspace.pinArtifact(title, html, sandbox, saveLang, rawCode);
+    }
+    // Flash + pin the button to signal success
+    btn.classList.add('is-pinned');
+    btn.title = 'Pinned ✓';
     return;
   }
   if (action === 'open-in-panel') {
@@ -3091,10 +3702,6 @@ function togglePreviewInline(block, lang, code) {
     overlay.innerHTML = `<iframe sandbox="${sandboxAttr}" srcdoc="${buildPreviewSrcDoc(lang, code).replace(/"/g, '&quot;')}"></iframe>`;
     block.appendChild(overlay);
   }
-
-  // Slot the overlay flush under the head.
-  const head = block.querySelector('.code-block__head');
-  if (head) overlay.style.top = head.offsetHeight + 'px';
 
   // Highlight the eye button while preview is open.
   if (eyeBtn) eyeBtn.classList.add('is-active');
@@ -4194,44 +4801,141 @@ async function ftLoadDir(dirPath, container) {
 }
 
 // ---------- Terminal panel ----------
+// Renders a mount point; initTerminalPanel() boots xterm.js + live shell.
 function renderTerminalPanel() {
-  return `
-    <div class="terminal-view">
-      <div class="terminal-toolbar">
-        <span class="terminal-toolbar__dots">
-          <span class="t-dot t-dot--red"></span>
-          <span class="t-dot t-dot--yellow"></span>
-          <span class="t-dot t-dot--green"></span>
-        </span>
-        <span class="terminal-toolbar__title">bash — ~/claude-code-mods</span>
-        <span class="terminal-toolbar__actions">
-          <button class="icon-btn icon-btn--sm" title="New tab"><i data-phosphor="plus"></i></button>
-          <button class="icon-btn icon-btn--sm" title="Clear"><i data-phosphor="trash"></i></button>
-        </span>
-      </div>
-      <div class="terminal-body">
-        <div class="t-line t-line--cmd">npm run dev</div>
-        <div class="t-line t-line--blank"></div>
-        <div class="t-line t-line--muted">&gt; claude-code-mods@0.1.0 dev</div>
-        <div class="t-line t-line--muted">&gt; vite --port 5181 --open</div>
-        <div class="t-line t-line--blank"></div>
-        <div class="t-line"><span class="t-chip">VITE v5.4.21</span> ready in <span class="t-hi">312</span> ms</div>
-        <div class="t-line t-line--blank"></div>
-        <div class="t-line"><span class="t-arrow">➜</span>  Local:   <span class="t-link">http://localhost:5181/</span></div>
-        <div class="t-line t-line--dim"><span class="t-arrow">➜</span>  Network: use <kbd class="t-key">--host</kbd> to expose</div>
-        <div class="t-line t-line--blank"></div>
-        <div class="t-line t-line--cmd">git diff --stat HEAD</div>
-        <div class="t-line"> src/sidebar/SessionRow.tsx | <span class="t-add">++++++++</span><span class="t-del">----</span></div>
-        <div class="t-line"> src/sidebar/style.css      | <span class="t-add">+++++</span><span class="t-del">--</span></div>
-        <div class="t-line t-line--dim"> 2 files changed, 24 insertions(+), 8 deletions(-)</div>
-        <div class="t-line t-line--blank"></div>
-        <div class="t-prompt">
-          <span class="t-prompt__cwd">~/claude-code-mods</span>
-          <span class="t-prompt__sym"> $ </span>
-          <span class="t-cursor"></span>
-        </div>
-      </div>
-    </div>`;
+  return `<div class="terminal-view" id="terminal-view">
+    <div class="terminal-toolbar">
+      <span class="terminal-toolbar__title" id="terminal-title">Terminal</span>
+      <span class="terminal-toolbar__actions">
+        <button class="icon-btn icon-btn--sm" id="terminal-new-btn" title="New terminal">
+          <i data-phosphor="plus"></i>
+        </button>
+        <button class="icon-btn icon-btn--sm" id="terminal-clear-btn" title="Clear">
+          <i data-phosphor="trash"></i>
+        </button>
+      </span>
+    </div>
+    <div class="terminal-xterm" id="terminal-xterm-mount"></div>
+  </div>`;
+}
+
+let _termInstance = null; // { termId, term, fitAddon, cleanup }
+
+async function initTerminalPanel() {
+  const api = window.electronAPI;
+  if (!api?.terminal) return; // not in Electron
+
+  const Terminal   = window.Terminal;
+  const FitAddon   = window.FitAddon?.FitAddon;
+  if (!Terminal || !FitAddon) return; // xterm not loaded
+
+  const mount = document.getElementById('terminal-xterm-mount');
+  if (!mount) return;
+
+  // Tear down previous instance if panel was re-rendered
+  if (_termInstance) {
+    _termInstance.cleanup();
+    _termInstance = null;
+  }
+
+  // Detect platform label
+  const platform = api.platform || 'unknown';
+  const shellLabel = platform === 'win32' ? 'PowerShell' : (platform === 'darwin' ? 'zsh' : 'bash');
+  const titleEl = document.getElementById('terminal-title');
+
+  // Create xterm instance
+  const term = new Terminal({
+    theme: {
+      background:    '#0e0e10',
+      foreground:    '#d4d4da',
+      cursor:        '#d97757',
+      cursorAccent:  '#0e0e10',
+      black:         '#141416',
+      red:           '#e06c75',
+      green:         '#7ab389',
+      yellow:        '#c9a96e',
+      blue:          '#6a86c3',
+      magenta:       '#c678dd',
+      cyan:          '#56b6c2',
+      white:         '#abb2bf',
+      brightBlack:   '#5a5a63',
+      brightRed:     '#e06c75',
+      brightGreen:   '#98c379',
+      brightYellow:  '#e5c07b',
+      brightBlue:    '#61afef',
+      brightMagenta: '#c678dd',
+      brightCyan:    '#56b6c2',
+      brightWhite:   '#ffffff',
+    },
+    fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace',
+    fontSize:    13,
+    lineHeight:  1.4,
+    cursorBlink: true,
+    scrollback:  5000,
+    allowProposedApi: true,
+  });
+
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(mount);
+  fitAddon.fit();
+
+  // Spawn the shell
+  const result = await api.terminal.create({});
+  if (!result.ok) {
+    term.write(`\x1b[31mFailed to start shell: ${result.error}\x1b[0m\r\n`);
+    return;
+  }
+  const { termId, cwd } = result;
+  if (titleEl) titleEl.textContent = `${shellLabel} — ${cwd}`;
+
+  // Wire output
+  const offData = api.terminal.onData(termId, (text) => term.write(text));
+  const offExit = api.terminal.onExit(termId, (code) => {
+    term.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`);
+    term.write(`\x1b[2m[click New Terminal to restart]\x1b[0m\r\n`);
+  });
+
+  // Wire input (xterm keystrokes → shell stdin)
+  const offInput = term.onData((data) => api.terminal.input(termId, data));
+
+  // Resize observer — refit xterm when panel resizes
+  const ro = new ResizeObserver(() => { try { fitAddon.fit(); } catch { /* ignore */ } });
+  ro.observe(mount);
+
+  // Toolbar buttons
+  const newBtn   = document.getElementById('terminal-new-btn');
+  const clearBtn = document.getElementById('terminal-clear-btn');
+  const onNew = async () => {
+    _termInstance?.cleanup();
+    _termInstance = null;
+    // Re-render panel and reinitialize
+    const body = document.getElementById('right-panel-body');
+    if (body) {
+      body.innerHTML = renderTerminalPanel();
+      if (window.renderIcons) window.renderIcons(body);
+      setTimeout(initTerminalPanel, 0);
+    }
+  };
+  const onClear = () => term.clear();
+  newBtn?.addEventListener('click', onNew);
+  clearBtn?.addEventListener('click', onClear);
+
+  _termInstance = {
+    termId,
+    term,
+    fitAddon,
+    cleanup() {
+      offData();
+      offExit();
+      offInput.dispose();
+      ro.disconnect();
+      newBtn?.removeEventListener('click', onNew);
+      clearBtn?.removeEventListener('click', onClear);
+      try { api.terminal.close(termId); } catch { /* ignore */ }
+      try { term.dispose(); } catch { /* ignore */ }
+    },
+  };
 }
 
 // ---------- Plan panel ----------
@@ -4244,8 +4948,8 @@ function renderMcpPanel() {
       toolList: ['execute_sql','list_tables','apply_migration','create_branch','list_projects','get_project','deploy_edge_function','get_logs'] },
     { name: 'Desktop Commander', tools: 5,  status: 'connected', color: '#c9a96e',
       toolList: ['start_process','read_file','write_file','list_directory','kill_process'] },
-    { name: 'filesystem',        tools: 4,  status: 'idle',      color: '#5a5a63',
-      toolList: ['read_file','write_file','list_dir','search'] },
+    { name: 'filesystem',        tools: 7,  status: 'connected', color: '#7ab389',
+      toolList: ['read_file','write_file','create_directory','list_directory','move_file','delete_file','search_files'] },
   ];
   const total = servers.reduce((s, x) => s + x.tools, 0);
   const statusDot = s => s === 'connected'
@@ -4402,7 +5106,9 @@ async function linkifyPaths(bubbleEl) {
 function updateContextChip() {
   const s = window.__contextStats;
   if (!s) return;
-  const used  = (s.inputTokens || 0) + (s.outputTokens || 0);
+  // inputTokens from the API is the full context window used (system + history + this turn).
+  // outputTokens is the response — it goes into the next turn's input, not counted separately.
+  const used  = s.inputTokens || 0;
   const total = getModelCtxSize(s.model || modelState?.currentModel);
   const pct   = Math.min((used / total * 100), 100);
 
@@ -4413,14 +5119,23 @@ function updateContextChip() {
 }
 
 // ---------- Context panel ----------
-// Context window sizes per model family (tokens)
+// Context window sizes per model — verified against Anthropic docs 2026-04-25
+// Opus 4.7, Opus 4.6, Sonnet 4.6 → 1M tokens
+// Haiku 4.5, Sonnet 4.5, Opus 4.5, Opus 4.1, older → 200k tokens
 const MODEL_CTX = {
-  'claude-opus-4':    200000,
-  'claude-sonnet-4':  200000,
-  'claude-haiku-4':   200000,
-  'claude-opus-3':    200000,
-  'claude-sonnet-3':  200000,
-  'claude-haiku-3':   200000,
+  'claude-opus-4-7':   1000000,
+  'claude-opus-4-6':   1000000,
+  'claude-sonnet-4-6': 1000000,
+  'claude-haiku-4-5':   200000,
+  'claude-sonnet-4-5':  200000,
+  'claude-opus-4-5':    200000,
+  'claude-opus-4-1':    200000,
+  'claude-opus-4':      200000,
+  'claude-sonnet-4':    200000,
+  'claude-haiku-4':     200000,
+  'claude-opus-3':      200000,
+  'claude-sonnet-3':    200000,
+  'claude-haiku-3':     200000,
 };
 function getModelCtxSize(modelId) {
   const id = (modelId || '').toLowerCase();
@@ -4440,14 +5155,15 @@ function renderContextPanel() {
   const s = window.__contextStats;
   const hasData = s && (s.inputTokens || s.outputTokens);
 
-  // Real data from CLI, or zeros if no turn has completed yet
+  // inputTokens from the API = full context consumed this turn (system + history + latest msg).
+  // It is NOT a delta — it's already the running total.  Do NOT add outputTokens.
   const totalIn  = s?.inputTokens     || 0;
   const totalOut = s?.outputTokens    || 0;
   const cached   = s?.cacheReadTokens || 0;
-  const convTokens   = Math.max(0, totalIn - cached);   // conversation turns
-  const sysTokens    = cached;                           // cache read ≈ system prompt
-  const outputTokens = totalOut;
-  const used  = totalIn + totalOut;
+  const sysTokens    = cached;                              // cache hits ≈ system prompt
+  const convTokens   = Math.max(0, totalIn - cached);      // non-cached input (conversation)
+  const outputTokens = totalOut;                            // latest response
+  const used  = totalIn;   // inputTokens IS the full context size — don't double-count output
   const model = s?.model || modelState?.currentModel || 'claude-sonnet-4-6';
   const total = getModelCtxSize(model);
   const pct   = used > 0 ? Math.min((used / total * 100), 100).toFixed(1) : '0.0';
@@ -4866,7 +5582,11 @@ function setRightPanelTab(id) {
   if (rightPanelTitle) rightPanelTitle.textContent = label;
   localStorage.setItem(RIGHT_PANEL_KEY + '.tab', id);
 
+  // Open / focus this panel in the dockview workspace and move shared body into it
+  if (window.Workspace) window.Workspace.activatePanel(id);
+
   const bodyEl = document.getElementById('right-panel-body');
+  if (!bodyEl) return;   // dockview panel not yet ready — activatePanel will re-call us
 
   if (_splitMode) {
     // In split mode — update the top pane and refresh the whole split layout
@@ -4888,12 +5608,22 @@ function setRightPanelTab(id) {
     bodyEl.innerHTML = renderPanelContent(id);
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(id, bodyEl);
-    if (id === 'apercu') requestAnimationFrame(() => initApercuScaling(bodyEl));
+    if (id === 'apercu')   requestAnimationFrame(() => initApercuScaling(bodyEl));
+    if (id === 'terminal') requestAnimationFrame(() => initTerminalPanel());
   }
 
   // Sync context-strip chips
   syncCtxChips();
 }
+
+// ---------- Dockview tab-change bridge ----------
+// workspace.js calls this when user clicks a dockview tab directly
+// (not triggered by programmatic setRightPanelTab calls)
+window._dvTabChange = function(id) {
+  if (!document.body.classList.contains('right-panel-open')) return;
+  if (currentRightPanel === id) return; // already current — skip re-render
+  setRightPanelTab(id);
+};
 
 // ---------- Context strip chip sync ----------
 function syncCtxChips() {
@@ -4920,8 +5650,9 @@ document.querySelectorAll('.ctx-chip[data-ctx-tab]').forEach(chip => {
   });
 });
 
-// ---------- Right-panel resize ----------
-const rightPanelEl      = document.getElementById('right-panel');
+// ---------- Right-panel / workspace-dock resize ----------
+// rightPanelEl now points to the dockview workspace container
+const rightPanelEl      = document.getElementById('workspace-dock');
 const rightPanelResizer = document.getElementById('right-panel-resizer');
 const RP_WIDTH_KEY = 'ccmod.rightPanelWidth';
 const RP_MIN = 260;
@@ -5003,13 +5734,39 @@ function showRightPanelMenu(anchor) {
   };
 }
 
-// Restore panel state on load
-if (localStorage.getItem(RIGHT_PANEL_KEY + '.open') === '1') {
-  setRightPanelOpen(true);
-  setRightPanelTab(currentRightPanel);
+// Restore panel state on load (wrapped — must not crash before initLiveChat runs)
+// Uses a two-pass: immediate attempt + deferred retry once dockview panels are ready.
+function _restorePanelState() {
+  try {
+    if (localStorage.getItem(RIGHT_PANEL_KEY + '.open') === '1') {
+      setRightPanelOpen(true);
+      setRightPanelTab(currentRightPanel);
+    }
+  } catch (e) {
+    console.warn('[panel restore] skipped:', e.message);
+  }
 }
+_restorePanelState();
+// Deferred retry — fires after dockview's async panel init completes
+setTimeout(_restorePanelState, 50);
 // Ensure split btn is wired (called after all DOM-querying code above)
 wireSplitBtn();
+
+// ── Session auto-save on page close / Vite hot-reload ─────────────────────
+// Without this, the active session's messages are lost whenever the page
+// unloads (app close, restart, or Vite hot-reload).
+function _flushSession() {
+  try {
+    if (state?.activeId && window.__chatHistory?.length) {
+      saveSessionMessages(state.activeId, window.__chatHistory);
+    }
+    saveStateMeta();
+  } catch (e) { /* silent */ }
+}
+window.addEventListener('beforeunload',  _flushSession);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') _flushSession();
+});
 
 // ---------- Mic (stub — blinking when "recording") ----------
 const micBtn = document.getElementById('mic-btn');
@@ -5224,11 +5981,112 @@ function escapeHTML(s) {
   return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
 
+// ---------- Syntax highlighting ----------
+(function () {
+  const KW = new Set(['break','case','catch','class','const','continue','debugger','default',
+    'delete','do','else','export','extends','finally','for','from','function','if','import',
+    'in','instanceof','let','new','of','return','static','super','switch','this','throw',
+    'try','typeof','undefined','var','void','while','with','yield','async','await',
+    'null','true','false']);
+  const TS_KW = new Set(['abstract','as','declare','enum','implements','interface','is',
+    'keyof','module','namespace','never','readonly','satisfies','type','infer','override',
+    'using','asserts','accessor','out']);
+  const BUILTIN = new Set(['string','number','boolean','object','symbol','bigint','any',
+    'unknown','Array','Promise','Record','Partial','Required','Readonly','Pick','Omit',
+    'Exclude','Extract','NonNullable','ReturnType','Parameters','InstanceType','Map','Set',
+    'WeakMap','Date','Error','RegExp','Math','JSON','console','window','document',
+    'process','Buffer','HTMLElement','Element','Event']);
+
+  // Matched groups: 1=template, 2=dq-str, 3=sq-str, 4=ml-comment, 5=sl-comment,
+  //                 6=number, 7=PascalCase, 8=prop(.ident), 9=ident
+  const TOK = /(`(?:[^`\\]|\\.|\$\{(?:[^{}]|\{[^{}]*\})*\})*`)|("(?:[^"\\]|\\.)*")|('(?:[^'\\]|\\.)*')|(\/\*[\s\S]*?\*\/)|(\/\/[^\n]*)|(0x[\da-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)|([A-Z][A-Za-z0-9_$]*)|(\.[a-z_$][A-Za-z0-9_$]*\b)|([a-z_$][A-Za-z0-9_$]*)/g;
+
+  function hl(rawCode, isTS) {
+    let out = '', last = 0, m;
+    TOK.lastIndex = 0;
+    while ((m = TOK.exec(rawCode)) !== null) {
+      if (m.index > last) out += escapeHTML(rawCode.slice(last, m.index));
+      const t = m[0];
+      if      (m[1])  out += `<span class="str">${escapeHTML(t)}</span>`;           // template
+      else if (m[2] || m[3]) out += `<span class="str">${escapeHTML(t)}</span>`;   // string
+      else if (m[4] || m[5]) out += `<span class="cmt">${escapeHTML(t)}</span>`;   // comment
+      else if (m[6])  out += `<span class="num">${escapeHTML(t)}</span>`;           // number
+      else if (m[7])  out += `<span class="type">${escapeHTML(t)}</span>`;          // PascalCase
+      else if (m[8]) {                                                               // .property
+        const after = rawCode.slice(m.index + t.length).trimStart();
+        const cls   = after.startsWith('(') ? 'fn' : 'prop';
+        out += `.` + `<span class="${cls}">${escapeHTML(t.slice(1))}</span>`;
+      }
+      else if (m[9]) {                                                               // identifier
+        const ident = m[9];
+        const after = rawCode.slice(m.index + t.length).trimStart();
+        if      (KW.has(ident))                       out += `<span class="kw">${escapeHTML(t)}</span>`;
+        else if (isTS && TS_KW.has(ident))            out += `<span class="type">${escapeHTML(t)}</span>`;
+        else if (BUILTIN.has(ident))                  out += `<span class="type">${escapeHTML(t)}</span>`;
+        else if (after.startsWith('(') || after.startsWith('<')) out += `<span class="fn">${escapeHTML(t)}</span>`;
+        else                                          out += `<span class="var">${escapeHTML(t)}</span>`;
+      }
+      else out += escapeHTML(t);
+      last = m.index + t.length;
+    }
+    if (last < rawCode.length) out += escapeHTML(rawCode.slice(last));
+    return out;
+  }
+
+  window.highlightCode = function(lang, rawCode) {
+    const L = (lang || '').toLowerCase();
+    const isJS = ['js','jsx','tsx','ts','javascript','typescript','react'].includes(L);
+    const isTS = L === 'ts' || L === 'tsx';
+    if (!isJS) return escapeHTML(rawCode);
+    return hl(rawCode, isTS);
+  };
+})();
+
 render();
 updateTitleBar(state.activeId);
 syncWorkspaceIndex();
 applyLanguage();
 syncModelChip();
+
+// ── Disk recovery: restore sessions if localStorage was wiped ────────────────
+// Runs after initial render so the UI is visible immediately, then re-renders
+// if disk data was recovered.
+(async function diskRecoveryOnStartup() {
+  try {
+    const restored = await _recoverFromDisk();
+    if (!restored) return;
+
+    // Disk data was recovered — rebuild state from the now-populated localStorage
+    const list   = loadSessionList();
+    const meta   = loadStateMeta();
+    const byId   = Object.fromEntries(list.map(s => [s.id, s]));
+
+    let restoredProjects = null;
+    if (meta?.projects?.length) {
+      restoredProjects = meta.projects.map(p => ({
+        id: p.id, name: p.name, color: p.color, open: p.open,
+        sessions: (p.sessions || []).map(id => byId[id]).filter(Boolean),
+      }));
+    }
+
+    const pinnedSessions = list.filter(s => s.pinned);
+    const recentSessions = list.filter(s => !s.pinned && !s.projectId)
+                               .sort((a, b) => b.ts - a.ts).slice(0, 30);
+
+    state.projects = restoredProjects || [];
+    state.pinned   = pinnedSessions;
+    state.recent   = recentSessions;
+    state.activeId = meta?.activeId || recentSessions[0]?.id || pinnedSessions[0]?.id || list[0]?.id;
+    window.__chatHistory = loadSessionMessages(state.activeId);
+
+    render();
+    _renderChatForSession(state.activeId);
+    updateTitleBar(state.activeId);
+    console.log('[sessions] disk recovery complete — restored', list.length, 'sessions');
+  } catch (e) {
+    console.warn('[sessions] startup recovery error:', e);
+  }
+})();
 
 // ---------- Streaming state cycle (demo) ----------
 // All states: CSS modifier class + dot modifier + label text
@@ -5275,7 +6133,11 @@ let _streamInterval = setInterval(() => {
   const composerInput = document.getElementById('composer-input');
   const sendBtn       = document.getElementById('composer-send');
 
-  if (!chatConv || !composerInput || !sendBtn) return;
+  if (!chatConv || !composerInput || !sendBtn) {
+    console.error('[initLiveChat] guard failed — missing elements:',
+      { chatConv: !!chatConv, composerInput: !!composerInput, sendBtn: !!sendBtn });
+    return;
+  }
 
   // ── Image paste state ─────────────────────────────────────────────────────
   let _pendingImages = []; // [{dataUrl, mediaType}]
@@ -5306,6 +6168,45 @@ let _streamInterval = setInterval(() => {
     syncImgPreviews();
   });
 
+  // Anthropic API only accepts these four image types
+  const ALLOWED_IMG_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+  /**
+   * Normalise a pasted/dropped image to a supported media type.
+   * bmp / tiff / x-png / unknown → re-encode as image/png via canvas.
+   * jpeg / png / gif / webp → pass through as-is.
+   */
+  function normalisePastedImage(blob, rawType, cb) {
+    const mediaType = rawType?.toLowerCase() || '';
+    if (ALLOWED_IMG_TYPES.has(mediaType)) {
+      // Already supported — read directly
+      const reader = new FileReader();
+      reader.onload = () => cb(reader.result, mediaType);
+      reader.readAsDataURL(blob);
+      return;
+    }
+    // Re-encode via canvas → PNG (works for bmp, tiff, x-png, etc.)
+    const url = URL.createObjectURL(blob);
+    const img  = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width  = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      const dataUrl = canvas.toDataURL('image/png');
+      cb(dataUrl, 'image/png');
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      // Last-resort fallback: try reading as-is and let the API reject gracefully
+      const reader = new FileReader();
+      reader.onload = () => cb(reader.result, 'image/png');
+      reader.readAsDataURL(blob);
+    };
+    img.src = url;
+  }
+
   composerInput.addEventListener('paste', e => {
     const items = Array.from(e.clipboardData?.items || []);
     const imgItems = items.filter(it => it.type.startsWith('image/'));
@@ -5314,12 +6215,10 @@ let _streamInterval = setInterval(() => {
     imgItems.forEach(item => {
       const blob = item.getAsFile();
       if (!blob) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        _pendingImages.push({ dataUrl: reader.result, mediaType: item.type });
+      normalisePastedImage(blob, item.type, (dataUrl, mediaType) => {
+        _pendingImages.push({ dataUrl, mediaType });
         syncImgPreviews();
-      };
-      reader.readAsDataURL(blob);
+      });
     });
   });
 
@@ -5357,27 +6256,43 @@ let _streamInterval = setInterval(() => {
     let out = raw.replace(/```([\w\-+#.]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
       const l    = escapeHTML(lang.trim() || 'code');
       const lRaw = lang.trim().toLowerCase();
-      const c    = escapeHTML(code.trimEnd());
+      // Use syntax highlighter for JS/TS family; plain escape for everything else
+      const c    = (window.highlightCode || escapeHTML)(lRaw, code.trimEnd());
       const canPreview = RENDERABLE_LANGS.includes(lRaw);
       // Preview inline only makes sense for renderable types
       const previewBtn = canPreview
         ? `<button class="code-block__btn" data-action="preview" title="Preview inline"><i data-phosphor="eye"></i></button>`
         : '';
-      const expandBtn = `<button class="code-block__expand" data-action="expand" aria-label="Expand code">`
-           + `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 6 8 10 12 6"/></svg>`
-           + `<span class="code-block__expand-label">Show more</span></button>`;
-      return `<div class="code-block"><div class="code-block__head">`
+      // Renderable langs get a "Pin to Canvas" button; others get apercu code view
+      const panelBtn = canPreview
+        ? `<button class="code-block__btn code-block__btn--pin" data-action="pin-canvas" title="Pin to Canvas"><i data-phosphor="push-pin"></i></button>`
+        : `<button class="code-block__btn" data-action="open-in-panel" title="Open in panel"><i data-phosphor="browsers"></i></button>`;
+      return `<div class="code-block" data-lang="${lRaw}"><div class="code-block__head">`
            + `<span class="code-block__lang">${l}</span>`
            + `<span class="code-block__actions">`
-           + `<button class="code-block__btn" data-action="copy"          title="Copy"><i data-phosphor="copy"></i></button>`
-           + `<button class="code-block__btn" data-action="download"      title="Download"><i data-phosphor="download-simple"></i></button>`
+           + `<button class="code-block__btn code-block__btn--toggle-code" data-action="toggle-code" title="Hide code"><i data-phosphor="minus"></i></button>`
+           + `<button class="code-block__btn" data-action="copy"     title="Copy"><i data-phosphor="copy"></i></button>`
+           + `<button class="code-block__btn" data-action="download" title="Download"><i data-phosphor="download-simple"></i></button>`
            + previewBtn
-           + `<button class="code-block__btn" data-action="open-in-panel" title="Open in panel"><i data-phosphor="browsers"></i></button>`
-           + `</span></div><pre class="code-block__body">${c}</pre>${expandBtn}</div>`;
+           + panelBtn
+           + `</span></div><pre class="code-block__body">${c}</pre></div>`;
     });
 
-    // 2. Process the remaining text line-by-line
-    const lines = out.split('\n');
+    // 2. Protect multi-line code blocks from the bold/italic pass.
+    //    Each replacement produces a <div …><pre>…multi-line code…</pre></div> that
+    //    spans several '\n'-split lines.  Only line 1 starts with '<div class="code-block"'
+    //    so lines 2-N were silently processed for *italic* / **bold** — corrupting code
+    //    with multiplication operators, regex literals, JSDoc asterisks, etc.
+    //    Stash the blocks with unique sentinels before the split; restore afterwards.
+    const _codeStore = [];
+    const _safe = out.replace(/<div class="code-block"[\s\S]*?<\/pre><\/div>/g, match => {
+      const idx = _codeStore.length;
+      _codeStore.push(match);
+      return `\x01CB${idx}\x01`;   // non-printable sentinel — never appears in Claude output
+    });
+
+    // 3. Process the remaining text line-by-line
+    const lines = _safe.split('\n');
     const blocks = [];
     let para = [];
 
@@ -5386,7 +6301,9 @@ let _streamInterval = setInterval(() => {
     };
 
     for (const raw of lines) {
-      // Already a code-block HTML chunk — pass through
+      // Sentinel placeholder for a stashed code-block — restore verbatim
+      if (/^\x01CB\d+\x01$/.test(raw)) { flushPara(); blocks.push(raw); continue; }
+      // (Legacy guard kept for safety — should never trigger now)
       if (raw.startsWith('<div class="code-block"')) { flushPara(); blocks.push(raw); continue; }
 
       let line = raw;
@@ -5415,9 +6332,10 @@ let _streamInterval = setInterval(() => {
     }
     flushPara();
 
-    // Wrap consecutive <li> in <ul>
+    // Wrap consecutive <li> in <ul>, then restore stashed code blocks
     return blocks.join('\n')
-      .replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+      .replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`)
+      .replace(/\x01CB(\d+)\x01/g, (_, i) => _codeStore[+i]);
   }
 
   // ── DOM helpers ───────────────────────────────────────────────────────────
@@ -5561,31 +6479,26 @@ let _streamInterval = setInterval(() => {
     });
     // Scan code blocks for filesystem paths and linkify existing ones
     linkifyPaths(div);
-    // Mark long code blocks so the expand button becomes visible
-    requestAnimationFrame(() => {
-      div.querySelectorAll('.code-block').forEach(block => {
-        const pre = block.querySelector('.code-block__body');
-        if (pre && pre.scrollHeight > pre.clientHeight + 4) {
-          block.classList.add('needs-expand');
-        }
-      });
-    });
-    // Store live CLI stats and refresh the Context panel if it's open
+    // Store live stats and refresh the Context panel if it's open.
+    // NOTE: inputTokens from the API is already the FULL context size (system + history).
+    //       Do NOT accumulate it — just keep the latest value (it's already cumulative).
+    //       costUSD and toolCallCount are true deltas so those DO accumulate.
     if (stats && (stats.inputTokens || stats.outputTokens)) {
-      // Accumulate across turns in the session
       const prev = window.__contextStats || {};
       window.__contextStats = {
-        inputTokens:     (prev.inputTokens  || 0) + (stats.inputTokens  || 0),
-        outputTokens:    (prev.outputTokens || 0) + (stats.outputTokens || 0),
-        cacheReadTokens: stats.cacheReadTokens || prev.cacheReadTokens || 0,
+        // inputTokens = total context used this turn (already includes all prior turns)
+        inputTokens:     stats.inputTokens  || prev.inputTokens  || 0,
+        outputTokens:    stats.outputTokens || prev.outputTokens || 0,
+        cacheReadTokens: stats.cacheReadTokens != null ? stats.cacheReadTokens : (prev.cacheReadTokens || 0),
+        // cumulative deltas
         costUSD:         (prev.costUSD || 0) + (stats.costUSD || 0),
-        numTurns:        stats.numTurns || ((prev.numTurns || 0) + 1),
+        numTurns:        stats.numTurns != null ? stats.numTurns : ((prev.numTurns || 0) + 1),
         toolCallCount:   (prev.toolCallCount || 0) + (stats.toolCallCount || 0),
         model:           stats.model || prev.model || modelState?.currentModel,
       };
       updateContextChip();
       if (currentRightPanel === 'context') {
-        const body = document.querySelector('.right-panel__body');
+        const body = document.getElementById('right-panel-body');
         if (body) { body.innerHTML = renderContextPanel(); window.renderIcons?.(); }
       }
     }
@@ -5718,6 +6631,140 @@ let _streamInterval = setInterval(() => {
   // Alias for legacy call-sites that still reference showApiKeyModal
   function showApiKeyModal(onSaved) { showAuthModal(onSaved); }
 
+  // ── Codeblock context system ──────────────────────────────────────────────
+  // Tracks which codeblock ID is being edited for the current send.
+  // Set by detectCbRefs(); cleared after pinArtifact is called.
+  let _editingCbId = null;
+
+  const CB_REF_RE = /\bcodeblock_(\d{6})\b/gi;
+
+  // Heuristic: does the message look like a brand-new creation request?
+  // If so, we should NOT auto-inject the last canvas — the user wants a fresh one.
+  const NEW_CREATION_RE = /\b(create|make|build|generate|write|start)\s+(a\s+)?(brand[- ]new|new|fresh|different|another|separate)\b|\bfrom\s+scratch\b|\bstart\s+(over|fresh|new)\b/i;
+
+  // Scan user text for codeblock_XXXXXX references, load them, and return an
+  // augmented version of msgContent that includes the file text as context.
+  async function injectCbContext(text, msgContent) {
+    if (!window.electronAPI?.codeblocks) return msgContent;
+    const refs = [...text.matchAll(CB_REF_RE)].map(m => m[1]);
+
+    // Determine which codeblock ID to inject:
+    // 1. Explicit ref in the message (highest priority)
+    // 2. Auto-inject the last pinned canvas (unless user is asking for something new)
+    let id = refs[0] || null;
+
+    if (!id) {
+      if (window.__lastPinnedCbId && !NEW_CREATION_RE.test(text)) {
+        // Silently attach the active canvas as edit context
+        id = window.__lastPinnedCbId;
+      } else {
+        _editingCbId = null;
+        return msgContent;
+      }
+    }
+
+    let cbLang = 'html', cbContent = null;
+    try {
+      const res = await window.electronAPI.codeblocks.load(id);
+      if (res?.ok) {
+        // Prefer source (original JSX/TSX/HTML) over the compiled srcdoc
+        cbLang    = res.lang   || 'html';
+        cbContent = res.source || res.html;
+      }
+    } catch (_) {}
+    if (!cbContent) return msgContent;
+
+    _editingCbId = id;
+
+    const langLabel = cbLang === 'html' ? 'HTML' : cbLang.toUpperCase();
+    const returnInstruction = ['jsx','tsx','react'].includes(cbLang)
+      ? `Return the COMPLETE updated ${langLabel} component source (no imports, no HTML wrapper — just the component code).`
+      : `Return the COMPLETE updated ${langLabel} file (full file, no truncation).`;
+
+    const context =
+      `\n\n---\n[CODEBLOCK CONTEXT — codeblock_${id} · ${langLabel}]\n` +
+      `You are editing an existing saved codeblock. ${returnInstruction}\n\n` +
+      `\`\`\`${cbLang}\n${cbContent}\n\`\`\`\n---`;
+
+    // Append context to the text portion of msgContent
+    if (typeof msgContent === 'string') {
+      return msgContent + context;
+    }
+    if (Array.isArray(msgContent)) {
+      const textBlock = msgContent.find(b => b.type === 'text');
+      if (textBlock) textBlock.text += context;
+      else msgContent.push({ type: 'text', text: context });
+      return msgContent;
+    }
+    return msgContent;
+  }
+
+  // Show / hide the "✏️ canvas name" chip in the context strip
+  function showCbEditChip(id) {
+    let chip = document.getElementById('ctx-chip-codeblock');
+    if (!chip) {
+      chip = document.createElement('button');
+      chip.id        = 'ctx-chip-codeblock';
+      chip.className = 'ctx-chip ctx-chip--cb-edit';
+      chip.title     = 'Replies will update this canvas — click × to detach';
+      chip.innerHTML =
+        `<span class="ctx-chip__ico">✏️</span>` +
+        `<span class="ctx-chip__name" id="ctx-cb-name"></span>` +
+        `<span class="ctx-chip__dismiss" title="Detach canvas">×</span>`;
+      const strip = document.querySelector('.ctx-strip__inner');
+      strip?.appendChild(chip);
+
+      // Only the × button detaches; clicking the label is a no-op
+      chip.querySelector('.ctx-chip__dismiss').addEventListener('click', (e) => {
+        e.stopPropagation();
+        chip.remove();
+        _editingCbId = null;
+        window.__lastPinnedCbId   = null;
+        window.__lastPinnedCbLang = null;
+        window.__lastPinnedCbName = null;
+      });
+    }
+    // Show the canvas name if we have it, otherwise fall back to ID
+    const label = (id === window.__lastPinnedCbId && window.__lastPinnedCbName)
+      ? window.__lastPinnedCbName
+      : `codeblock_${id}`;
+    chip.querySelector('#ctx-cb-name').textContent = label;
+    chip.style.display = '';
+  }
+
+  function hideCbEditChip() {
+    _editingCbId = null;
+    // Keep the chip visible if there's still an active canvas — it acts as a
+    // persistent "editing canvas_XXXXXX" badge until the user dismisses it.
+    if (window.__lastPinnedCbId) {
+      showCbEditChip(window.__lastPinnedCbId);
+    } else {
+      const chip = document.getElementById('ctx-chip-codeblock');
+      if (chip) chip.style.display = 'none';
+    }
+  }
+
+  // Called from workspace.js via CustomEvent 'codeblock:edit-request'
+  // Pre-fills the composer with an edit prompt and the codeblock ref
+  document.addEventListener('codeblock:edit-request', async (e) => {
+    const { cbId, title } = e.detail || {};
+    if (!cbId) return;
+    const prompt = `Modify codeblock_${cbId}${title ? ` (${title})` : ''}: `;
+    composerInput.value = prompt;
+    composerInput.focus();
+    composerInput.setSelectionRange(prompt.length, prompt.length);
+    showCbEditChip(cbId);
+  });
+
+  // Called from workspace.js after a canvas is auto-pinned.
+  // Shows the active-canvas chip immediately so the user sees it right away.
+  document.addEventListener('codeblock:created', (e) => {
+    const { cbId } = e.detail || {};
+    if (!cbId) return;
+    // __lastPinnedCbId + name are already set by workspace.js at this point
+    showCbEditChip(cbId);
+  });
+
   // ── Core send ─────────────────────────────────────────────────────────────
 
   // opts.skipUI = true → don't re-add user bubble or push to history (used by rate-limit retry)
@@ -5777,7 +6824,27 @@ let _streamInterval = setInterval(() => {
         msgContent = text;
       }
 
+      // Save ORIGINAL content to history — this is what gets displayed & persisted.
+      // The injected codeblock context (full HTML) must NEVER be stored here.
       history.push({ role: 'user', content: msgContent });
+
+      // Inject codeblock context for the API call only (deep-cloned so history stays clean)
+      let _cbInjectedContent = Array.isArray(msgContent)
+        ? JSON.parse(JSON.stringify(msgContent))
+        : msgContent;
+      try {
+        _cbInjectedContent = await injectCbContext(text, _cbInjectedContent);
+        if (_editingCbId) {
+          showCbEditChip(_editingCbId);
+          window.__cbEditingId = _editingCbId;   // read by workspace.js pinArtifact
+        }
+      } catch (cbErr) {
+        console.warn('[codeblock] context injection failed:', cbErr);
+        // Non-fatal — continue with original content
+        _cbInjectedContent = msgContent;
+      }
+      // Patch only the last history entry for the API send (replaced below in apiMessages)
+      window.__lastApiContent = _cbInjectedContent;
       addUserBubble(text, sentImages);
       _pendingImages = [];
       syncImgPreviews();
@@ -5841,7 +6908,7 @@ let _streamInterval = setInterval(() => {
       _planExpandedIdx = -1;
       // If the Plan panel is currently visible, refresh it in place
       if (currentRightPanel === 'plan') {
-        const body = document.querySelector('.right-panel__body');
+        const body = document.getElementById('right-panel-body');
         if (body) {
           body.innerHTML = renderPlanPanel();
           renderIcons = window.renderIcons;
@@ -5862,7 +6929,10 @@ let _streamInterval = setInterval(() => {
       // Always build system prompt — passed on every turn as a hidden system layer.
       // For CLI sessions this is sent via --system-prompt on every spawn so Claude
       // and sub-agents always have workspace context without it touching message content.
-      let effectiveSystem  = CHAT_SYSTEM_PROMPT + buildSessionContext(sessionId);
+      const memoryContext  = await _loadMemoryContext();
+      let effectiveSystem  = CHAT_SYSTEM_PROMPT
+        + (memoryContext ? '\n\n' + memoryContext : '')
+        + buildSessionContext(sessionId);
       if (resolvedAgent) {
         const agentContext = [
           resolvedAgent.system ? resolvedAgent.system : `You are an AI agent named "${resolvedAgent.name}".`,
@@ -5871,16 +6941,44 @@ let _streamInterval = setInterval(() => {
         effectiveSystem = (effectiveSystem ? effectiveSystem + '\n\n' : '') + agentContext;
       }
 
+      // Build API messages: history with last user message replaced by injected version
+      const apiMessages = window.__lastApiContent !== undefined && history.length > 0
+        ? [...history.slice(0, -1), { role: 'user', content: window.__lastApiContent }]
+        : history;
+      window.__lastApiContent = undefined;
+
       const result = await window.electronAPI.sendMessage(
-        history,
+        apiMessages,
         effectiveModel,
         effectiveSystem,
         cliSessionId,
         permState?.current || 'bypass'
       );
-      history.push({ role: 'assistant', content: responseText || result?.text || '' });
+      const finalText = responseText || result?.text || '';
+      history.push({ role: 'assistant', content: finalText });
       // Persist messages after successful exchange
       saveSessionMessages(sessionId, history);
+
+      // ── Notify attached agent panels about the new message ────────────────
+      // Any split-chat panel that is linked to this session will receive this
+      // and can auto-trigger if the message contains code blocks.
+      window.dispatchEvent(new CustomEvent('ccmod:mainMessage', {
+        detail: {
+          sessionId,
+          role: 'assistant',
+          content: finalText,
+          // Extract all fenced code blocks for quick access
+          codeBlocks: (function() {
+            const blocks = [];
+            const re = /```([\w\-+#.]*)\n?([\s\S]*?)```/g;
+            let m;
+            while ((m = re.exec(finalText)) !== null) {
+              blocks.push({ lang: m[1].trim() || 'code', code: m[2].trimEnd() });
+            }
+            return blocks;
+          })(),
+        }
+      }));
       // Update session timestamp + store returned CLI session ID for next turn
       // Re-read the list (could have changed) and update entry
       const list  = loadSessionList();
@@ -5897,6 +6995,34 @@ let _streamInterval = setInterval(() => {
       stopActivityListener();
       finalizeAssistantBubble(aDiv, result);
 
+      // ── Auto-pin codeblock update ─────────────────────────────────────────
+      // If the user was editing a codeblock (_editingCbId set) and the response
+      // contains a complete fenced code block (html/jsx/tsx/react/js), auto-pin
+      // it so the file gets saved without requiring a manual Pin click.
+      const _autoPinCbId = _editingCbId; // capture before hideCbEditChip clears it
+      if (_autoPinCbId && window.Workspace?.pinArtifact) {
+        const PINNABLE = 'html|jsx|tsx|react|js|javascript|css';
+        const blockMatch = responseText.match(
+          new RegExp('```(' + PINNABLE + ')\\s*\\n([\\s\\S]*?)```', 'i')
+        );
+        if (blockMatch) {
+          const detectedLang = blockMatch[1].toLowerCase();
+          const rawSource    = blockMatch[2];
+          const normalLang   = detectedLang === 'javascript' ? 'js'
+                             : detectedLang === 'react'      ? 'jsx'
+                             : detectedLang;
+          const needsNet  = ['jsx','tsx','react'].includes(normalLang);
+          const sandbox   = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+          const title     = inferArtifactTitle(normalLang, rawSource) || null;
+          const srcdoc    = buildPreviewSrcDoc(normalLang, rawSource);
+          window.__cbEditingId = _autoPinCbId;  // tell pinArtifact to update not create
+          window.Workspace.pinArtifact(title, srcdoc, sandbox, normalLang, rawSource);
+        }
+      }
+
+      // Clear codeblock edit state now that the response is done
+      hideCbEditChip();
+
       // ── Plan block detection (raw markdown, reliable) ─────────────────────
       // Check AFTER finalize so the bubble is done, but on the raw responseText
       // (not the rendered DOM — backticks are gone after mdToHtml).
@@ -5904,7 +7030,7 @@ let _streamInterval = setInterval(() => {
       if (planTodos?.length) {
         window.__planTodos = planTodos;
         _planExpandedIdx = -1;
-        const planBody = document.querySelector('.right-panel__body');
+        const planBody = document.getElementById('right-panel-body');
         if (planBody && currentRightPanel === 'plan') {
           planBody.innerHTML = renderPlanPanel();
           window.renderIcons?.();
@@ -5938,6 +7064,9 @@ let _streamInterval = setInterval(() => {
         const waitSec = rawSec ? Math.max(rawSec, 10) : 120;
         const isRetry = opts.skipUI; // true = this is already a retry attempt
 
+        // Save the full content (may include image blocks) before popping, so
+        // the auto-retry can restore it accurately instead of just plain text.
+        const retryContent = history[history.length - 1]?.content ?? text;
         history.pop(); // remove user msg from history
 
         if (_retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
@@ -5961,7 +7090,9 @@ let _streamInterval = setInterval(() => {
             </button>`;
           bodyEl?.querySelector('#rl-retry-btn')?.addEventListener('click', () => {
             aDiv.remove();
-            send(text);
+            // Re-push full content (preserves image blocks if any) then resend
+            history.push({ role: 'user', content: retryContent });
+            send(text, { skipUI: true });
           });
         } else {
           // First 429 — countdown then one auto-retry
@@ -5981,6 +7112,9 @@ let _streamInterval = setInterval(() => {
               if (dotEl)  dotEl.className = 'msg__dot msg__dot--thinking';
               if (metaEl) { metaEl.className = 'msg__meta msg__meta--streaming'; metaEl.textContent = 'generating a response'; }
               if (bodyEl) bodyEl.innerHTML = '';
+              // Re-push the user message before retrying (history.pop() removed it above).
+              // Use retryContent so image blocks (if any) are preserved.
+              history.push({ role: 'user', content: retryContent });
               send(text, { skipUI: true, existingBubble: aDiv }); // one retry
             } else {
               updateWait();

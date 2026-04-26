@@ -4,100 +4,65 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Claude Code — Sidebar Redesign</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind built locally by Vite + PostCSS — no CDN fetch on launch -->
+  <link rel="stylesheet" href="./tailwind.css" />
   <link rel="stylesheet" href="./style.css" />
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['Anthropic Sans', 'ui-sans-serif', 'system-ui'],
-            serif: ['Anthropic Serif', 'ui-serif', 'Georgia'],
-          },
-          colors: {
-            ink: {
-              950: '#0b0b0c',
-              900: '#141416',
-              850: '#1a1a1d',
-              800: '#202024',
-              750: '#27272c',
-              700: '#2e2e34',
-              500: '#5a5a63',
-              300: '#a1a1aa',
-              100: '#e7e7ea',
-              50:  '#f5f5f6',
-            },
-            accent: {
-              DEFAULT: '#c96442',
-              hover: '#d97757',
-            },
-          },
-        },
-      },
-    };
-  </script>
+  <link rel="stylesheet" href="./xterm.css" />
 </head>
 <body class="bg-ink-950 text-ink-100 font-sans antialiased flex flex-col h-screen overflow-hidden">
 
   <!-- ===== CUSTOM TITLE BAR ===== -->
   <div id="titlebar" class="titlebar">
-    <!-- Traffic lights -->
     <div class="titlebar__controls" id="titlebar-controls">
       <button class="titlebar__btn titlebar__btn--close"    id="tb-close"    title="Close"    aria-label="Close"></button>
       <button class="titlebar__btn titlebar__btn--minimize" id="tb-minimize" title="Minimize" aria-label="Minimize"></button>
       <button class="titlebar__btn titlebar__btn--maximize" id="tb-maximize" title="Maximize" aria-label="Maximize / Restore"></button>
     </div>
-    <!-- App title -->
     <span class="titlebar__title">Claude Code Mods</span>
   </div>
 
-  <!-- Frame: app shell -->
-  <div class="flex flex-1 w-full min-h-0">
+  <!-- ===== APP SHELL ===== -->
+  <div id="app-shell" class="flex flex-1 w-full min-h-0">
 
-    <!-- ===== SIDEBAR ===== -->
-    <aside id="sidebar" class="flex h-full shrink-0 flex-col border-r border-ink-800 bg-ink-900">
+    <!-- SIDEBAR — plain fixed aside, toggled left/right via JS (no dockview) -->
+    <aside id="sidebar" data-sidebar-side="left" class="flex h-full shrink-0 flex-col border-r border-ink-800 bg-ink-900">
 
-      <!-- (Top header removed — toggle lives in the footer alongside the other icons) -->
-
-      <!-- Quick actions (collapsible) — search lives inside -->
       <div class="nav-group" id="nav-group">
         <button class="nav-group__header" id="nav-toggle" aria-label="Toggle quick actions">
           <span class="nav-group__chev"><i data-phosphor="caret-down"></i></span>
           <span class="nav-group__label">Quick actions</span>
         </button>
         <div class="nav-group__wrap">
-         <div class="nav-group__inner">
-          <div id="search-wrap" class="px-2 pb-1 pt-1">
-            <label class="search-field flex items-center gap-2 rounded-lg px-2.5 py-1.5">
-              <i data-phosphor="magnifying-glass" class="text-ink-500 shrink-0"></i>
-              <input id="search" type="text" placeholder="Search sessions…" class="flex-1 bg-transparent text-[13px] placeholder:text-ink-500 focus:outline-none" />
-              <span class="kbd-hint text-[10.5px] text-ink-500/80 tracking-wider">⌘K</span>
-            </label>
+          <div class="nav-group__inner">
+            <div id="search-wrap" class="px-2 pb-1 pt-1">
+              <label class="search-field flex items-center gap-2 rounded-lg px-2.5 py-1.5">
+                <i data-phosphor="magnifying-glass" class="text-ink-500 shrink-0"></i>
+                <input id="search" type="text" placeholder="Search sessions…" class="flex-1 bg-transparent text-[13px] placeholder:text-ink-500 focus:outline-none" />
+                <span class="kbd-hint text-[10.5px] text-ink-500/80 tracking-wider">⌘K</span>
+              </label>
+            </div>
+            <nav class="px-2">
+              <button class="nav-item nav-item--primary">
+                <i data-phosphor="plus"></i><span>New session</span>
+                <span class="ml-auto text-[10px] text-ink-500">⌘N</span>
+              </button>
+              <button class="nav-item">
+                <i data-phosphor="lightning"></i><span>Routines</span>
+                <span class="ml-auto chip">2</span>
+              </button>
+              <button class="nav-item">
+                <i data-phosphor="paper-plane-tilt"></i><span>Dispatch</span>
+              </button>
+              <button class="nav-item">
+                <i data-phosphor="sliders-horizontal"></i><span>Customize</span>
+              </button>
+            </nav>
           </div>
-          <nav class="px-2">
-            <button class="nav-item nav-item--primary">
-              <i data-phosphor="plus"></i><span>New session</span>
-              <span class="ml-auto text-[10px] text-ink-500">⌘N</span>
-            </button>
-            <button class="nav-item">
-              <i data-phosphor="lightning"></i><span>Routines</span>
-              <span class="ml-auto chip">2</span>
-            </button>
-            <button class="nav-item">
-              <i data-phosphor="paper-plane-tilt"></i><span>Dispatch</span>
-            </button>
-            <button class="nav-item">
-              <i data-phosphor="sliders-horizontal"></i><span>Customize</span>
-            </button>
-          </nav>
-         </div>
         </div>
       </div>
 
-      <!-- Scrolling content -->
       <div id="scroll" class="mt-2 flex-1 min-h-0 overflow-y-auto px-2 pb-2 custom-scroll">
 
-        <!-- PINNED -->
         <section class="mt-2 collapsible dropzone" data-collapse="pinned" data-bucket="pinned">
           <div class="section-head section-head--row">
             <button class="collapsible__toggle" aria-label="Toggle Pinned">
@@ -114,7 +79,6 @@
           </div>
         </section>
 
-        <!-- PROJECTS -->
         <section class="mt-4 collapsible" data-collapse="projects">
           <div class="section-head section-head--row">
             <button class="collapsible__toggle" aria-label="Toggle Projects">
@@ -133,7 +97,6 @@
           </div>
         </section>
 
-        <!-- RECENT -->
         <section class="mt-4 collapsible dropzone" data-collapse="recent" data-bucket="recent">
           <div class="section-head section-head--row">
             <button class="collapsible__toggle" aria-label="Toggle Recent">
@@ -150,9 +113,8 @@
           </div>
         </section>
 
-      </div>
+      </div><!-- /#scroll -->
 
-      <!-- Tab switcher (moved from top) -->
       <div class="sidebar-tabs">
         <button class="tab" data-tab="chat" title="Chat">
           <i data-phosphor="chat-circle"></i>
@@ -166,7 +128,6 @@
         </button>
       </div>
 
-      <!-- Account: entire profile row is now the user-menu trigger -->
       <footer class="flex items-center gap-2 border-t border-ink-800 px-3 py-2">
         <button id="user-menu-btn" class="account-btn" aria-haspopup="menu" title="Account menu">
           <span class="account-btn__avatar" id="account-avatar">HL</span>
@@ -177,193 +138,169 @@
         </button>
         <button class="icon-btn" id="shortcuts-btn" title="Keyboard shortcuts (Ctrl /)"><i data-phosphor="keyboard"></i></button>
         <button class="icon-btn" id="appearance-btn" title="Theme & font" aria-haspopup="menu"><i data-phosphor="eye"></i></button>
-        <button class="icon-btn" id="console-btn" title="Open Console (Ctrl+\`)"><i data-phosphor="monitor"></i></button>
+        <button class="icon-btn" id="console-btn" title="Open Console (Ctrl+`)"><i data-phosphor="monitor"></i></button>
         <button class="icon-btn" id="sidebar-toggle" title="Collapse sidebar" aria-label="Collapse sidebar"><i data-phosphor="sidebar-simple"></i></button>
+        <!-- Sidebar dock position toggle — animated left/right indicator -->
+        <button class="icon-btn sidebar-pos-btn" id="sidebar-pos" data-side="left" title="Move sidebar to other side" aria-label="Dock sidebar left or right">
+          <svg class="sidebar-pos-icon" width="18" height="10" viewBox="0 0 18 10" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <!-- left arrow -->
+            <path class="arr arr--left" d="M6 1 L1 5 L6 9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            <line class="arr arr--left" x1="1" y1="5" x2="7" y2="5" stroke-width="1.6" stroke-linecap="round"/>
+            <!-- right arrow -->
+            <path class="arr arr--right" d="M12 1 L17 5 L12 9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            <line class="arr arr--right" x1="17" y1="5" x2="11" y2="5" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </button>
       </footer>
 
-      <!-- Hidden resize handle — appears on hover at the right edge -->
-      <div id="sidebar-resizer" class="sidebar-resizer" aria-hidden="true" role="separator" aria-orientation="vertical"></div>
     </aside>
 
-    <!-- ===== MAIN ===== -->
-    <main class="flex flex-1 flex-col bg-ink-950 min-w-0 relative">
+    <!-- MAIN DOCK — dockview owns chat + tools + canvas -->
+    <div id="main-dock" class="main-dock"></div>
 
-      <!-- Right-panel toggle (floats top-right).
-           Two separate buttons: the sidebar-right icon toggles open/closed,
-           the caret opens the tab-selector menu. No X — same icon hides it. -->
-      <div class="right-panel-toggle-wrap">
-        <button class="icon-btn" id="right-panel-btn" title="Toggle side panel">
-          <i data-phosphor="sidebar-right"></i>
+  </div><!-- /#app-shell -->
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       CHAT SLOT — adopted by workspace.js into the chat dockview panel.
+       All IDs here remain reachable by app.js via document.getElementById.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <div id="chat-slot" hidden>
+
+    <!-- Messages -->
+    <div class="flex-1 min-h-0 overflow-y-auto custom-scroll" id="chat-scroll">
+      <div class="chat-conversation" id="chat-conversation"></div>
+      <div class="chat-empty flex-1 flex flex-col items-center justify-center gap-3 select-none">
+        <p class="font-serif text-[22px] text-ink-700" style="letter-spacing:-.01em">New session</p>
+        <p class="mt-1 text-ink-500 text-[13px]">Type <span class="kbd">/</span> for commands</p>
+      </div>
+    </div>
+
+    <!-- Composer -->
+    <div class="px-6 pb-1">
+      <div class="mx-auto max-w-[780px]">
+        <div class="composer">
+          <button class="icon-btn composer__tool" id="settings-btn" title="Settings" aria-haspopup="menu">
+            <i data-phosphor="sliders-horizontal"></i>
+          </button>
+          <button class="icon-btn composer__tool composer__slash" id="slash-btn" title="Slash commands" aria-haspopup="menu">/</button>
+          <textarea id="composer-input" rows="1" placeholder="Tapez / pour les commandes" class="composer__input"></textarea>
+          <button class="composer__send" id="composer-send" title="Send">
+            <i data-phosphor="arrow-right" class="send__idle"></i>
+            <span class="send__stop" aria-hidden="true">
+              <svg viewBox="0 0 10 10" fill="currentColor" width="10" height="10"><rect width="10" height="10" rx="2"/></svg>
+            </span>
+            <span class="send__live">
+              <svg class="claude-frame" data-frame="0" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/></svg>
+              <svg class="claude-frame" data-frame="1" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><path d="M12 7 L13 11 L17 12 L13 13 L12 17 L11 13 L7 12 L11 11 Z"/></svg>
+              <svg class="claude-frame" data-frame="2" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><path d="M12 3 L13.6 10.4 L21 12 L13.6 13.6 L12 21 L10.4 13.6 L3 12 L10.4 10.4 Z"/></svg>
+              <svg class="claude-frame" data-frame="3" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg>
+            </span>
+          </button>
+        </div>
+
+        <!-- Composer footer bar -->
+        <div class="composer-bar">
+          <button hidden id="session-menu-btn"></button>
+          <button hidden id="perm-btn"><span id="perm-label">Ignorer les permissions</span></button>
+          <button hidden id="attach-btn"></button>
+          <button hidden id="mic-btn"></button>
+          <button hidden id="mic-select-btn"></button>
+          <button hidden id="model-chip">
+            <span class="model-chip__name">Opus 4.7</span>
+            <span class="model-chip__meta">1M · Très élevé</span>
+          </button>
+          <div class="flex-1"></div>
+          <button hidden id="context-btn"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Context strip -->
+    <div class="ctx-strip" id="ctx-strip">
+      <div class="ctx-strip__inner">
+
+        <button class="ctx-chip" id="agent-pill" title="Select AI agent">
+          <span class="ctx-chip__ico"><span class="agent-pill__dot" id="agent-pill-dot" style="width:8px;height:8px;border-radius:50%;background:#3a3a44;display:inline-block"></span></span>
+          <span class="ctx-chip__name" id="agent-pill-name">Default</span>
+          <span class="ctx-chip__ico" style="margin-left:1px;opacity:.45"><svg width="8" height="8" viewBox="0 0 10 6" fill="currentColor"><path d="M0 0l5 6 5-6z"/></svg></span>
         </button>
-        <button class="icon-btn icon-btn--tight" id="right-panel-menu-btn" title="Side panel view" aria-haspopup="menu">
-          <i data-phosphor="caret-down"></i>
+
+        <button class="ctx-chip" id="ctx-chip-mcp" data-ctx-tab="mcp">
+          <span class="ctx-chip__ico">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
+              <circle cx="12"  cy="3.5" r="1.5" fill="currentColor"/>
+              <circle cx="20.5" cy="12" r="1.5" fill="currentColor"/>
+              <circle cx="12"  cy="20.5" r="1.5" fill="currentColor"/>
+              <circle cx="3.5" cy="12" r="1.5" fill="currentColor"/>
+              <path d="M12 9.5V5M15 12H20M12 14.5V19M9 12H4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span class="ctx-chip__name">MCP</span>
+          <span class="ctx-chip__sep">·</span>
+          <span class="ctx-chip__val" id="ctx-mcp-val">4 tools</span>
+          <span class="ctx-chip__pulse"></span>
         </button>
+
+        <button class="ctx-chip" id="ctx-chip-git" data-ctx-tab="git">
+          <span class="ctx-chip__ico">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="#F05133" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M23.546 10.93 13.067.452c-.604-.603-1.582-.603-2.188 0L8.708 2.627l2.76 2.76c.645-.215 1.379-.07 1.889.441.516.515.658 1.258.438 1.9l2.658 2.66c.645-.223 1.387-.078 1.9.435.721.72.721 1.884 0 2.604-.719.719-1.881.719-2.6 0-.539-.541-.674-1.337-.404-1.996L12.86 8.955v6.525c.176.086.342.203.488.348.713.721.713 1.883 0 2.6-.719.721-1.889.721-2.609 0-.719-.719-.719-1.879 0-2.598.182-.18.387-.316.605-.406V8.835c-.217-.091-.424-.222-.6-.401-.545-.545-.676-1.342-.396-2.009L7.636 3.7.45 10.881c-.6.605-.6 1.584 0 2.189l10.48 10.477c.604.604 1.582.604 2.186 0l10.43-10.43c.605-.603.605-1.582 0-2.187"/>
+            </svg>
+          </span>
+          <span class="ctx-chip__name" id="ctx-git-branch">main</span>
+          <span class="ctx-chip__sep">·</span>
+          <span class="ctx-chip__val" id="ctx-git-val">2 changes</span>
+        </button>
+
+        <button class="ctx-chip ctx-chip--ctx" id="ctx-chip-context" data-ctx-tab="context">
+          <span class="ctx-chip__ico">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M5.636 18.364A9 9 0 1 1 18.364 5.636" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M12 12 8.8 8.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+            </svg>
+          </span>
+          <span class="ctx-chip__name">Context</span>
+          <span class="ctx-chip__sep">·</span>
+          <span class="ctx-chip__val" id="ctx-ctx-val">12k / 200k</span>
+          <span class="ctx-chip__bar"><span class="ctx-chip__bar-fill" style="width:6%"></span></span>
+        </button>
+
+        <button class="ctx-chip" id="ctx-chip-plan" data-ctx-tab="plan">
+          <span class="ctx-chip__ico">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <rect x="3" y="5"  width="18" height="2" rx="1" fill="currentColor" opacity="0.35"/>
+              <rect x="3" y="11" width="14" height="2" rx="1" fill="currentColor" opacity="0.65"/>
+              <rect x="3" y="17" width="10" height="2" rx="1" fill="currentColor"/>
+              <circle cx="19.5" cy="18" r="3.5" fill="#7ab389"/>
+              <path d="M18 18l1 1.2 2-2.2" stroke="white" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="ctx-chip__name">Plan</span>
+          <span class="ctx-chip__sep">·</span>
+          <span class="ctx-chip__val" id="ctx-plan-val">2 / 6</span>
+        </button>
+
       </div>
+    </div>
 
-      <!-- Messages -->
-      <div class="flex-1 min-h-0 overflow-y-auto custom-scroll" id="chat-scroll">
+  </div><!-- /#chat-slot -->
 
-        <div class="chat-conversation" id="chat-conversation"></div>
+  <!-- Legacy compat refs — app.js binds handlers to these IDs -->
+  <span  hidden id="right-panel-title"></span>
+  <button hidden id="right-panel-btn"      aria-pressed="false"></button>
+  <button hidden id="right-panel-menu-btn"></button>
+  <button hidden id="right-panel-split-btn" aria-pressed="false"></button>
 
-        <!-- Empty state — minimal, no hero (moved to Console Overview) -->
-        <div class="chat-empty flex-1 flex flex-col items-center justify-center gap-3 select-none">
-          <p class="font-serif text-[22px] text-ink-700" style="letter-spacing:-.01em">New session</p>
-          <p class="mt-1 text-ink-500 text-[13px]">Type <span class="kbd">/</span> for commands</p>
-        </div>
-      </div>
-
-      <!-- Composer -->
-      <div class="px-6 pb-1">
-        <div class="mx-auto max-w-[780px]">
-          <div class="composer">
-            <button class="icon-btn composer__tool" id="settings-btn" title="Settings" aria-haspopup="menu">
-              <i data-phosphor="sliders-horizontal"></i>
-            </button>
-            <button class="icon-btn composer__tool composer__slash" id="slash-btn" title="Slash commands" aria-haspopup="menu">/</button>
-            <textarea id="composer-input" rows="1" placeholder="Tapez / pour les commandes" class="composer__input"></textarea>
-            <button class="composer__send" id="composer-send" title="Send">
-              <i data-phosphor="arrow-right" class="send__idle"></i>
-              <span class="send__stop" aria-hidden="true">
-                <svg viewBox="0 0 10 10" fill="currentColor" width="10" height="10"><rect width="10" height="10" rx="2"/></svg>
-              </span>
-              <span class="send__live">
-                <!-- 4 frames cycled via CSS; user sees them morph: dot → spark → flower → full -->
-                <svg class="claude-frame" data-frame="0" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><circle cx="12" cy="12" r="2.5"/></svg>
-                <svg class="claude-frame" data-frame="1" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><path d="M12 7 L13 11 L17 12 L13 13 L12 17 L11 13 L7 12 L11 11 Z"/></svg>
-                <svg class="claude-frame" data-frame="2" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><path d="M12 3 L13.6 10.4 L21 12 L13.6 13.6 L12 21 L10.4 13.6 L3 12 L10.4 10.4 Z"/></svg>
-                <svg class="claude-frame" data-frame="3" viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg>
-              </span>
-            </button>
-          </div>
-
-          <!-- Composer footer bar -->
-          <div class="composer-bar">
-            <!-- Hidden anchors — legacy handlers still call into these via id -->
-            <button hidden id="session-menu-btn"></button>
-            <button hidden id="perm-btn"><span id="perm-label">Ignorer les permissions</span></button>
-            <button hidden id="attach-btn"></button>
-            <button hidden id="mic-btn"></button>
-            <button hidden id="mic-select-btn"></button>
-            <button hidden id="model-chip">
-              <span class="model-chip__name">Opus 4.7</span>
-              <span class="model-chip__meta">1M · Très élevé</span>
-            </button>
-            <div class="flex-1"></div>
-            <!-- Hidden context anchor — legacy handler still references it -->
-            <button hidden id="context-btn"></button>
-          </div>
-        </div>
-      </div>
-
-      <!-- ══════════ Context strip ══════════ -->
-      <div class="ctx-strip" id="ctx-strip">
-        <div class="ctx-strip__inner">
-
-          <!-- Agent chip -->
-          <button class="ctx-chip" id="agent-pill" title="Select AI agent">
-            <span class="ctx-chip__ico"><span class="agent-pill__dot" id="agent-pill-dot" style="width:8px;height:8px;border-radius:50%;background:#3a3a44;display:inline-block"></span></span>
-            <span class="ctx-chip__name" id="agent-pill-name">Default</span>
-            <span class="ctx-chip__ico" style="margin-left:1px;opacity:.45"><svg width="8" height="8" viewBox="0 0 10 6" fill="currentColor"><path d="M0 0l5 6 5-6z"/></svg></span>
-          </button>
-
-          <!-- MCP chip -->
-          <button class="ctx-chip" id="ctx-chip-mcp" data-ctx-tab="mcp">
-            <span class="ctx-chip__ico">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
-                <circle cx="12"  cy="3.5" r="1.5" fill="currentColor"/>
-                <circle cx="20.5" cy="12" r="1.5" fill="currentColor"/>
-                <circle cx="12"  cy="20.5" r="1.5" fill="currentColor"/>
-                <circle cx="3.5" cy="12" r="1.5" fill="currentColor"/>
-                <path d="M12 9.5V5M15 12H20M12 14.5V19M9 12H4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name">MCP</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-mcp-val">4 tools</span>
-            <span class="ctx-chip__pulse"></span>
-          </button>
-
-          <!-- Git chip -->
-          <button class="ctx-chip" id="ctx-chip-git" data-ctx-tab="git">
-            <span class="ctx-chip__ico">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#F05133" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <path d="M23.546 10.93 13.067.452c-.604-.603-1.582-.603-2.188 0L8.708 2.627l2.76 2.76c.645-.215 1.379-.07 1.889.441.516.515.658 1.258.438 1.9l2.658 2.66c.645-.223 1.387-.078 1.9.435.721.72.721 1.884 0 2.604-.719.719-1.881.719-2.6 0-.539-.541-.674-1.337-.404-1.996L12.86 8.955v6.525c.176.086.342.203.488.348.713.721.713 1.883 0 2.6-.719.721-1.889.721-2.609 0-.719-.719-.719-1.879 0-2.598.182-.18.387-.316.605-.406V8.835c-.217-.091-.424-.222-.6-.401-.545-.545-.676-1.342-.396-2.009L7.636 3.7.45 10.881c-.6.605-.6 1.584 0 2.189l10.48 10.477c.604.604 1.582.604 2.186 0l10.43-10.43c.605-.603.605-1.582 0-2.187"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name" id="ctx-git-branch">main</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-git-val">2 changes</span>
-          </button>
-
-          <!-- Context chip -->
-          <button class="ctx-chip ctx-chip--ctx" id="ctx-chip-context" data-ctx-tab="context">
-            <span class="ctx-chip__ico">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <path d="M5.636 18.364A9 9 0 1 1 18.364 5.636" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                <path d="M12 12 8.8 8.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name">Context</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-ctx-val">12k / 200k</span>
-            <span class="ctx-chip__bar"><span class="ctx-chip__bar-fill" style="width:6%"></span></span>
-          </button>
-
-          <!-- Plan chip -->
-          <button class="ctx-chip" id="ctx-chip-plan" data-ctx-tab="plan">
-            <span class="ctx-chip__ico">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <rect x="3" y="5"  width="18" height="2" rx="1" fill="currentColor" opacity="0.35"/>
-                <rect x="3" y="11" width="14" height="2" rx="1" fill="currentColor" opacity="0.65"/>
-                <rect x="3" y="17" width="10" height="2" rx="1" fill="currentColor"/>
-                <circle cx="19.5" cy="18" r="3.5" fill="#7ab389"/>
-                <path d="M18 18l1 1.2 2-2.2" stroke="white" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <span class="ctx-chip__name">Plan</span>
-            <span class="ctx-chip__sep">·</span>
-            <span class="ctx-chip__val" id="ctx-plan-val">2 / 6</span>
-          </button>
-
-        </div>
-      </div>
-
-    </main>
-
-    <!-- ===== RIGHT PANEL ===== -->
-    <aside id="right-panel" class="right-panel" aria-label="Side panel">
-      <!-- Drag handle — sits on the left edge, mirrors the sidebar resizer -->
-      <div id="right-panel-resizer" class="right-panel-resizer" aria-hidden="true" role="separator" aria-orientation="vertical"></div>
-      <div class="right-panel__head">
-        <div class="right-panel__tabs" id="right-panel-tabs">
-          <span class="right-panel__title" id="right-panel-title">Aperçu</span>
-        </div>
-        <div class="right-panel__head-actions">
-          <button class="icon-btn icon-btn--sm" id="right-panel-split-btn" title="Split view" aria-pressed="false">
-            <i data-phosphor="rows"></i>
-          </button>
-        </div>
-      </div>
-      <div class="right-panel__body" id="right-panel-body">
-        <div class="right-panel__empty">
-          <div class="right-panel__empty-icon"><i data-phosphor="eye"></i></div>
-          <div class="right-panel__empty-text">Aperçu — live preview of changes</div>
-        </div>
-      </div>
-    </aside>
-
-  </div>
-
-  <!-- Context menu + secondary submenu (for Language / Learn more etc.) -->
+  <!-- Context menu + secondary submenu -->
   <div id="ctxmenu" class="ctx hidden"></div>
   <div id="ctxsub"  class="ctx hidden"></div>
 
-  <!-- Hidden file picker used by the "From computer" attach option -->
+  <!-- Hidden file picker -->
   <input id="file-picker" type="file" accept="image/*,.pdf,.txt,.md,.json,.csv" hidden multiple />
 
-  <!-- Preview modal for the code block's "preview" action -->
+  <!-- Code preview modal -->
   <div id="code-preview-modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Code preview">
     <div class="modal__backdrop" data-close></div>
     <div class="modal__panel modal__panel--wide">
@@ -420,13 +357,90 @@
     </div>
   </div>
 
-  <!-- Phosphor icons loader (tiny inline renderer) -->
+  <!-- Error capture -->
   <script>
     window.__errs = [];
     window.addEventListener('error', e => window.__errs.push({msg: e.message, src: e.filename, line: e.lineno, col: e.colno}));
   </script>
   <script src="./icons.js"></script>
+  <script src="./xterm.js"></script>
+  <script src="./xterm-addon-fit.js"></script>
+  <script src="./dockview-core.min.js"></script>
+  <script src="./split-chat.js"></script>
+  <script src="./workspace.js"></script>
   <script src="./app.js"></script>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       DOCK CONTEXT MENU — right-click on the main dockview area
+       ═══════════════════════════════════════════════════════════════════ -->
+  <div id="dock-ctx-menu" class="dock-ctx-menu" style="display:none">
+    <div class="ctx-menu-body">
+
+      <button class="ctx-item" data-action="reset">
+        <svg class="ctx-item__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/>
+        </svg>
+        Reset to default layout
+      </button>
+
+      <div class="ctx-separator"></div>
+
+      <button class="ctx-item" data-action="lock">
+        <svg class="ctx-item__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        Lock view
+        <span class="ctx-check ml-auto" aria-hidden="true"></span>
+      </button>
+
+      <div class="ctx-separator"></div>
+
+      <button class="ctx-item" data-action="hide-tools">
+        <svg class="ctx-item__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/>
+        </svg>
+        <span id="hide-tools-label">Hide tool panels</span>
+      </button>
+
+      <button class="ctx-item" data-action="new-split-chat">
+        <svg class="ctx-item__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <line x1="12" y1="3" x2="12" y2="21"/>
+          <line x1="12" y1="8" x2="17" y2="8"/>
+          <line x1="12" y1="12" x2="17" y2="12"/>
+          <line x1="12" y1="16" x2="17" y2="16"/>
+        </svg>
+        New parallel agent
+      </button>
+
+      <div class="ctx-separator"></div>
+
+      <div class="ctx-item ctx-has-sub">
+        <svg class="ctx-item__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        Add panel
+        <svg class="ctx-item__arrow ml-auto" width="8" height="8" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg>
+
+        <div class="ctx-submenu">
+          <button class="ctx-item" data-add="chat">Chat</button>
+          <div class="ctx-separator"></div>
+          <button class="ctx-item" data-add="apercu">Preview</button>
+          <button class="ctx-item" data-add="diff">Diff</button>
+          <button class="ctx-item" data-add="terminal">Terminal</button>
+          <button class="ctx-item" data-add="fichiers">Files</button>
+          <button class="ctx-item" data-add="taches">Tasks</button>
+          <button class="ctx-item" data-add="plan">Plan</button>
+          <button class="ctx-item" data-add="git">Git</button>
+          <button class="ctx-item" data-add="mcp">MCP</button>
+          <button class="ctx-item" data-add="context">Context</button>
+          <button class="ctx-item" data-add="shortcuts">Shortcuts</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
 
 </body>
 </html>

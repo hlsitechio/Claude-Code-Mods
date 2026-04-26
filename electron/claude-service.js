@@ -330,16 +330,29 @@ h1{font-size:22px}p{color:#8a8a92;font-size:14px}</style></head>
 // Called once and cached — we don't want to `execSync where` on every message.
 let _cachedCliBinary = undefined;
 
-// Track the currently running subprocess so we can kill it on user abort
-let _currentProc = null;
+// Track active subprocesses by requestId so parallel streams can coexist.
+// requestId '' (empty string) is the legacy "main chat" slot.
+const _activeProcs = new Map();
 
-function abortCurrentStream() {
-  if (_currentProc) {
-    try { _currentProc.kill(); } catch {}
-    _currentProc = null;
-    return true;
+function abortCurrentStream(requestId) {
+  // If requestId given, abort only that stream; otherwise abort all.
+  if (requestId !== undefined && requestId !== null) {
+    const proc = _activeProcs.get(requestId);
+    if (proc) {
+      try { proc.kill(); } catch {}
+      _activeProcs.delete(requestId);
+      return true;
+    }
+    return false;
   }
-  return false;
+  // Legacy: abort everything
+  let killed = false;
+  for (const [rid, proc] of _activeProcs) {
+    try { proc.kill(); } catch {}
+    killed = true;
+  }
+  _activeProcs.clear();
+  return killed;
 }
 
 function findClaudeBinary() {
@@ -381,38 +394,51 @@ function getCliBinary() {
 // Stream a message through the real claude CLI subprocess.
 // Uses --output-format stream-json --verbose so we get session_id and incremental text.
 // cliSessionId (if set) is passed as --resume so the CLI maintains conversation context.
-async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode) {
-  const model   = resolveModel(modelId);
-  const lastMsg = messages[messages.length - 1];
+async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode, requestId) {
+  // Determine per-stream IPC channel suffix ('' = legacy main-chat channel)
+  const rid = requestId || '';
+  const chunkCh = rid ? `claude:chunk:${rid}` : 'claude:chunk';
+  const doneCh  = rid ? `claude:done:${rid}`  : 'claude:done';
+  const todoCh  = rid ? `claude:todo-update:${rid}` : 'claude:todo-update';
+  const model     = resolveModel(modelId);
+  const lastMsg   = messages[messages.length - 1];
   if (!lastMsg || lastMsg.role !== 'user') throw new Error('Last message must be from user');
+  const tmpImages = []; // placeholder — no temp files written; kept for cleanup guard
 
-  // content can be a plain string OR an array of blocks (text + image) when images are attached
-  let promptText  = '';
-  const tmpImages = [];  // temp file paths to clean up after
+  // Detect if the message has image content blocks
+  const hasImages = Array.isArray(lastMsg.content) &&
+    lastMsg.content.some(b => b.type === 'image');
+
+  // Extract text part of the prompt
+  let promptText = '';
   if (Array.isArray(lastMsg.content)) {
-    for (const block of lastMsg.content) {
-      if (block.type === 'text') {
-        promptText += (promptText ? '\n' : '') + block.text;
-      } else if (block.type === 'image' && block.source?.type === 'base64') {
-        // Save image to a temp file so we can pass --image <path> to the CLI
-        const ext   = (block.source.media_type || 'image/png').split('/')[1] || 'png';
-        const tmp   = path.join(require('os').tmpdir(), `ccmod_img_${Date.now()}_${tmpImages.length}.${ext}`);
-        fs.writeFileSync(tmp, Buffer.from(block.source.data, 'base64'));
-        tmpImages.push(tmp);
-      }
-    }
+    promptText = lastMsg.content
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n');
   } else {
     promptText = lastMsg.content || '';
   }
 
+  // When images are present, use --input-format stream-json so we can pipe the
+  // full message (including base64 image blocks) via stdin to the CLI.
+  // This routes through the CLI's own subscription tier — no direct API call needed.
+  const useStdinJson = hasImages;
+
   const args = [
-    '-p', promptText || '(image attached)',
     '--output-format', 'stream-json',
     '--verbose',
     '--model', model,
   ];
-  // Pass each saved image via --image flag (Claude Code CLI supports this)
-  for (const imgPath of tmpImages) args.push('--image', imgPath);
+
+  if (useStdinJson) {
+    // Don't pass -p; the prompt comes from stdin in stream-json format instead
+    args.push('--input-format', 'stream-json');
+    console.log('[claude-cli] image detected — routing via stdin stream-json (subscription tier)');
+  } else {
+    args.push('-p', promptText || '(no prompt)');
+  }
+
   if (cliSessionId)  args.push('--resume', cliSessionId);
 
   // ── Permission mode → CLI flags ──────────────────────────────────────────
@@ -432,19 +458,31 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
   if (systemPrompt) args.push('--system-prompt', systemPrompt);
 
   const isCmd = binary.endsWith('.cmd');
-  console.log(`[claude-cli] spawn ${isCmd ? '(shell)' : '(exe)'}  model=${model}  resume=${cliSessionId || 'new'}`);
+  console.log(`[claude-cli] spawn ${isCmd ? '(shell)' : '(exe)'}  model=${model}  resume=${cliSessionId || 'new'}  stdin=${useStdinJson}`);
 
   return new Promise((resolve, reject) => {
-    // Set cwd to the app root so the CLI picks up CLAUDE.md + skills/ automatically
     const appRoot = path.resolve(__dirname, '..');
     const proc = spawn(binary, args, {
       cwd:         appRoot,
       env:         { ...process.env },
       windowsHide: true,
-      shell:       isCmd,    // .cmd files need shell=true on Windows; .exe does not
-      stdio:       ['ignore', 'pipe', 'pipe'],  // close stdin so CLI doesn't wait for pipe data
+      shell:       isCmd,
+      // Open stdin as pipe when we need to write image JSON, otherwise ignore it
+      stdio:       [useStdinJson ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
-    _currentProc = proc;
+    _activeProcs.set(rid, proc);
+
+    // Write the message (with image blocks) as stream-json to stdin, then close.
+    // Sanitise media_type here too — the CLI rejects unknown values just like the API.
+    if (useStdinJson && proc.stdin) {
+      const [sanitised] = sanitiseMessages([{ role: 'user', content: lastMsg.content }]);
+      const userEvent = JSON.stringify({
+        type:    'user',
+        message: sanitised,
+      });
+      proc.stdin.write(userEvent + '\n');
+      proc.stdin.end();
+    }
 
     let buffer       = '';
     let fullText     = '';
@@ -488,7 +526,7 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
           if (newPart) {
             fullText   += newPart;
             lastTextLen = text.length;
-            event.sender.send('claude:chunk', newPart);
+            event.sender.send(chunkCh, newPart);
           }
           // Tool-use blocks — watch for TodoWrite + skill reads
           for (const block of content) {
@@ -501,11 +539,10 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
                 (Array.isArray(block.input?.todos) || Array.isArray(block.input))
               ) {
                 const todos = Array.isArray(block.input?.todos) ? block.input.todos : block.input;
-                event.sender.send('claude:todo-update', todos);
+                event.sender.send(todoCh, todos);
               }
 
               // File reads → inject activity marker into the chunk stream
-              // (reuses existing claude:chunk IPC — no preload change needed)
               const readNames = ['read', 'read_file', 'readfile', 'view', 'cat'];
               if (readNames.includes((block.name || '').toLowerCase())) {
                 const fp      = block.input?.file_path || block.input?.path || block.input?.filename || '';
@@ -513,7 +550,7 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
                 const isSkill = fp.includes('skills/') || fp.includes('skills\\') || name.endsWith('.md');
                 if (name) {
                   const payload = JSON.stringify({ type: 'read', file: name, isSkill });
-                  event.sender.send('claude:chunk', '\x01ACT:' + payload + '\x02');
+                  event.sender.send(chunkCh, '\x01ACT:' + payload + '\x02');
                 }
               }
 
@@ -523,11 +560,10 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
               // Any other non-todo tool → generic activity ping
               const skipGeneric = ['TodoWrite', 'todo_write', 'Read', 'read_file', 'read', 'cat', 'view'];
               if (!skipGeneric.includes((block.name || '').toLowerCase())) {
-                // For Agent tool calls, extract the agent name from input
                 const inp = block.input || {};
                 const agentName = inp.agent_name || inp.agentName || inp.agent || inp.subagent_type || inp.name || null;
                 const payload = JSON.stringify({ type: 'tool', tool: block.name, agentName });
-                event.sender.send('claude:chunk', '\x01ACT:' + payload + '\x02');
+                event.sender.send(chunkCh, '\x01ACT:' + payload + '\x02');
               }
             }
           }
@@ -542,7 +578,7 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
             (Array.isArray(ev.input?.todos) || Array.isArray(ev.input))
           ) {
             const todos = Array.isArray(ev.input?.todos) ? ev.input.todos : ev.input;
-            event.sender.send('claude:todo-update', todos);
+            event.sender.send(todoCh, todos);
           }
           break;
         }
@@ -594,18 +630,18 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
     };
 
     proc.on('close', code => {
-      _currentProc = null;
+      _activeProcs.delete(rid);
       cleanupTmpImages();
       if (buffer.trim()) processLine(buffer); // flush
       if (!settled) {
         const stats = { inputTokens, outputTokens, cacheReadTokens, costUSD, numTurns, toolCallCount, model: sessionModel };
-        event.sender.send('claude:done', stats);
+        event.sender.send(doneCh, stats);
         settle(true, { text: fullText, ...stats, cliSessionId: newSessionId });
       }
     });
 
     proc.on('error', err => {
-      _currentProc = null;
+      _activeProcs.delete(rid);
       cleanupTmpImages();
       console.error('[claude-cli] spawn error:', err.message);
       settle(false, err);
@@ -631,17 +667,46 @@ const MODEL_MAP = {
 function resolveModel(id) { return MODEL_MAP[id] || id || 'claude-sonnet-4-6'; }
 
 // Public entry point — tries real CLI first, falls back to direct Anthropic SDK.
-async function streamMessage(event, messages, modelId, systemPrompt, cliSessionId, permMode) {
+// requestId (optional) scopes the IPC channel so parallel streams don't mix.
+async function streamMessage(event, messages, modelId, systemPrompt, cliSessionId, permMode, requestId) {
   const binary = getCliBinary();
+
   if (binary) {
-    return streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode);
+    return streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode, requestId);
   }
+
   console.warn('[claude] CLI unavailable — using SDK fallback');
-  return streamMessageViaSDK(event, messages, modelId, systemPrompt);
+  return streamMessageViaSDK(event, messages, modelId, systemPrompt, requestId);
 }
 
-async function streamMessageViaSDK(event, messages, modelId, systemPrompt) {
+const ALLOWED_IMG_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+/**
+ * Sanitise messages before sending to the API.
+ * Coerces any unsupported image media_type to 'image/png' so the API never
+ * sees values like 'image/bmp', 'image/x-png', or empty string.
+ */
+function sanitiseMessages(messages) {
+  return messages.map(msg => {
+    if (!Array.isArray(msg.content)) return msg;
+    const content = msg.content.map(block => {
+      if (block.type !== 'image') return block;
+      const src = block.source || {};
+      const mt  = (src.media_type || '').toLowerCase();
+      if (ALLOWED_IMG_MEDIA_TYPES.has(mt)) return block;
+      console.warn(`[claude] coercing unsupported image media_type '${src.media_type}' → 'image/png'`);
+      return { ...block, source: { ...src, media_type: 'image/png' } };
+    });
+    return { ...msg, content };
+  });
+}
+
+async function streamMessageViaSDK(event, messages, modelId, systemPrompt, requestId) {
+  const rid    = requestId || '';
+  const chunkCh = rid ? `claude:chunk:${rid}` : 'claude:chunk';
+  const doneCh  = rid ? `claude:done:${rid}`  : 'claude:done';
   const cred = await getCredential();
+  messages = sanitiseMessages(messages);
 
   // OAuth Bearer requires 'anthropic-beta: oauth-2025-04-20' to be accepted.
   // Raw API keys use standard x-api-key auth (no extra headers needed).
@@ -677,23 +742,29 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt) {
 
   try {
     const stream = await client.messages.create(params);
-    let fullText = '', inputTokens = 0, outputTokens = 0;
+    let fullText = '', inputTokens = 0, outputTokens = 0, cacheReadTokens = 0;
 
     for await (const chunk of stream) {
       switch (chunk.type) {
         case 'content_block_delta':
           if (chunk.delta.type === 'text_delta') {
             fullText += chunk.delta.text;
-            event.sender.send('claude:chunk', chunk.delta.text);
+            event.sender.send(chunkCh, chunk.delta.text);
           }
           break;
-        case 'message_start':  inputTokens  = chunk.message?.usage?.input_tokens  ?? 0; break;
-        case 'message_delta':  outputTokens = chunk.usage?.output_tokens            ?? 0; break;
+        case 'message_start': {
+          const u = chunk.message?.usage || {};
+          inputTokens      = u.input_tokens              ?? 0;
+          cacheReadTokens  = u.cache_read_input_tokens   ?? 0;
+          break;
+        }
+        case 'message_delta':  outputTokens = chunk.usage?.output_tokens ?? 0; break;
       }
     }
 
-    event.sender.send('claude:done', { inputTokens, outputTokens });
-    return { text: fullText, inputTokens, outputTokens };
+    const donePayload = { inputTokens, outputTokens, cacheReadTokens, model: resolvedModel };
+    event.sender.send(doneCh, donePayload);
+    return { text: fullText, ...donePayload };
 
   } catch (err) {
     if (err.status === 429) {

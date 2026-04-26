@@ -7,6 +7,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- **Dockview workspace** — replaces the static right-panel tab system with a fully flexible dock layout powered by `dockview-core` v5.2.0
+  - Panels can be dragged, reordered, split horizontally/vertically, and floated into independent windows
+  - Custom dark theme (`.dockview-theme-ccmod`) matches the app's `#141416` / `#d97757` palette
+  - Tab bar: accent bottom-strip on active tab, fade transition on inactive, per-tab close button
+  - Sash (resize handles): invisible by default, accent-colored on hover
+  - Floating panels: dark shadow, rounded corners, `#2e2e34` border
+  - Drop overlay: warm amber highlight (#d97757) instead of generic blue
+  - `workspace.js` bridge: zero app.js rendering code changes required — shared `#right-panel-body` element is moved into the active panel's DOM slot
+  - Backward compatible: `setRightPanelTab()` / `setRightPanelOpen()` APIs unchanged
 - **JSX live preview** — inline rendering of React components directly inside chat code blocks
   - Babel standalone compiles JSX synchronously in the iframe
   - `<script type="importmap">` resolves `react`, `react-dom/client`, `framer-motion` to esm.sh CDN
