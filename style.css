@@ -1,3 +1,5 @@
+/* NOTE: dockview-core.min.js injects its own CSS at runtime — no @import needed */
+
 @font-face {
   font-family: 'Anthropic Sans';
   src: url('./AnthropicSans-Romans-Variable-25x258.ttf') format('truetype');
@@ -111,7 +113,7 @@ html[data-theme="light"] .search-field { background: #f0f0f2; box-shadow: inset 
 html[data-theme="light"] .ctx { background: #ffffff; box-shadow: 0 10px 32px rgba(0,0,0,0.12), 0 0 0 1px #e4e4e7; color: #141416; }
 html[data-theme="light"] .ctx button { color: #141416; }
 html[data-theme="light"] .key { background: #f5f5f6; color: #141416; box-shadow: inset 0 0 0 1px #d4d4d8, inset 0 -1px 0 rgba(0,0,0,0.08); }
-html[data-theme="light"] .right-panel { background: #ffffff; border-left-color: #e4e4e7; }
+html[data-theme="light"] .workspace-dock { background: #ffffff; border-left-color: #e4e4e7; }
 html[data-theme="light"] .right-panel__head { border-bottom-color: #e4e4e7; }
 html[data-theme="light"] .shortcuts__group { color: #141416; }
 html[data-theme="light"] .shortcuts__label { color: #303034; }
@@ -120,7 +122,7 @@ html[data-theme="light"] .shortcuts__row { border-bottom-color: #e4e4e7; }
 /* ===== Sidebar: width + collapsed (icon-only) mode ===== */
 #sidebar {
   width: 288px;
-  position: relative;                        /* anchor for the resize handle */
+  position: relative;
   transition: width 260ms cubic-bezier(.4, .0, .2, 1);
 }
 #sidebar.is-resizing {
@@ -2110,31 +2112,12 @@ body.is-resizing-sidebar * { cursor: col-resize !important; }
 /* Flash green when copy/download succeed */
 .code-block__btn.is-flashed { color: #7ab389; transform: scale(1.08); }
 .code-block__btn.is-active  { color: #7dcfff; }
+/* Pin-to-Canvas button — accent color + stays lit once pinned */
+.code-block__btn--pin { color: #8b8b9a; }
+.code-block__btn--pin:hover { color: #d97757 !important; background: rgba(217,119,87,0.10) !important; }
+.code-block__btn--pin.is-pinned { color: #d97757 !important; }
 
-/* Expand / collapse toggle — hidden for short blocks (JS adds .needs-expand) */
-.code-block__expand {
-  display: none;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  padding: 6px 18px 6px 52px;
-  background: linear-gradient(to bottom, rgba(20,20,22,0.6), rgba(20,20,22,0.95));
-  border: 0;
-  border-top: 1px solid rgba(255,255,255,0.04);
-  color: rgba(255,255,255,0.35);
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: color 140ms ease, background 140ms ease;
-  text-align: left;
-  position: relative;
-  z-index: 3;
-}
-.code-block.needs-expand .code-block__expand { display: flex; }
-.code-block__expand:hover { color: rgba(255,255,255,0.65); background: rgba(255,255,255,0.03); }
-.code-block__expand svg { width: 12px; height: 12px; transition: transform 200ms ease; }
-.code-block.is-expanded .code-block__expand svg { transform: rotate(180deg); }
-.code-block.is-expanded .code-block__expand { background: none; border-top-color: transparent; }
+/* (expand toggle removed — code body scrolls natively) */
 
 /* Wide preview panel */
 .modal__panel--wide { width: min(900px, calc(100vw - 32px)); }
@@ -2159,26 +2142,14 @@ body.is-resizing-sidebar * { cursor: col-resize !important; }
   position: relative;
   z-index: 1;
   counter-reset: ln;
-  /* smooth height transition when expanding */
-  transition: max-height 300ms cubic-bezier(.4,0,.2,1);
+  /* thin dark scrollbar — visible but not distracting */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
 }
-/* Remove cap when user expands */
-.code-block.is-expanded .code-block__body {
-  max-height: none;
-}
-/* Fade gradient at the bottom — hints there's more code below */
-.code-block.needs-expand:not(.is-expanded):not(.is-previewing) .code-block__body::after {
-  content: "";
-  position: sticky;
-  bottom: 0;
-  left: 0;
-  display: block;
-  height: 52px;
-  margin-top: -52px;
-  background: linear-gradient(to bottom, transparent, #141416 88%);
-  pointer-events: none;
-  z-index: 2;
-}
+.code-block__body::-webkit-scrollbar        { width: 5px; height: 5px; }
+.code-block__body::-webkit-scrollbar-track  { background: transparent; }
+.code-block__body::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.12); border-radius: 99px; }
+.code-block__body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
 .code-block__body .line {
   display: block;
   position: relative;
@@ -2206,54 +2177,32 @@ body.is-resizing-sidebar * { cursor: col-resize !important; }
 .code-block__body .var    { color: #6a86c3; }                      /* variable  — periwinkle  */
 .code-block__body .str    { color: #c9a96e; }                      /* string    — warm tan    */
 .code-block__body .num    { color: #b48ead; }                      /* number    — mauve       */
-.code-block__body .cmt    { color: #4a4a55; font-style: italic; }  /* comment   — dim grey    */
+.code-block__body .cmt    { color: #565663; font-style: italic; }  /* comment   — dim grey    */
 .code-block__body .sel    { color: #73c9c3; }                      /* selector  — teal        */
 .code-block__body .prop   { color: #7dcfff; }                      /* property  — ice blue    */
 .code-block__body .pseudo { color: #c792ea; }                      /* pseudo    — violet      */
 .code-block__body .op     { color: #89ddff; }                      /* operator  — sky         */
 .code-block__body .val    { color: #ff9e64; }                      /* value     — coral       */
 
-/* ===== Inline preview flip ===== */
-/* The code body fades out with blur/scale; the preview fades in with blur/scale.
-   A cross-fade with blur feels like a page turn without the dizziness of a 3D flip. */
-.code-block__body,
+/* ── Collapsed code block ───────────────────────────────────────── */
+.code-block.is-code-hidden .code-block__body    { display: none; }
+.code-block.is-code-hidden .code-block__preview { display: none; }
+.code-block.is-code-hidden                      { border-radius: 8px; }
+
+/* ===== Inline preview — split view ===== */
+/* Code stays visible; preview slides in below, separated by a thin divider. */
 .code-block__preview {
-  transition: opacity 420ms cubic-bezier(.4,.0,.2,1),
-              filter  420ms cubic-bezier(.4,.0,.2,1),
-              transform 420ms cubic-bezier(.4,.0,.2,1);
-  will-change: opacity, filter, transform;
-}
-.code-block.is-previewing .code-block__body {
-  opacity: 0;
-  filter: blur(10px);
-  transform: scale(1.03);
-  pointer-events: none;
-}
-.code-block__preview {
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
-  /* top is set in JS to match head height so the preview slots right under the head */
-  display: flex;
+  display: none;
   flex-direction: column;
   background: #0b0b0c;
+  border-top: 1px solid rgba(255,255,255,0.07);
   border-radius: 0 0 10px 10px;
   overflow: hidden;
-  opacity: 0;
-  filter: blur(10px);
-  transform: scale(0.97);
-  pointer-events: none;
-  z-index: 2;
+  height: 340px;
+  /* no absolute — it's in normal flow below the code body */
 }
 .code-block.is-previewing .code-block__preview {
-  opacity: 1;
-  filter: blur(0);
-  transform: scale(1);
-  pointer-events: auto;
-}
-/* Expand the block to a comfortable preview height when the eye is active.
-   The absolute overlay fills this space; the hidden pre still sits inside. */
-.code-block.is-previewing {
-  min-height: 520px;
+  display: flex;
 }
 .code-block__preview iframe {
   flex: 1 1 auto;
@@ -2765,30 +2714,217 @@ main:hover .chat-reveal.is-shown,
 /* Sidebar-right icon brightens slightly when the panel is open */
 body.right-panel-open #right-panel-btn { background: #202024; color: #e7e7ea; }
 
-/* Right-side panel */
-.right-panel {
-  width: 0;
+/* ═══════════════════════════════════════════════════════════
+   MAIN DOCK — single dockview that owns the entire workspace
+   (chat + tools + canvas).  Replaces the old <main> + the
+   old #workspace-dock two-column approach.
+   ═══════════════════════════════════════════════════════════ */
+.main-dock {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
-  background: #141416;
-  border-left: 1px solid #202024;
+  display: flex;          /* dockview-core expects a flex parent */
+  flex-direction: column;
+}
+
+/* The dockview root fills the main-dock */
+.main-dock .dv-dockview {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── Sidebar right-side adaptations ────────────────────────── */
+/* When sidebar is swapped to the right, flip border + tooltip   */
+/* direction + toggle-icon hint so everything reads naturally.   */
+
+/* Right-side: flip the dividing border (overrides Tailwind border-r class) */
+#sidebar[data-sidebar-side="right"] {
+  border-right: none !important;
+  border-left: 1px solid #2e2e34;
+}
+
+/* Right-side: collapsed tooltips point LEFT (not off-screen right) */
+#sidebar[data-sidebar-side="right"].is-collapsed [data-tooltip]::after {
+  left: auto;
+  right: calc(100% + 8px);
+  transform: translateY(-50%) translateX(6px);
+}
+#sidebar[data-sidebar-side="right"].is-collapsed [data-tooltip]:hover::after {
+  transform: translateY(-50%) translateX(0);
+}
+
+/* Toggle icon hint: left side → rotate to hint "expand →"
+                     right side → normal to hint "← expand" */
+#sidebar[data-sidebar-side="right"] #sidebar-toggle svg      { transform: none !important; }
+#sidebar[data-sidebar-side="right"].is-collapsed #sidebar-toggle svg { transform: rotate(180deg) !important; }
+
+/* Sidebar position toggle — single animated ← → button */
+.sidebar-pos-btn { flex-shrink: 0; }
+
+.sidebar-pos-icon .arr {
+  transition: stroke 240ms ease, opacity 240ms ease;
+}
+
+/* LEFT active: left arrow = orange, right arrow = dim */
+.sidebar-pos-btn[data-side="left"]  .arr--left  { stroke: #d97757; opacity: 1; }
+.sidebar-pos-btn[data-side="left"]  .arr--right { stroke: currentColor; opacity: 0.25; }
+
+/* RIGHT active: right arrow = orange, left arrow = dim */
+.sidebar-pos-btn[data-side="right"] .arr--right { stroke: #d97757; opacity: 1; }
+.sidebar-pos-btn[data-side="right"] .arr--left  { stroke: currentColor; opacity: 0.25; }
+
+/* ── Chat panel body ───────────────────────────────────────── */
+/* workspace.js places the adopted #chat-slot children inside  */
+/* .dv-chat-wrap so the chat-scroll + composer + ctx-strip all  */
+/* stack correctly within the dockview panel.                   */
+/* dockview panel containers don't reliably propagate height to children,
+   so use position:absolute + inset:0 instead of height:100%.            */
+.dv-chat-wrap {
   display: flex;
   flex-direction: column;
-  transition: width 240ms cubic-bezier(.4,.0,.2,1);
-  flex-shrink: 0;
-  position: relative;   /* needed for the absolute resizer handle */
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #0b0b0c;
 }
-body.right-panel-open .right-panel { width: 360px; }
 
-/* Right-panel resize handle — left edge, mirrors the sidebar-resizer */
+/* chat-scroll fills available vertical space */
+.dv-chat-wrap #chat-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ctx-strip sits flush at the bottom of the chat panel */
+.dv-chat-wrap .ctx-strip {
+  flex-shrink: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   DOCK CONTEXT MENU
+   ══════════════════════════════════════════════════════════════ */
+.dock-ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 200px;
+  background: #1c1c1f;
+  border: 1px solid #2e2e34;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.3);
+  padding: 4px;
+  font-size: 12.5px;
+  color: #c8c8d0;
+  user-select: none;
+}
+
+.ctx-menu-body { position: relative; }
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: inherit;
+  font-size: inherit;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: left;
+  transition: background 80ms, color 80ms;
+}
+.ctx-item:hover { background: #2a2a30; color: #e7e7ea; }
+
+.ctx-item__icon { flex-shrink: 0; opacity: .65; }
+.ctx-item__arrow { flex-shrink: 0; opacity: .5; }
+
+.ctx-separator {
+  height: 1px;
+  background: #2a2a30;
+  margin: 3px 4px;
+}
+
+/* Lock check indicator */
+.ctx-check {
+  width: 14px; height: 14px;
+  border-radius: 3px;
+  border: 1px solid #3e3e46;
+  flex-shrink: 0;
+  transition: background 150ms, border-color 150ms;
+  position: relative;
+}
+.ctx-check.is-checked {
+  background: #d97757;
+  border-color: #d97757;
+}
+.ctx-check.is-checked::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 8'%3E%3Cpath stroke='white' stroke-width='1.8' fill='none' stroke-linecap='round' stroke-linejoin='round' d='M1 4l3 3 5-6'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+
+/* Submenu */
+.ctx-has-sub { position: relative; cursor: default; }
+.ctx-submenu {
+  display: none;
+  position: absolute;
+  top: -4px;
+  left: 100%;
+  min-width: 160px;
+  background: #1c1c1f;
+  border: 1px solid #2e2e34;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.55);
+  padding: 4px;
+  z-index: 10000;
+}
+.ctx-submenu.is-open { display: block; }
+
+/* ── View locked — hide all dockview tab close buttons ─────── */
+#main-dock { position: relative; }
+#main-dock.view-locked .dv-default-tab-close { display: none !important; }
+
+/* ── Tools hidden — chat group fills the full dock width ───── */
+#main-dock.tools-hidden .dv-dockview { overflow: hidden; }
+#main-dock.tools-hidden .dv-branch-node,
+#main-dock.tools-hidden .dv-split-view-container {
+  display: flex !important; flex-direction: row !important;
+}
+/* Make every visible group (chat) stretch to fill all remaining space */
+#main-dock.tools-hidden .dv-groupview:not([style*="display: none"]) {
+  flex: 1 1 100% !important;
+  min-width: 0 !important;
+  width: 100% !important;
+}
+
+/* ── Legacy .workspace-dock kept for any stale CSS references ─ */
+.workspace-dock {
+  display: none;          /* superseded by .main-dock */
+}
+body.right-panel-open .workspace-dock { display: none; }
+
+/* The dockview root fills the entire dock */
+.workspace-dock .dv-dockview {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Outer resize handle — left edge of workspace-dock */
 .right-panel-resizer {
   position: absolute;
   top: 0; bottom: 0;
   left: -3px;
   width: 6px;
   z-index: 20;
-  display: none;          /* hidden until panel is open */
+  cursor: col-resize;
+  display: none;
 }
-body.right-panel-open .right-panel-resizer { display: block; }
+body.right-panel-open .workspace-dock .right-panel-resizer,
+body.right-panel-open #right-panel-resizer { display: block; }
 
 /* Thin accent line that fades in on hover / drag to show the edge */
 .right-panel-resizer::after {
@@ -2822,9 +2958,30 @@ body.is-resizing-rp * { cursor: col-resize !important; }
   color: #e7e7ea;
 }
 .right-panel__body {
-  flex: 1;
+  /* Base styles — .dv-panel-body > .right-panel__body overrides height/overflow */
+  width: 100%;
+  box-sizing: border-box;
   overflow: auto;
   padding: 16px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
+}
+.right-panel__body::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.right-panel__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.right-panel__body::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.12);
+  border-radius: 99px;
+}
+.right-panel__body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.28);
+}
+.right-panel__body::-webkit-scrollbar-corner {
+  background: transparent;
 }
 .right-panel__empty {
   display: flex; flex-direction: column;
@@ -2835,6 +2992,1018 @@ body.is-resizing-rp * { cursor: col-resize !important; }
 }
 .right-panel__empty-icon { font-size: 24px; color: #3b3b42; }
 .right-panel__empty-text { font-size: 12.5px; }
+
+/* ─── Drag ghost pill — both for group drags (dockview) and tab drags (ours) ── */
+/* Dockview injects a ghost <div> into document.body during group drags.
+   We can't add a class to it, but the inline styles it sets give us hooks via
+   the tab-color CSS vars, which our theme has already customized.
+   The workspace.js ghostElement for single-tab drags gets its own class. */
+.dv-drag-ghost,
+body > div[style*="border-radius: 12px"] {
+  background: #1a1a1d !important;
+  color: #e7e7ea !important;
+  border: 1px solid #2e2e34 !important;
+  border-radius: 20px !important;
+  font-family: 'Anthropic Sans', ui-sans-serif, system-ui, sans-serif !important;
+  font-size: 11px !important;
+  padding: 3px 10px !important;
+  letter-spacing: 0.02em !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6) !important;
+}
+
+/* ─── Panel body fills dockview content area ─────────────────────── */
+/* Each panel has its own persistent .right-panel__body child.        */
+/* The .dv-panel-body wrapper fills the dockview content slot.        */
+.dv-panel-body {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #141416;
+}
+.dv-panel-body > .right-panel__body {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: auto;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   SPLIT CHAT  —  parallel agent panels
+   ══════════════════════════════════════════════════════════════════════ */
+
+.sc-wrap {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  inset: 0;
+  background: #0b0b0c;
+  overflow: hidden;
+}
+
+/* message scroll area */
+.sc-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: #2e2e38 transparent;
+}
+.sc-scroll::-webkit-scrollbar { width: 4px; }
+.sc-scroll::-webkit-scrollbar-thumb { background: #2e2e38; border-radius: 2px; }
+
+/* bubbles */
+.sc-bubble {
+  max-width: 90%;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.sc-bubble--user {
+  align-self: flex-end;
+  background: #1e1e26;
+  border: 1px solid #2a2a34;
+  padding: 8px 12px;
+  border-radius: 14px 14px 4px 14px;
+  color: #e7e7ea;
+  white-space: pre-wrap;
+}
+.sc-bubble--assistant {
+  align-self: flex-start;
+  color: #c8c8d0;
+}
+.sc-bubble--assistant p   { margin: 0 0 6px; }
+.sc-bubble--assistant p:last-child { margin-bottom: 0; }
+.sc-bubble--assistant pre {
+  background: #131316;
+  border: 1px solid #1e1e24;
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  margin: 6px 0;
+}
+.sc-bubble--assistant code {
+  background: #1a1a20;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.sc-bubble--assistant pre code { background: none; padding: 0; }
+.sc-bubble--assistant ul,
+.sc-bubble--assistant ol { padding-left: 18px; margin: 4px 0; }
+.sc-bubble--assistant h1,
+.sc-bubble--assistant h2,
+.sc-bubble--assistant h3 { font-size: 13px; font-weight: 600; margin: 8px 0 4px; }
+
+.sc-error { color: #e05a5a; font-size: 12px; }
+
+/* composer */
+.sc-composer-wrap {
+  flex-shrink: 0;
+  padding: 8px 10px 10px;
+  border-top: 1px solid #1a1a20;
+  background: #0d0d10;
+}
+.sc-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  background: #131316;
+  border: 1px solid #252530;
+  border-radius: 10px;
+  padding: 6px 6px 6px 10px;
+  transition: border-color .15s;
+}
+.sc-composer:focus-within { border-color: #3a3a4a; }
+
+.sc-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  color: #e7e7ea;
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 20px;
+  max-height: 140px;
+  font-family: inherit;
+}
+.sc-input::placeholder { color: #555564; }
+
+.sc-send-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: #d97757;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s, transform .1s;
+}
+.sc-send-btn:hover  { background: #e0896a; }
+.sc-send-btn:active { transform: scale(.92); }
+
+/* sc-bottom wraps the selector bar + composer */
+.sc-bottom {
+  flex-shrink: 0;
+  background: #0d0d10;
+}
+
+/* selector bar — agent picker + model picker */
+.sc-selector-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 2px;
+}
+
+.sc-sel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid #252530;
+  color: #8888a0;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+  white-space: nowrap;
+}
+.sc-sel-btn:hover {
+  background: #1a1a22;
+  border-color: #333340;
+  color: #b0b0c0;
+}
+.sc-sel-icon {
+  color: #d97757;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Floating dropdown */
+.sc-dropdown {
+  position: absolute;
+  z-index: 200;
+  background: #18181e;
+  border: 1px solid #2a2a36;
+  border-radius: 8px;
+  padding: 4px;
+  min-width: 180px;
+  max-width: 260px;
+  max-height: 240px;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  scrollbar-width: thin;
+  scrollbar-color: #2e2e38 transparent;
+}
+.sc-dropdown::-webkit-scrollbar { width: 3px; }
+.sc-dropdown::-webkit-scrollbar-thumb { background: #2e2e38; }
+
+.sc-dd-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background .1s;
+}
+.sc-dd-item:hover        { background: #222228; }
+.sc-dd-item--active      { background: #1e1e2a; }
+.sc-dd-item--active .sc-dd-item__name { color: #d97757; }
+.sc-dd-item__name {
+  font-size: 12px;
+  color: #d0d0dc;
+  font-weight: 500;
+}
+.sc-dd-item__desc {
+  font-size: 10.5px;
+  color: #666678;
+  margin-top: 1px;
+}
+
+/* ── Session → dockview drag-drop overlay ────────────────────────────────── */
+#dock-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(11,11,12,.55);
+  backdrop-filter: blur(2px);
+}
+#dock-drop-overlay.is-active {
+  pointer-events: auto;
+  opacity: 1;
+}
+.ddo-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  background: #141417;
+  border: 2px dashed #d97757;
+  border-radius: 14px;
+  padding: 28px 40px;
+  color: #d97757;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background .12s, border-color .12s;
+  pointer-events: none;
+}
+#dock-drop-overlay.is-over .ddo-inner {
+  background: rgba(217,119,87,.1);
+  border-color: #e09070;
+  color: #e09070;
+}
+
+/* ── Agent Setup Card ─────────────────────────────────────────────────────── */
+.sc-setup-wrap {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  padding: 24px 16px;
+  background: #0b0b0c;
+}
+.sc-setup-card {
+  width: 100%;
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.sc-setup-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  background: #141417;
+  border: 1px solid #2a2a30;
+  border-radius: 10px;
+  margin-bottom: 10px;
+}
+.sc-setup-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #5a5a68;
+  margin-bottom: 2px;
+}
+.sc-setup-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #44444e;
+  font-size: 11px;
+  margin: 4px 0;
+}
+.sc-setup-divider::before,
+.sc-setup-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #2a2a30;
+}
+.sc-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sc-preset-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 12px;
+  background: #1c1c22;
+  border: 1px solid #2e2e38;
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: left;
+  transition: background .12s, border-color .12s;
+}
+.sc-preset-btn:hover { background: #222229; border-color: #3a3a46; }
+.sc-preset-btn--active {
+  background: #1e1e2c;
+  border-color: #d97757;
+}
+.sc-preset-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #d0d0dc;
+}
+.sc-preset-desc {
+  font-size: 11px;
+  color: #666678;
+}
+.sc-setup-row {
+  display: flex;
+  gap: 10px;
+}
+.sc-setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+}
+.sc-setup-field--half { flex: 1; min-width: 0; }
+.sc-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6a6a78;
+  letter-spacing: .02em;
+}
+.sc-input-field,
+.sc-select-field,
+.sc-textarea-field {
+  background: #1c1c22;
+  border: 1px solid #2e2e38;
+  border-radius: 7px;
+  color: #d8d8e4;
+  font-size: 12.5px;
+  font-family: inherit;
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color .15s;
+  resize: none;
+}
+.sc-input-field:focus,
+.sc-select-field:focus,
+.sc-textarea-field:focus { border-color: #4a4a5c; }
+.sc-input-field::placeholder,
+.sc-textarea-field::placeholder { color: #454552; }
+.sc-select-field {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23666678' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+  cursor: pointer;
+}
+.sc-select-field option {
+  background: #1c1c22;
+  color: #d8d8e4;
+}
+.sc-textarea-field { line-height: 1.5; }
+.sc-launch-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 10px 20px;
+  background: #d97757;
+  border: none;
+  border-radius: 7px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background .12s, transform .1s;
+  margin-top: 2px;
+}
+.sc-launch-btn:hover  { background: #e0896a; }
+.sc-launch-btn:active { transform: scale(.97); }
+
+/* ── Tool activity cards (autonomous agent — shows live tool calls) ────────── */
+.sc-activity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: #161619;
+  border: 1px solid #252530;
+  border-left: 2px solid #3a3a50;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: #7070a0;
+  align-self: flex-start;
+  max-width: 90%;
+  animation: sc-act-in .15s ease;
+}
+@keyframes sc-act-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.sc-activity__icon {
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.sc-activity__label {
+  font-weight: 600;
+  color: #8080b8;
+  flex-shrink: 0;
+}
+.sc-activity__detail {
+  color: #505068;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+}
+
+/* Thinking / working pulse card */
+.sc-activity--thinking {
+  border-left-color: #d97757;
+  gap: 8px;
+}
+.sc-activity__pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d97757;
+  flex-shrink: 0;
+  animation: sc-pulse 1.1s ease-in-out infinite;
+}
+@keyframes sc-pulse {
+  0%, 100% { opacity: .3; transform: scale(.85); }
+  50%       { opacity: 1;  transform: scale(1.1); }
+}
+
+/* ── Agent header bar (shown after setup) ─────────────────────────────────── */
+.sc-agent-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  background: #111115;
+  border-bottom: 1px solid #1e1e24;
+  flex-shrink: 0;
+}
+.sc-agent-header__icon {
+  display: flex;
+  align-items: center;
+  color: #d97757;
+  opacity: .85;
+}
+.sc-agent-header__name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #d0d0dc;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-agent-header__model {
+  font-size: 10.5px;
+  color: #555564;
+  background: #1c1c22;
+  border: 1px solid #2a2a32;
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+.sc-agent-header__perm {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  border: 1px solid;
+}
+.sc-agent-header__perm--bypass {
+  color: #d97757;
+  background: rgba(217,119,87,.1);
+  border-color: rgba(217,119,87,.3);
+}
+.sc-agent-header__perm--accept {
+  color: #7ab8f5;
+  background: rgba(122,184,245,.08);
+  border-color: rgba(122,184,245,.25);
+}
+.sc-agent-header__perm--default {
+  color: #666678;
+  background: #1c1c22;
+  border-color: #2a2a32;
+}
+.sc-agent-header__recfg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: #555564;
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+  flex-shrink: 0;
+}
+.sc-agent-header__recfg:hover {
+  color: #9090a0;
+  border-color: #2a2a34;
+  background: #1c1c22;
+}
+
+/* Linked-session badge in agent header */
+.sc-agent-header__linked {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  color: #7ab8f5;
+  background: rgba(122,184,245,.08);
+  border: 1px solid rgba(122,184,245,.22);
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: auto;
+}
+.sc-agent-header__linked svg { flex-shrink: 0; opacity: .75; }
+
+/* Context divider — separates inherited session context from agent's own chat */
+.sc-context-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 8px;
+  padding: 0 4px;
+}
+.sc-context-divider__line {
+  flex: 1;
+  height: 1px;
+  background: rgba(122,184,245,.18);
+}
+.sc-context-divider__label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: #7ab8f5;
+  opacity: .65;
+  white-space: nowrap;
+}
+.sc-context-divider__label svg { opacity: .8; }
+
+/* Auto-trigger banner — shown when agent fires automatically on new code */
+.sc-auto-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: #d97757;
+  opacity: .8;
+  margin: 10px 0 4px;
+  padding: 0 2px;
+}
+.sc-auto-trigger svg { flex-shrink: 0; }
+
+/* light-theme overrides for activity cards */
+html[data-theme="light"] .sc-activity {
+  background: #f5f5f8;
+  border-color: #e0e0e8;
+  border-left-color: #c0c0d8;
+  color: #9090b8;
+}
+html[data-theme="light"] .sc-activity__label { color: #7070b0; }
+html[data-theme="light"] .sc-activity__detail { color: #a0a0c0; }
+html[data-theme="light"] .sc-activity--thinking { border-left-color: #d97757; }
+
+/* light-theme overrides for setup card */
+html[data-theme="light"] .sc-setup-wrap { background: #f5f5f8; }
+html[data-theme="light"] .sc-setup-section { background: #fff; border-color: #e4e4e8; }
+html[data-theme="light"] .sc-setup-section-label { color: #9090a0; }
+html[data-theme="light"] .sc-setup-divider { color: #b0b0bc; }
+html[data-theme="light"] .sc-setup-divider::before,
+html[data-theme="light"] .sc-setup-divider::after { background: #e4e4e8; }
+html[data-theme="light"] .sc-preset-btn { background: #f8f8fa; border-color: #e0e0e6; }
+html[data-theme="light"] .sc-preset-btn:hover { background: #f0f0f4; border-color: #d0d0d8; }
+html[data-theme="light"] .sc-preset-btn--active { background: #fff4f0; border-color: #d97757; }
+html[data-theme="light"] .sc-preset-name { color: #1a1a20; }
+html[data-theme="light"] .sc-preset-desc { color: #8080a0; }
+html[data-theme="light"] .sc-label { color: #7070a0; }
+html[data-theme="light"] .sc-input-field,
+html[data-theme="light"] .sc-select-field,
+html[data-theme="light"] .sc-textarea-field {
+  background: #f8f8fb;
+  border-color: #d8d8e0;
+  color: #141416;
+}
+html[data-theme="light"] .sc-input-field:focus,
+html[data-theme="light"] .sc-select-field:focus,
+html[data-theme="light"] .sc-textarea-field:focus { border-color: #9090c0; }
+html[data-theme="light"] .sc-agent-header { background: #f5f5f8; border-bottom-color: #e4e4e8; }
+html[data-theme="light"] .sc-agent-header__name { color: #141416; }
+html[data-theme="light"] .sc-agent-header__model { background: #ebebee; border-color: #d8d8e0; color: #5050a0; }
+
+/* ── Artifact (Canvas) panels ─────────────────────────────────────────────
+   Self-contained iframe panels — no .right-panel__body needed.
+   .dv-artifact-wrap fills the dockview content slot.
+   ─────────────────────────────────────────────────────────────────────── */
+.dv-artifact-wrap {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #0b0b0c;
+}
+
+/* Thin toolbar strip at top of artifact panel */
+.artifact-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #1e1e24;
+  flex-shrink: 0;
+  background: #111113;
+}
+.artifact-toolbar__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #d97757;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  background: rgba(217,119,87,0.10);
+  border: 1px solid rgba(217,119,87,0.20);
+  border-radius: 20px;
+}
+.artifact-toolbar__badge svg { flex-shrink: 0; }
+.artifact-toolbar__name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-toolbar__spacer { flex: 1; }
+.artifact-toolbar__btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: #5a5a63;
+  cursor: pointer;
+  transition: color .15s, background .15s;
+  padding: 0;
+}
+.artifact-toolbar__btn:hover {
+  color: #e7e7ea;
+  background: rgba(255,255,255,0.06);
+}
+.artifact-toolbar__btn.is-spinning svg {
+  animation: spin .5s linear;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* iframe container fills remaining height */
+.artifact-frame-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: auto;      /* scroll when zoomed in > 100% */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.18) rgba(255,255,255,0.04);
+}
+.artifact-frame-wrap::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.artifact-frame-wrap::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.03);
+  border-radius: 99px;
+}
+.artifact-frame-wrap::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.22);
+  border-radius: 99px;
+  min-height: 30px;
+}
+.artifact-frame-wrap::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.4);
+}
+.artifact-frame-wrap::-webkit-scrollbar-corner {
+  background: transparent;
+}
+.artifact-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #0b0b0c;
+  display: block;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DOCKVIEW CUSTOM THEME — dockview-theme-ccmod
+   Uses #workspace-dock as anchor (guaranteed to exist).
+   class is also added to the dv root by workspace.js.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── CSS variables (cascade down from the container) ─────── */
+#workspace-dock,
+#main-dock,
+#main-dock .dockview-theme-ccmod,
+#main-dock,
+#main-dock .dockview-theme-ccmod {
+  /* Core backgrounds */
+  --dv-group-view-background-color:                 #141416;
+  --dv-tabs-and-actions-container-background-color: #0f0f11;
+  --dv-separator-border:                            #202024;
+
+  /* Active group tabs */
+  --dv-activegroup-visiblepanel-tab-background-color:  #141416;
+  --dv-activegroup-visiblepanel-tab-color:             #e7e7ea;
+  --dv-activegroup-hiddenpanel-tab-background-color:   #0f0f11;
+  --dv-activegroup-hiddenpanel-tab-color:              #5a5a63;
+
+  /* Inactive group tabs */
+  --dv-inactivegroup-visiblepanel-tab-background-color: #141416;
+  --dv-inactivegroup-visiblepanel-tab-color:            #a1a1aa;
+  --dv-inactivegroup-hiddenpanel-tab-background-color:  #0f0f11;
+  --dv-inactivegroup-hiddenpanel-tab-color:             #3a3a44;
+
+  /* Dividers */
+  --dv-tab-divider-color: transparent;
+
+  /* Sash resize handles */
+  --dv-sash-color:               transparent;
+  --dv-active-sash-color:        rgba(217,119,87,0.6);
+  --dv-active-sash-transition-duration: 0.12s;
+  --dv-active-sash-transition-delay:    0.25s;
+
+  /* Drag-over: warm amber */
+  --dv-drag-over-background-color: rgba(217,119,87,0.08);
+  --dv-drag-over-border-color:     rgba(217,119,87,0.5);
+  --dv-drag-over-border: 1px solid rgba(217,119,87,0.5);
+
+  /* Floating window */
+  --dv-floating-box-shadow: 0 12px 40px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.5);
+
+  /* Hover highlight */
+  --dv-icon-hover-background-color: rgba(255,255,255,0.06);
+
+  /* Tab bar sizing */
+  --dv-tabs-and-actions-container-height:    32px;
+  --dv-tabs-and-actions-container-font-size: 11.5px;
+  --dv-tab-font-size:  11.5px;
+  --dv-tab-margin:     0;
+  --dv-border-radius:  0px;
+
+  /* Scrollbars */
+  --dv-tabs-container-scrollbar-color: rgba(255,255,255,0.1);
+  --dv-scrollbar-background-color:     rgba(255,255,255,0.1);
+
+  --dv-overlay-z-index: 999;
+}
+
+/* ── Tab bar container ───────────────────────────────────── */
+#main-dock .dv-tabs-and-actions-container {
+  background: #0f0f11 !important;
+  border-bottom: 1px solid #1a1a1d !important;
+  height: 32px !important;
+  min-height: 32px !important;
+}
+
+/* ── Individual tabs ─────────────────────────────────────── */
+#main-dock .dv-tab {
+  padding: 0 !important;
+  margin: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  outline: none !important;
+  position: relative;
+}
+
+/* Active tab — bright text + orange underline */
+#main-dock .dv-tab.dv-active-tab {
+  background: transparent !important;
+}
+#main-dock .dv-tab.dv-active-tab::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 8px; right: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: #d97757;
+  pointer-events: none;
+}
+
+/* Inactive tabs */
+#main-dock .dv-tab.dv-inactive-tab {
+  background: transparent !important;
+  opacity: 0.5;
+}
+#main-dock .dv-tab.dv-inactive-tab:hover {
+  opacity: 0.85;
+  background: rgba(255,255,255,0.03) !important;
+}
+
+/* ── Default tab inner layout ────────────────────────────── */
+#main-dock .dv-default-tab {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px 0 10px;
+  gap: 5px;
+  white-space: nowrap;
+  font-family: 'Anthropic Sans', ui-sans-serif, system-ui, sans-serif;
+  font-size: 11.5px;
+  letter-spacing: 0.01em;
+}
+#main-dock .dv-default-tab .dv-default-tab-content {
+  margin: 0;
+  color: inherit;
+}
+
+/* Close (×) button — hidden until hover/active */
+#main-dock .dv-default-tab .dv-default-tab-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px; height: 16px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 100ms, background 100ms;
+  flex-shrink: 0;
+}
+#main-dock .dv-tab.dv-active-tab .dv-default-tab .dv-default-tab-action,
+#main-dock .dv-tab:hover .dv-default-tab .dv-default-tab-action {
+  opacity: 0.45;
+}
+#main-dock .dv-default-tab .dv-default-tab-action:hover {
+  opacity: 1 !important;
+  background: rgba(255,255,255,0.1) !important;
+}
+#main-dock .dv-tab .dv-svg { width: 9px; height: 9px; }
+
+/* Tab-bar separator lines between tabs — remove them */
+#main-dock .dv-tabs-container .dv-tab::before { display: none !important; }
+
+/* ── Void container (empty draggable area after tabs) ──────── */
+#main-dock .dv-void-container {
+  cursor: grab !important;
+  flex: 1;
+}
+#main-dock .dv-void-container:active { cursor: grabbing !important; }
+
+/* ── Right-actions container (dockview built-in buttons) ─── */
+/* Hide the maximize/restore group button — it looks out of place */
+#main-dock .dv-right-actions-container > button,
+#main-dock .dv-right-actions-container > .dv-action {
+  display: none !important;
+}
+
+/* ── Watermark (shown when no panels open) ───────────────── */
+#main-dock .dv-watermark { display: none !important; }
+
+/* ── Content area ────────────────────────────────────────── */
+#main-dock .dv-content-container,
+#main-dock .dv-groupview,
+#main-dock .dv-dockview {
+  background: #141416 !important;
+}
+/* Content container must be relative so absolute panel bodies anchor to it */
+#main-dock .dv-content-container {
+  position: relative !important;
+  overflow: hidden !important;
+}
+
+/* ── Sash (resize handles between panels) ─────────────────── */
+#main-dock .dv-sash-container .dv-sash {
+  background: transparent !important;
+  transition: background 0.12s 0.25s ease !important;
+}
+#main-dock .dv-sash-container .dv-sash:not(.disabled):hover,
+#main-dock .dv-sash-container .dv-sash:not(.disabled):active {
+  background: rgba(217,119,87,0.5) !important;
+  transition-delay: 0s !important;
+}
+
+/* ── Floating group panel ────────────────────────────────── */
+#main-dock .dv-resize-container {
+  border: 1px solid #2e2e34 !important;
+  border-radius: 8px !important;
+  overflow: hidden !important;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.85), 0 4px 12px rgba(0,0,0,0.5) !important;
+}
+
+/* ── Drop target overlay ─────────────────────────────────── */
+#main-dock .dv-drop-target-selection {
+  background-color: rgba(217,119,87,0.07) !important;
+  border: 1px solid rgba(217,119,87,0.45) !important;
+  border-radius: 3px;
+}
+
+/* ── Tab overflow dropdown ───────────────────────────────── */
+#main-dock .dv-tabs-overflow-container {
+  background: #1a1a1d !important;
+  border: 1px solid #2e2e34 !important;
+  border-radius: 7px !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.7) !important;
+  overflow: hidden;
+}
+#main-dock .dv-tabs-overflow-container .dv-tab {
+  padding: 0 !important;
+}
+#main-dock .dv-tabs-overflow-container .dv-default-tab {
+  padding: 7px 14px;
+  height: auto;
+  font-size: 12px;
+}
+#main-dock .dv-tabs-overflow-dropdown-default {
+  color: #a1a1aa;
+  padding: 0 10px;
+}
+#main-dock .dv-tabs-overflow-dropdown-default:hover {
+  color: #e7e7ea;
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px;
+}
+
+/* Light theme compat */
+html[data-theme="light"] .workspace-dock {
+  background: #ffffff;
+  border-left-color: #e4e4e7;
+}
 
 /* ===== Keyboard shortcuts panel ===== */
 .shortcuts { padding: 4px 2px 16px; }
@@ -3448,6 +4617,97 @@ main { position: relative; }
 }
 .ctx-chip.is-active .ctx-chip__val { color: rgba(255,255,255,0.85); }
 
+/* Codeblock edit chip */
+.ctx-chip--cb-edit {
+  border-color: rgba(217, 119, 87, 0.4) !important;
+  background: rgba(217, 119, 87, 0.08) !important;
+}
+.ctx-chip--cb-edit .ctx-chip__name {
+  color: #d97757 !important;
+  font-size: 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.ctx-chip--cb-edit:hover {
+  border-color: rgba(217, 119, 87, 0.7) !important;
+  background: rgba(217, 119, 87, 0.14) !important;
+}
+.ctx-chip__dismiss {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px;
+  font-size: 13px; line-height: 1;
+  color: rgba(217,119,87,0.5);
+  border-radius: 50%;
+  margin-left: 2px;
+  transition: color 120ms, background 120ms;
+}
+.ctx-chip__dismiss:hover {
+  color: rgba(217,119,87,1);
+  background: rgba(217,119,87,0.18);
+}
+
+/* Artifact toolbar codeblock ID badge */
+.artifact-toolbar__id {
+  font-size: 9px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: rgba(217, 119, 87, 0.8);
+  background: rgba(217, 119, 87, 0.1);
+  border: 1px solid rgba(217, 119, 87, 0.25);
+  border-radius: 3px;
+  padding: 1px 5px;
+  letter-spacing: 0.02em;
+  user-select: text;
+}
+
+/* Artifact toolbar edit button accent */
+.artifact-toolbar__btn--edit {
+  color: #d97757 !important;
+  opacity: 0.85;
+}
+.artifact-toolbar__btn--edit:hover {
+  opacity: 1;
+  background: rgba(217, 119, 87, 0.12) !important;
+}
+
+/* ── Artifact zoom controls ──────────────────────────────────────── */
+.artifact-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 5px;
+  padding: 1px 2px;
+  margin-right: 4px;
+}
+.artifact-zoom__btn {
+  width: 20px !important;
+  height: 20px !important;
+  border-radius: 3px !important;
+  color: rgba(255,255,255,0.55) !important;
+}
+.artifact-zoom__btn:hover {
+  color: rgba(255,255,255,0.9) !important;
+  background: rgba(255,255,255,0.08) !important;
+}
+.artifact-zoom__label {
+  min-width: 38px;
+  height: 20px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  color: rgba(255,255,255,0.6);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: center;
+  border-radius: 3px;
+  transition: background 0.15s, color 0.15s;
+}
+.artifact-zoom__label:hover {
+  background: rgba(255,255,255,0.07);
+  color: rgba(255,255,255,0.9);
+}
+
 /* MCP live pulse dot */
 .ctx-chip__pulse {
   width: 5px; height: 5px;
@@ -3978,12 +5238,15 @@ html[data-theme="light"] .kanban__col-count { background: #f0f0f2; }
 .agent-card__name { font-size: 13px; font-weight: 600; color: #e7e7ea; }
 .agent-card__type { font-size: 11px; color: #5a5a63; background: #0f0f11; border: 1px solid #27272c; border-radius: 4px; padding: 2px 7px; }
 .agent-card__edit, .agent-card__del {
-  width: 26px; height: 26px; border-radius: 6px; display: inline-grid; place-items: center;
-  background: transparent; border: 0; cursor: pointer; color: #5a5a63; transition: color 120ms, background 120ms;
+  width: 28px; height: 28px; border-radius: 6px; display: inline-grid; place-items: center;
+  background: transparent; border: 1px solid transparent; cursor: pointer; transition: color 120ms, background 120ms, border-color 120ms;
 }
-.agent-card__edit:hover { color: #d4d4d8; background: rgba(255,255,255,.05); }
-.agent-card__del:hover  { color: #c96442; background: rgba(201,100,66,.1); }
-.agent-card__edit svg, .agent-card__del svg { width: 12px; height: 12px; }
+.agent-card__edit { color: #5a5a63; }
+.agent-card__edit:hover { color: #d4d4d8; background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.08); }
+.agent-card__del  { color: #7a3a2a; }
+.agent-card__del:hover  { color: #e07050; background: rgba(201,100,66,.12); border-color: rgba(201,100,66,.25); }
+.agent-card__edit svg { width: 13px; height: 13px; }
+.agent-card__del svg  { width: 14px; height: 14px; }
 .agent-card__body { padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
 .agent-card__row  { display: flex; gap: 12px; font-size: 12px; }
 .agent-card__key  { color: #5a5a63; width: 70px; flex-shrink: 0; }
@@ -4013,9 +5276,141 @@ select.agent-form__input {
 }
 select.agent-form__input:focus { border-color: #5a5a63; }
 .agent-form__textarea {
-  resize: vertical; min-height: 72px; font-family: inherit;
+  resize: vertical; min-height: 80px; font-family: inherit;
   line-height: 1.55;
 }
+
+/* ── Agent form sections ──────────────────────────────────────── */
+.af-section-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: #44444e;
+  margin-top: 18px;
+  margin-bottom: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #1e1e24;
+}
+
+/* Tools section: 2-col grid */
+.af-tools-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+/* Chip input wrapper */
+.af-chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  background: #0b0b0c;
+  border: 1px solid #27272c;
+  border-radius: 7px;
+  padding: 6px 8px;
+  min-height: 36px;
+  cursor: text;
+  transition: border-color .12s;
+}
+.af-chip-wrap:focus-within { border-color: #5a5a63; }
+
+/* Individual chips */
+.af-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #1e1e28;
+  border: 1px solid #3a3a50;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #c0c0d8;
+  padding: 2px 6px;
+}
+.af-chip__x {
+  background: none;
+  border: none;
+  color: #666678;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 1px;
+  transition: color .1s;
+}
+.af-chip__x:hover { color: #e07050; }
+
+/* Chip text input */
+.af-chip-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #d0d0dc;
+  font-size: 12px;
+  font-family: inherit;
+  min-width: 80px;
+  flex: 1;
+}
+.af-chip-input::placeholder { color: #3a3a48; }
+
+/* Suggestion row below chip input */
+.af-chip-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+}
+.af-chip-sugg-label {
+  font-size: 10.5px;
+  color: #44444e;
+}
+.af-sugg-btn {
+  background: #161619;
+  border: 1px solid #2a2a34;
+  border-radius: 4px;
+  color: #6a6a80;
+  font-size: 11px;
+  font-family: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background .1s, color .1s;
+}
+.af-sugg-btn:hover { background: #1e1e28; color: #a0a0c0; }
+.af-sugg-btn--used { opacity: .35; cursor: default; pointer-events: none; }
+
+/* Permission badge on agent card */
+.ac-perm {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  border-radius: 4px;
+  padding: 2px 7px;
+  border: 1px solid;
+}
+.ac-perm--bypass { color: #d97757; background: rgba(217,119,87,.1); border-color: rgba(217,119,87,.3); }
+.ac-perm--accept { color: #7ab8f5; background: rgba(122,184,245,.08); border-color: rgba(122,184,245,.25); }
+.ac-perm--default { color: #666678; background: #161619; border-color: #2a2a34; }
+
+/* MCP / skill chips on agent card */
+.ac-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.ac-chip {
+  font-size: 10.5px;
+  border-radius: 4px;
+  padding: 1px 6px;
+  border: 1px solid;
+}
+.ac-chip--mcp   { color: #7ab8f5; background: rgba(122,184,245,.07); border-color: rgba(122,184,245,.2); }
+.ac-chip--skill { color: #a8d4a8; background: rgba(120,180,120,.07); border-color: rgba(120,180,120,.2); }
+
+/* light theme */
+html[data-theme="light"] .af-section-label { color: #a0a0b0; border-bottom-color: #e4e4e8; }
+html[data-theme="light"] .af-chip-wrap { background: #f8f8fb; border-color: #d8d8e0; }
+html[data-theme="light"] .af-chip { background: #ebebf4; border-color: #c8c8d8; color: #3030a0; }
+html[data-theme="light"] .af-sugg-btn { background: #f0f0f4; border-color: #d8d8e0; color: #7070a0; }
+html[data-theme="light"] .af-sugg-btn:hover { background: #e4e4ee; color: #3030a0; }
+html[data-theme="light"] .af-chip-input { color: #141416; }
 
 /* ── Knowledge Base in Console ── */
 .console-kb-layout {
@@ -4151,6 +5546,90 @@ select.agent-form__input:focus { border-color: #5a5a63; }
 .console-kb-status {
   padding: 5px 14px; font-size: 11px; min-height: 22px;
   border-top: 1px solid #1a1a1d; flex-shrink: 0; background: #0e0e10;
+}
+
+/* ── Memory page ── */
+.console-page--memory { padding: 24px 0 0; max-width: none; height: 100%; display: flex; flex-direction: column; }
+.console-page--memory .console-page__head { padding: 0 40px 20px; }
+
+.mem-layout {
+  display: grid; grid-template-columns: 200px 1fr;
+  flex: 1; min-height: 0; border-top: 1px solid #1a1a1d;
+}
+.mem-sidebar {
+  border-right: 1px solid #1a1a1d;
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+}
+.mem-sidebar__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 12px; font-size: 11px; font-weight: 600;
+  color: #5a5a63; letter-spacing: 0.06em; text-transform: uppercase;
+  border-bottom: 1px solid #1a1a1d; flex-shrink: 0;
+}
+.mem-add-btn {
+  background: none; border: 1px solid #2a2a2e; color: #8a8a94;
+  width: 20px; height: 20px; border-radius: 5px; font-size: 16px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background 120ms, color 120ms;
+}
+.mem-add-btn:hover { background: #2a2a2e; color: #e7e7ea; }
+
+.mem-file-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+
+.mem-new-input-row {
+  display: flex; align-items: center; gap: 3px;
+  padding: 5px 10px; border-bottom: 1px solid #1a1a1d;
+}
+.mem-new-input {
+  flex: 1; background: #1a1a1d; border: 1px solid rgba(217,119,87,0.5);
+  border-radius: 4px; color: #e7e7ea; font-size: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  padding: 4px 7px; outline: none;
+}
+.mem-new-input:focus { border-color: #d97757; }
+.mem-new-ext {
+  font-size: 11px; color: rgba(217,119,87,0.6);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  flex-shrink: 0;
+}
+.mem-file-item {
+  width: 100%; display: flex; align-items: center; gap: 7px;
+  padding: 7px 12px; border: none; background: none; cursor: pointer;
+  color: #8a8a94; font-size: 12px; text-align: left; transition: background 120ms, color 120ms;
+}
+.mem-file-item svg { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.5; }
+.mem-file-item:hover { background: #1a1a1d; color: #c7c7cd; }
+.mem-file-item.is-active { background: rgba(217,119,87,0.1); color: #d97757; }
+.mem-file-item.is-active svg { opacity: 1; }
+
+.mem-editor {
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+}
+.mem-editor__bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px; border-bottom: 1px solid #1a1a1d; flex-shrink: 0;
+  background: #0e0e10;
+}
+.mem-editor__filename {
+  font-size: 12px; font-weight: 600; color: #8a8a94;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.mem-textarea {
+  flex: 1; background: #0b0b0c; border: none; outline: none;
+  color: #c7c7cd; font-size: 13px; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  padding: 16px 18px; line-height: 1.65; resize: none; min-height: 0;
+}
+.mem-textarea::-webkit-scrollbar { width: 5px; }
+.mem-textarea::-webkit-scrollbar-thumb { background: #27272c; border-radius: 999px; }
+.mem-status {
+  padding: 5px 14px; font-size: 11px; min-height: 22px;
+  border-top: 1px solid #1a1a1d; flex-shrink: 0; background: #0e0e10;
+}
+.console-btn--danger {
+  color: #e07070 !important; border-color: rgba(224,112,112,0.3) !important;
+}
+.console-btn--danger:hover {
+  background: rgba(224,112,112,0.12) !important; border-color: rgba(224,112,112,0.6) !important;
 }
 
 /* ── About ── */

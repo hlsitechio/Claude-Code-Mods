@@ -1,0 +1,5 @@
+/* Tailwind CSS directives — processed by Vite + PostCSS at build/serve time.
+   This replaces the CDN <script> that was fetched on every launch.          */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

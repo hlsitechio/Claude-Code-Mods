@@ -5,16 +5,20 @@ import fs   from 'fs'
 // Vite plugin: copy classic (non-module) scripts to dist/ after every build.
 // Vite intentionally skips bundling <script src> without type="module",
 // so we copy them verbatim so they're available at file:// in Electron.
+// Each entry can be:
+//   'relative/path.js'              → copied to dist/path.js
+//   { src: 'some/path.js', dst: 'name.js' } → copied to dist/name.js
 function copyClassicScripts(files) {
   return {
     name: 'copy-classic-scripts',
     apply: 'build',
     closeBundle() {
-      for (const file of files) {
-        const src = path.resolve(file);
-        const dst = path.resolve('dist', path.basename(file));
+      for (const entry of files) {
+        const src = path.resolve(typeof entry === 'string' ? entry : entry.src);
+        const dstName = typeof entry === 'string' ? path.basename(entry) : entry.dst;
+        const dst = path.resolve('dist', dstName);
         fs.copyFileSync(src, dst);
-        console.log(`[copy-classic-scripts] ${file} → dist/${path.basename(file)}`);
+        console.log(`[copy-classic-scripts] ${src} → dist/${dstName}`);
       }
     },
   };
@@ -26,7 +30,9 @@ export default defineConfig({
   // Electron loads via file:// and absolute /assets/... paths break.
   base: './',
   plugins: [
-    copyClassicScripts(['icons.js', 'app.js']),
+    copyClassicScripts(['icons.js', 'workspace.js', 'app.js']),
+    // tailwind.css is a Vite-processed stylesheet (not a classic script) —
+    // Vite handles it automatically via the <link> in index.html.
   ],
   server: {
     port: 5182,

@@ -61,10 +61,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // ── Streaming chat ────────────────────────────────────────────────────────
+  // Legacy (main chat — no requestId, uses 'claude:chunk' / 'claude:done')
   sendMessage: (messages, model, system, cliSessionId, permMode) =>
     ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId, permMode }),
 
-  abort: () => ipcRenderer.invoke('claude:abort'),
+  // Per-stream (split chats) — each call gets its own scoped IPC channels
+  sendMessageFor: (messages, model, system, cliSessionId, permMode, requestId) =>
+    ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId, permMode, requestId }),
+
+  abort: (requestId) => ipcRenderer.invoke('claude:abort', requestId),
 
   onChunk: (cb) => {
     const handler = (_, text) => cb(text);
@@ -76,6 +81,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_, stats) => cb(stats);
     ipcRenderer.once('claude:done', handler);
     return () => ipcRenderer.removeListener('claude:done', handler);
+  },
+
+  // Scoped listeners for parallel streams
+  onChunkFor: (requestId, cb) => {
+    const ch = `claude:chunk:${requestId}`;
+    const handler = (_, text) => cb(text);
+    ipcRenderer.on(ch, handler);
+    return () => ipcRenderer.removeListener(ch, handler);
+  },
+
+  onDoneFor: (requestId, cb) => {
+    const ch = `claude:done:${requestId}`;
+    const handler = (_, stats) => cb(stats);
+    ipcRenderer.once(ch, handler);
+    return () => ipcRenderer.removeListener(ch, handler);
   },
 
   onTodoUpdate: (cb) => {
@@ -99,7 +119,53 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Agents persistence ────────────────────────────────────────────────────
   agents: {
-    save: (list) => ipcRenderer.invoke('agents:save', list),
+    save:    (list) => ipcRenderer.invoke('agents:save', list),
+    loadAll: ()     => ipcRenderer.invoke('agents:load-all'),
+  },
+
+  // ── Memory files ─────────────────────────────────────────────────────────
+  memory: {
+    list:    ()              => ipcRenderer.invoke('memory:list'),
+    read:    (id)            => ipcRenderer.invoke('memory:read', id),
+    write:   (id, content)   => ipcRenderer.invoke('memory:write', { id, content }),
+    delete:  (id)            => ipcRenderer.invoke('memory:delete', id),
+    loadAll: ()              => ipcRenderer.invoke('memory:load-all'),
+  },
+
+  // ── Session persistence (disk-backed) ────────────────────────────────────
+  sessions: {
+    loadMeta:   ()         => ipcRenderer.invoke('sessions:load-meta'),
+    saveMeta:   (meta)     => ipcRenderer.invoke('sessions:save-meta', meta),
+    loadMsgs:   (id)       => ipcRenderer.invoke('sessions:load-msgs', id),
+    saveMsgs:   (id, msgs) => ipcRenderer.invoke('sessions:save-msgs', id, msgs),
+    deleteMsgs: (id)       => ipcRenderer.invoke('sessions:delete-msgs', id),
+  },
+
+  // ── Embedded terminal ─────────────────────────────────────────────────────
+  terminal: {
+    create: (opts)          => ipcRenderer.invoke('terminal:create', opts || {}),
+    input:  (termId, data)  => ipcRenderer.send('terminal:input', { termId, data }),
+    close:  (termId)        => ipcRenderer.send('terminal:close', termId),
+    onData: (termId, cb) => {
+      const ch = `terminal:data:${termId}`;
+      const handler = (_, text) => cb(text);
+      ipcRenderer.on(ch, handler);
+      return () => ipcRenderer.removeListener(ch, handler);
+    },
+    onExit: (termId, cb) => {
+      const ch = `terminal:exit:${termId}`;
+      const handler = (_, code) => cb(code);
+      ipcRenderer.once(ch, handler);
+      return () => ipcRenderer.removeListener(ch, handler);
+    },
+  },
+
+  // ── Codeblock persistent library ─────────────────────────────────────────
+  codeblocks: {
+    save:   (name, html, lang, source) => ipcRenderer.invoke('codeblock:save',   { name, html, lang, source }),
+    load:   (id)                       => ipcRenderer.invoke('codeblock:load',   id),
+    update: (id, html, lang, source)   => ipcRenderer.invoke('codeblock:update', { id, html, lang, source }),
+    list:   ()                         => ipcRenderer.invoke('codeblock:list'),
   },
 
   // ── File-system explorer ──────────────────────────────────────────────────

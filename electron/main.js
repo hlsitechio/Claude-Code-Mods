@@ -4,8 +4,9 @@ const {
   app, BrowserWindow, Menu, Tray, shell,
   ipcMain, globalShortcut, Notification, nativeImage,
 } = require('electron');
-const path = require('path');
-const fs   = require('fs');
+const path     = require('path');
+const fs       = require('fs');
+const { spawn } = require('child_process');
 
 // Dev: not packaged AND not explicitly forced to production
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production';
@@ -37,36 +38,62 @@ function saveWindowState(win) {
 
 let tray = null;
 
-function getTrayIconPath() {
-  const base = app.isPackaged
-    ? path.join(process.resourcesPath)
-    : path.join(__dirname, '../release/win-unpacked/resources');
-  // Dark tray icon for Windows
-  const ico = path.join(base, 'Tray-Win32-Dark.ico');
-  if (fs.existsSync(ico)) return ico;
-  // Fallback: build-time resource next to main.js
-  return path.join(__dirname, '../public/icon.png');
-}
-
 function createTray(mainWin) {
   try {
-    const iconPath = getTrayIconPath();
-    const img  = nativeImage.createFromPath(iconPath);
-    tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
-    tray.setToolTip('Claude Code');
+    // Prefer tray-icon.ico (Windows native, no rasterisation needed),
+    // then PNG, then a generated orange circle as last resort.
+    const candidates = [
+      path.join(__dirname, 'tray-icon.ico'),
+      path.join(__dirname, 'tray-icon.png'),
+    ];
+
+    let img = null;
+    for (const f of candidates) {
+      if (fs.existsSync(f)) {
+        const candidate = nativeImage.createFromPath(f);
+        if (!candidate.isEmpty()) { img = candidate; break; }
+      }
+    }
+
+    if (!img || img.isEmpty()) img = makeFallbackIcon();
+
+    tray = new Tray(img);
+    tray.setToolTip('Claude Code Mods');
 
     const menu = Menu.buildFromTemplate([
       { label: 'Show Claude Code', click: () => { mainWin.show(); mainWin.focus(); } },
       { type: 'separator' },
-      { label: 'Quit',             click: () => { app.isQuiting = true; app.quit(); } },
+      { label: 'Quit', click: () => { app.isQuiting = true; app.quit(); } },
     ]);
     tray.setContextMenu(menu);
-
     tray.on('click',        () => { mainWin.isVisible() ? mainWin.hide() : mainWin.show(); });
     tray.on('double-click', () => { mainWin.show(); mainWin.focus(); });
   } catch (e) {
     console.error('[tray]', e.message);
   }
+}
+
+/** Last-resort: generated orange circle, no external files needed */
+function makeFallbackIcon() {
+  const zlib = require('zlib');
+  const size = 32, [R, G, B] = [0xd9, 0x77, 0x57];
+  const cx = size / 2, cy = size / 2, rad = size / 2 - 1;
+  const raw = Buffer.alloc(size * (1 + size * 4));
+  for (let y = 0; y < size; y++) {
+    const rb = y * (1 + size * 4); raw[rb] = 0;
+    for (let x = 0; x < size; x++) {
+      const off = rb + 1 + x * 4;
+      const a = Math.round(Math.max(0, Math.min(1, rad - Math.hypot(x - cx + .5, y - cy + .5) + .5)) * 255);
+      raw[off] = R; raw[off+1] = G; raw[off+2] = B; raw[off+3] = a;
+    }
+  }
+  const crc32 = b => { let c=0xFFFFFFFF; for(const v of b){c^=v;for(let j=0;j<8;j++)c=(c>>>1)^(c&1?0xEDB88320:0);} return(c^0xFFFFFFFF)>>>0; };
+  const chunk = (t,d) => { const l=Buffer.allocUnsafe(4);l.writeUInt32BE(d.length);const td=Buffer.concat([Buffer.from(t,'ascii'),d]);const c=Buffer.allocUnsafe(4);c.writeUInt32BE(crc32(td));return Buffer.concat([l,td,c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(size,0); ihdr.writeUInt32BE(size,4); ihdr[8]=8; ihdr[9]=6;
+  return nativeImage.createFromBuffer(Buffer.concat([
+    Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]),
+    chunk('IHDR',ihdr), chunk('IDAT',zlib.deflateSync(raw)), chunk('IEND',Buffer.alloc(0)),
+  ]));
 }
 
 // ── About window ─────────────────────────────────────────────────────────────
@@ -197,13 +224,28 @@ function createWindow() {
     win.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
-  // Suppress harmless DevTools Protocol errors (Autofill CDP commands unsupported in Electron).
-  // Electron 20+ passes a single event object; older builds pass (event, level, message, ...).
-  win.webContents.on('console-message', (eventOrLevel, maybeMsg) => {
-    const msg = typeof eventOrLevel === 'object' && eventOrLevel.message
-      ? eventOrLevel.message
-      : (typeof maybeMsg === 'string' ? maybeMsg : '');
+  // Forward renderer console messages to terminal (errors & warnings visible in npm run output).
+  // Suppress harmless DevTools Protocol noise (Autofill CDP commands unsupported in Electron).
+  win.webContents.on('console-message', (eventOrLevel, maybeMsg, maybeLine, maybeSource) => {
+    const isObj = typeof eventOrLevel === 'object' && eventOrLevel !== null;
+    const msg    = isObj ? (eventOrLevel.message || '') : (typeof maybeMsg === 'string' ? maybeMsg : '');
+    const level  = isObj ? (eventOrLevel.level  || 0)  : 0;  // 1=info,2=warn,3=error
     if (msg.includes('Autofill.enable') || msg.includes('Autofill.setAddresses')) return;
+    if (level >= 2) {
+      // Show warnings and errors in the Electron terminal so they're visible
+      const prefix = level >= 3 ? '[RENDERER ERROR]' : '[RENDERER WARN]';
+      console.log(prefix, msg.slice(0, 400));
+    }
+  });
+
+  // F12 / Ctrl+Shift+I → open DevTools (always available in dev)
+  win.webContents.on('before-input-event', (_, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) {
+      win.webContents.isDevToolsOpened()
+        ? win.webContents.closeDevTools()
+        : win.webContents.openDevTools({ mode: 'detach' });
+    }
   });
 
   // External links → default browser
@@ -329,12 +371,12 @@ ipcMain.handle('claude:sign-out', () => {
 
 // ── IPC: streaming chat ──────────────────────────────────────────────────────
 
-ipcMain.handle('claude:send', async (event, { messages, model, system, cliSessionId, permMode }) => {
-  return getClaudeService().streamMessage(event, messages, model, system, cliSessionId, permMode);
+ipcMain.handle('claude:send', async (event, { messages, model, system, cliSessionId, permMode, requestId }) => {
+  return getClaudeService().streamMessage(event, messages, model, system, cliSessionId, permMode, requestId);
 });
 
-ipcMain.handle('claude:abort', () => {
-  return getClaudeService().abortCurrentStream();
+ipcMain.handle('claude:abort', (_, requestId) => {
+  return getClaudeService().abortCurrentStream(requestId);
 });
 
 // ── IPC: knowledge-base file editor ──────────────────────────────────────────
@@ -378,6 +420,106 @@ ipcMain.handle('kb:write', async (_, { id, content }) => {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+});
+
+// ── IPC: codeblock library ───────────────────────────────────────────────────
+// Persistent artifact store: codeblocks/{name}/codeblock_XXXXXX.html
+// Each block gets a globally unique 6-digit zero-padded ID.
+
+const CB_ROOT        = path.join(__dirname, '..', 'codeblocks');
+const CB_COUNTER_FILE = path.join(CB_ROOT, '.counter.json');
+
+function cbEnsureRoot() {
+  fs.mkdirSync(CB_ROOT, { recursive: true });
+}
+
+function cbNextId() {
+  cbEnsureRoot();
+  let counter = 0;
+  try { counter = JSON.parse(fs.readFileSync(CB_COUNTER_FILE, 'utf8')).next || 0; } catch {}
+  const id = counter + 1;
+  fs.writeFileSync(CB_COUNTER_FILE, JSON.stringify({ next: id }), 'utf8');
+  return String(id).padStart(6, '0');
+}
+
+function cbIdToPath(id) {
+  // Scan all subdirs for a file matching codeblock_{id}.html
+  cbEnsureRoot();
+  for (const sub of fs.readdirSync(CB_ROOT, { withFileTypes: true })) {
+    if (!sub.isDirectory()) continue;
+    const candidate = path.join(CB_ROOT, sub.name, `codeblock_${id}.html`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+ipcMain.handle('codeblock:save', async (_, { name, html, lang, source }) => {
+  cbEnsureRoot();
+  const id      = cbNextId();
+  const slug    = (name || 'untitled').toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 32);
+  const dir     = path.join(CB_ROOT, slug);
+  fs.mkdirSync(dir, { recursive: true });
+  const filename = `codeblock_${id}.html`;
+  const filePath = path.join(dir, filename);
+  fs.writeFileSync(filePath, html, 'utf8');
+  // Sidecar — stores the original source code + language for edit context
+  if (source && lang) {
+    const metaPath = path.join(dir, `codeblock_${id}.meta.json`);
+    fs.writeFileSync(metaPath, JSON.stringify({ lang, source }), 'utf8');
+  }
+  return { id, slug, filename, filePath };
+});
+
+ipcMain.handle('codeblock:load', async (_, id) => {
+  const filePath = cbIdToPath(id);
+  if (!filePath) return { ok: false, error: `codeblock_${id} not found` };
+  try {
+    const html = fs.readFileSync(filePath, 'utf8');
+    // Load sidecar if it exists
+    const metaPath = filePath.replace(/\.html$/, '.meta.json');
+    let lang = 'html', source = null;
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      lang   = meta.lang   || 'html';
+      source = meta.source || null;
+    } catch {}
+    return { ok: true, html, lang, source, filePath };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('codeblock:update', async (_, { id, html, lang, source }) => {
+  const filePath = cbIdToPath(id);
+  if (!filePath) return { ok: false, error: `codeblock_${id} not found` };
+  try {
+    fs.writeFileSync(filePath, html, 'utf8');
+    if (source && lang) {
+      const metaPath = filePath.replace(/\.html$/, '.meta.json');
+      fs.writeFileSync(metaPath, JSON.stringify({ lang, source }), 'utf8');
+    }
+    return { ok: true, filePath };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('codeblock:list', async () => {
+  cbEnsureRoot();
+  const results = [];
+  for (const sub of fs.readdirSync(CB_ROOT, { withFileTypes: true })) {
+    if (!sub.isDirectory() || sub.name.startsWith('.')) continue;
+    const subDir = path.join(CB_ROOT, sub.name);
+    for (const f of fs.readdirSync(subDir)) {
+      const m = f.match(/^codeblock_(\d+)\.html$/);
+      if (!m) continue;
+      const stat = fs.statSync(path.join(subDir, f));
+      results.push({ id: m[1], slug: sub.name, filename: f,
+                     filePath: path.join(subDir, f), mtime: stat.mtimeMs });
+    }
+  }
+  results.sort((a, b) => Number(a.id) - Number(b.id));
+  return results;
 });
 
 // ── IPC: file-system explorer ────────────────────────────────────────────────
@@ -463,11 +605,53 @@ ipcMain.handle('shell:open', async (_, filePath) => {
 
 // ── IPC: agents persistence ────────────────────────────────────────────────
 const AGENTS_FILE = path.join(APP_ROOT, 'agents.json');
+const AGENTS_DIR  = path.join(APP_ROOT, 'agents');
+
+// Ensure agents/ directory exists
+fs.mkdirSync(AGENTS_DIR, { recursive: true });
+
+// Load all agents: agents/ directory (primary) + agents.json (fallback/legacy)
+ipcMain.handle('agents:load-all', () => {
+  const byName = new Map();
+
+  // 1. Legacy combined file (lower priority — directory files win)
+  try {
+    const list = JSON.parse(fs.readFileSync(AGENTS_FILE, 'utf8'));
+    if (Array.isArray(list)) list.forEach(a => { if (a.name) byName.set(a.name, a); });
+  } catch (_) {}
+
+  // 2. Per-agent .json files in agents/ directory (higher priority)
+  try {
+    for (const fname of fs.readdirSync(AGENTS_DIR)) {
+      if (!fname.endsWith('.json')) continue;
+      try {
+        const a = JSON.parse(fs.readFileSync(path.join(AGENTS_DIR, fname), 'utf8'));
+        if (a && a.name) byName.set(a.name, a);
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  return [...byName.values()];
+});
 
 ipcMain.handle('agents:save', async (_, agents) => {
   try {
-    // Write structured JSON for the CLI / sub-agent system
+    // Write combined agents.json (backward compat for CLI)
     fs.writeFileSync(AGENTS_FILE, JSON.stringify(agents, null, 2), 'utf8');
+
+    // Write one .json per agent into agents/ directory
+    fs.mkdirSync(AGENTS_DIR, { recursive: true });
+    // Clean up old files first, then rewrite
+    try {
+      for (const f of fs.readdirSync(AGENTS_DIR)) {
+        if (f.endsWith('.json')) fs.unlinkSync(path.join(AGENTS_DIR, f));
+      }
+    } catch (_) {}
+    for (const a of agents) {
+      const safe = (a.name || 'agent').replace(/[^a-zA-Z0-9_\-]/g, '_');
+      fs.writeFileSync(path.join(AGENTS_DIR, safe + '.json'), JSON.stringify(a, null, 2), 'utf8');
+    }
+
 
     // Also regenerate skills/agents.md so CLAUDE.md @import picks it up
     const lines = [
@@ -493,5 +677,198 @@ ipcMain.handle('agents:save', async (_, agents) => {
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
+  }
+});
+
+// ── IPC: session persistence (disk-backed, survives app reinstalls) ──────────
+// Replaces localStorage for session list, message histories, and app state.
+// Layout:
+//   full_install/sessions/metadata.json  — session list + app state
+//   full_install/sessions/{id}.json      — messages for each session
+
+const SESSIONS_ROOT  = path.join(APP_ROOT, 'sessions');
+const SESSIONS_META  = path.join(SESSIONS_ROOT, 'metadata.json');
+
+function sessEnsureRoot() {
+  fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
+}
+
+ipcMain.handle('sessions:load-meta', () => {
+  sessEnsureRoot();
+  try { return JSON.parse(fs.readFileSync(SESSIONS_META, 'utf8')); }
+  catch { return null; }
+});
+
+ipcMain.handle('sessions:save-meta', async (_, meta) => {
+  sessEnsureRoot();
+  try {
+    fs.writeFileSync(SESSIONS_META, JSON.stringify(meta, null, 2), 'utf8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('sessions:load-msgs', (_, id) => {
+  sessEnsureRoot();
+  const filePath = path.join(SESSIONS_ROOT, `${id}.json`);
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+  catch { return []; }
+});
+
+ipcMain.handle('sessions:save-msgs', async (_, id, msgs) => {
+  sessEnsureRoot();
+  const filePath = path.join(SESSIONS_ROOT, `${id}.json`);
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(msgs), 'utf8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('sessions:delete-msgs', async (_, id) => {
+  sessEnsureRoot();
+  const filePath = path.join(SESSIONS_ROOT, `${id}.json`);
+  try { fs.unlinkSync(filePath); } catch {}
+  return { ok: true };
+});
+
+// ── IPC: memory files ──────────────────────────────────────────────────────
+// Persistent user memory: full_install/memory/*.md
+// All .md files are injected into the system prompt automatically on every send.
+
+const MEMORY_ROOT = path.join(APP_ROOT, 'memory');
+
+function memEnsureRoot() {
+  fs.mkdirSync(MEMORY_ROOT, { recursive: true });
+}
+
+// Returns an array of { id, label } for all .md files in memory/
+ipcMain.handle('memory:list', () => {
+  memEnsureRoot();
+  try {
+    return fs.readdirSync(MEMORY_ROOT)
+      .filter(f => f.endsWith('.md'))
+      .sort()
+      .map(f => ({ id: f, label: f }));
+  } catch { return []; }
+});
+
+// Read a single memory file by filename (e.g. "user.md")
+ipcMain.handle('memory:read', async (_, id) => {
+  memEnsureRoot();
+  const filePath = path.join(MEMORY_ROOT, path.basename(id));
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    return { ok: true, content };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Write / overwrite a memory file
+ipcMain.handle('memory:write', async (_, { id, content }) => {
+  memEnsureRoot();
+  const filePath = path.join(MEMORY_ROOT, path.basename(id));
+  try {
+    fs.writeFileSync(filePath, content, 'utf8');
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Delete a memory file
+ipcMain.handle('memory:delete', async (_, id) => {
+  const filePath = path.join(MEMORY_ROOT, path.basename(id));
+  try { fs.unlinkSync(filePath); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Load ALL memory files concatenated — used for system-prompt injection
+ipcMain.handle('memory:load-all', () => {
+  memEnsureRoot();
+  try {
+    const files = fs.readdirSync(MEMORY_ROOT).filter(f => f.endsWith('.md')).sort();
+    const parts = files.map(f => {
+      try { return fs.readFileSync(path.join(MEMORY_ROOT, f), 'utf8').trim(); }
+      catch { return null; }
+    }).filter(Boolean);
+    return parts.join('\n\n');
+  } catch { return ''; }
+});
+
+// ── IPC: embedded terminal ─────────────────────────────────────────────────
+// Spawns a real shell (PowerShell on Windows, bash/zsh on macOS/Linux) and
+// wires its stdin/stdout/stderr to the renderer via IPC events.
+// Multiple terminal instances are supported via a termId integer.
+
+const terminals = new Map(); // termId → { proc, sender }
+let _nextTermId  = 1;
+
+function getShellConfig() {
+  const platform = process.platform;
+  if (platform === 'win32') {
+    // Prefer PowerShell 7 (pwsh), fall back to Windows PowerShell
+    return { cmd: 'pwsh.exe', args: ['-NoLogo'], fallback: 'powershell.exe' };
+  }
+  if (platform === 'darwin') {
+    return { cmd: process.env.SHELL || '/bin/zsh', args: [] };
+  }
+  return { cmd: process.env.SHELL || '/bin/bash', args: [] };
+}
+
+ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
+  const termId  = _nextTermId++;
+  const workDir = cwd || APP_ROOT;
+  const { cmd, args, fallback } = getShellConfig();
+
+  const spawnShell = (exe) => spawn(exe, args || [], {
+    cwd:   workDir,
+    env:   { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+    windowsHide: true,
+  });
+
+  let proc;
+  try {
+    proc = spawnShell(cmd);
+  } catch {
+    if (fallback) {
+      try { proc = spawnShell(fallback); }
+      catch (e2) { return { ok: false, error: e2.message }; }
+    } else {
+      return { ok: false, error: `Could not spawn ${cmd}` };
+    }
+  }
+
+  const sender = event.sender;
+  terminals.set(termId, { proc, sender });
+
+  const send = (channel, payload) => {
+    if (!sender.isDestroyed()) sender.send(channel, payload);
+  };
+
+  proc.stdout.on('data', (d) => send(`terminal:data:${termId}`, d.toString('utf8')));
+  proc.stderr.on('data', (d) => send(`terminal:data:${termId}`, d.toString('utf8')));
+  proc.on('exit', (code) => {
+    send(`terminal:exit:${termId}`, code ?? 0);
+    terminals.delete(termId);
+  });
+  proc.on('error', (err) => {
+    send(`terminal:data:${termId}`, `\r\n\x1b[31m[shell error: ${err.message}]\x1b[0m\r\n`);
+  });
+
+  return { ok: true, termId, cwd: workDir };
+});
+
+ipcMain.on('terminal:input', (_, { termId, data }) => {
+  const t = terminals.get(termId);
+  if (t && !t.proc.killed) {
+    try { t.proc.stdin.write(data); } catch { /* stdin may be closed */ }
+  }
+});
+
+ipcMain.on('terminal:close', (_, termId) => {
+  const t = terminals.get(termId);
+  if (t) {
+    try { t.proc.kill(); } catch { /* already dead */ }
+    terminals.delete(termId);
   }
 });
