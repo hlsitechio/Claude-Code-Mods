@@ -31,6 +31,9 @@ agents/Crowbyte_Ops.json
 agents/Code_Reviewer.json
 agents/Hacker.json
 
+# Runtime workspace state (auto-generated, instance-specific)
+workspace-index.json
+
 # Env / secrets
 .env
 .env.*
