@@ -24,7 +24,10 @@ const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
 
 function loadWindowState() {
   try { return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')); }
-  catch { return { width: 1360, height: 860, x: undefined, y: undefined, maximized: false }; }
+  catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[window-state] reset:', e.message);
+    return { width: 1360, height: 860, x: undefined, y: undefined, maximized: false };
+  }
 }
 function saveWindowState(win) {
   try {
@@ -182,7 +185,13 @@ function createWindow() {
   }
   startFsWatcher();
 
-  win.on('closed', () => { _fsWatcher?.close(); _fsWatcher = null; });
+  win.on('closed', () => {
+    _fsWatcher?.close();
+    _fsWatcher = null;
+    // Drain any pending debounce timers so they don't fire on a destroyed window.
+    for (const t of _fsDebounce.values()) clearTimeout(t);
+    _fsDebounce.clear();
+  });
 
   if (state.maximized) win.maximize();
 
@@ -311,10 +320,14 @@ ipcMain.on('find:stop',   ()          => mainWin?.webContents.stopFindInPage('cl
 // About window
 ipcMain.on('app:about', openAboutWindow);
 
-// Desktop notifications
-ipcMain.on('notify', (_, { title, body }) => {
+// Desktop notifications. Coerce + cap renderer-supplied strings — the OS will
+// happily render very long titles/bodies and they look like garbage in the
+// system notification centre.
+ipcMain.on('notify', (_, payload) => {
   if (!Notification.isSupported()) return;
-  new Notification({ title: title || 'Claude Code', body, silent: false }).show();
+  const t = typeof payload?.title === 'string' ? payload.title.slice(0, 120) : 'Claude Code';
+  const b = typeof payload?.body === 'string' ? payload.body.slice(0, 500) : '';
+  new Notification({ title: t || 'Claude Code', body: b, silent: false }).show();
 });
 
 // ── IPC: API key management ──────────────────────────────────────────────────
@@ -357,7 +370,7 @@ ipcMain.handle('claude:sign-out', () => {
   getClaudeService().clearRawApiKey();
   try {
     const credPath = path.join(
-      process.env.USERPROFILE || process.env.HOME || '~',
+      process.env.USERPROFILE || process.env.HOME || require('os').homedir(),
       '.claude', '.credentials.json'
     );
     if (fs.existsSync(credPath)) {
@@ -598,18 +611,26 @@ ipcMain.handle('notes:list', async () => {
   }).sort((a, b) => b.mtime - a.mtime);
 });
 
+function notesResolve(id) {
+  if (typeof id !== 'string' || !id) return null;
+  const filePath = path.resolve(path.join(NOTES_ROOT, path.basename(id)));
+  const rel = path.relative(NOTES_ROOT, filePath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return filePath;
+}
+
 ipcMain.handle('notes:read', async (_, id) => {
   notesEnsure();
-  const filePath = path.resolve(path.join(NOTES_ROOT, path.basename(id)));
-  if (!filePath.startsWith(NOTES_ROOT)) return { ok: false, error: 'Invalid path' };
+  const filePath = notesResolve(id);
+  if (!filePath) return { ok: false, error: 'Invalid path' };
   try { return { ok: true, content: fs.readFileSync(filePath, 'utf8') }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('notes:write', async (_, { id, content }) => {
   notesEnsure();
-  const filePath = path.resolve(path.join(NOTES_ROOT, path.basename(id)));
-  if (!filePath.startsWith(NOTES_ROOT)) return { ok: false };
+  const filePath = notesResolve(id);
+  if (!filePath) return { ok: false, error: 'Invalid path' };
   try { fs.writeFileSync(filePath, content, 'utf8'); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
@@ -626,24 +647,38 @@ ipcMain.handle('notes:create', async (_, { title }) => {
 });
 
 ipcMain.handle('notes:delete', async (_, id) => {
-  const filePath = path.resolve(path.join(NOTES_ROOT, path.basename(id)));
-  if (!filePath.startsWith(NOTES_ROOT)) return { ok: false };
+  const filePath = notesResolve(id);
+  if (!filePath) return { ok: false, error: 'Invalid path' };
   try { fs.unlinkSync(filePath); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 });
 
 // ── IPC: file-system explorer ────────────────────────────────────────────────
-const FS_ROOT   = path.join(__dirname, '../..'); // G:\claude_code_mod
+const FS_ROOT   = path.resolve(path.join(__dirname, '../..')); // G:\claude_code_mod
 const FS_IGNORE = new Set([
   'node_modules', '.git', 'dist', 'release', '.cache',
   'coverage', '__pycache__', '.pytest_cache', '.parcel-cache',
 ]);
 
+// Reject any path that escapes FS_ROOT. Returns the resolved path on success,
+// or null if the input would leave the sandbox. Uses path.relative so we can't
+// be tricked by /fs-root-evil prefix matches.
+function safeResolveUnder(root, input) {
+  if (typeof input !== 'string' || !input) return null;
+  const resolved = path.resolve(input);
+  const rel = path.relative(root, resolved);
+  if (rel === '') return resolved;
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return resolved;
+}
+
 ipcMain.handle('fs:root', () => FS_ROOT);
 
 ipcMain.handle('fs:mkdir', async (_, dirPath) => {
+  const resolved = safeResolveUnder(FS_ROOT, dirPath);
+  if (!resolved) return { ok: false, error: 'Path outside workspace' };
   try {
-    fs.mkdirSync(path.resolve(dirPath), { recursive: true });
+    fs.mkdirSync(resolved, { recursive: true });
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -651,7 +686,8 @@ ipcMain.handle('fs:mkdir', async (_, dirPath) => {
 });
 
 ipcMain.handle('fs:list', async (_, dirPath) => {
-  const resolved = path.resolve(dirPath || FS_ROOT);
+  const resolved = dirPath ? safeResolveUnder(FS_ROOT, dirPath) : FS_ROOT;
+  if (!resolved) return { ok: false, error: 'Path outside workspace' };
   try {
     const raw = await fs.promises.readdir(resolved, { withFileTypes: true });
     const entries = raw
@@ -672,7 +708,8 @@ ipcMain.handle('fs:list', async (_, dirPath) => {
 });
 
 ipcMain.handle('fs:read', async (_, filePath) => {
-  const resolved = path.resolve(filePath);
+  const resolved = safeResolveUnder(FS_ROOT, filePath);
+  if (!resolved) return { ok: false, error: 'Path outside workspace' };
   try {
     const stat = await fs.promises.stat(resolved);
     if (stat.size > 2 * 1024 * 1024) return { ok: false, error: 'File too large (>2 MB)' };
@@ -684,7 +721,8 @@ ipcMain.handle('fs:read', async (_, filePath) => {
 });
 
 ipcMain.handle('fs:writeText', async (_, filePath, content) => {
-  const resolved = path.resolve(filePath);
+  const resolved = safeResolveUnder(FS_ROOT, filePath);
+  if (!resolved) return { ok: false, error: 'Path outside workspace' };
   try {
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     await fs.promises.writeFile(resolved, content, 'utf8');
@@ -695,8 +733,10 @@ ipcMain.handle('fs:writeText', async (_, filePath, content) => {
 });
 
 ipcMain.handle('fs:exists', async (_, filePath) => {
+  const resolved = safeResolveUnder(FS_ROOT, filePath);
+  if (!resolved) return { exists: false };
   try {
-    const stat = await fs.promises.stat(path.resolve(filePath));
+    const stat = await fs.promises.stat(resolved);
     return { exists: true, isDir: stat.isDirectory(), isFile: stat.isFile() };
   } catch {
     return { exists: false };
@@ -704,8 +744,9 @@ ipcMain.handle('fs:exists', async (_, filePath) => {
 });
 
 ipcMain.handle('shell:open', async (_, filePath) => {
+  const resolved = safeResolveUnder(FS_ROOT, filePath);
+  if (!resolved) return { ok: false, error: 'Path outside workspace' };
   try {
-    const resolved = path.resolve(filePath);
     await shell.openPath(resolved);
     return { ok: true };
   } catch (e) {
@@ -927,7 +968,13 @@ function getShellConfig() {
 
 ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
   const termId  = _nextTermId++;
-  const workDir = cwd || APP_ROOT;
+  // Confine the terminal's starting directory to the workspace. Anything
+  // missing, malformed, or outside FS_ROOT falls back to APP_ROOT.
+  let workDir = APP_ROOT;
+  if (typeof cwd === 'string' && cwd) {
+    const resolved = safeResolveUnder(FS_ROOT, cwd);
+    if (resolved) workDir = resolved;
+  }
   const { cmd, args, fallback } = getShellConfig();
 
   const spawnShell = (exe) => spawn(exe, args || [], {
