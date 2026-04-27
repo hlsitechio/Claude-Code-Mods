@@ -21,8 +21,8 @@ const SCOPES           = 'user:profile user:inference user:sessions:claude_code 
 
 // Where the Claude Code CLI stores OAuth credentials
 const CLI_CREDS_PATH   = path.join(
-  process.env.USERPROFILE || process.env.HOME || '~',
-  '.claude', '.credentials.json'
+  process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || process.env.USERPROFILE || '~', '.claude'),
+  '.credentials.json'
 );
 
 // Our own encrypted API-key config (for users who paste a raw key instead of OAuth)
@@ -356,28 +356,36 @@ function abortCurrentStream(requestId) {
 }
 
 function findClaudeBinary() {
-  // Direct known paths (fastest — no shell)
-  const candidates = [
+  const isWin = process.platform === 'win32';
+  const home  = process.env.HOME || process.env.USERPROFILE || '~';
+
+  // CLAUDE_CLI_PATH env var overrides everything (custom installs)
+  if (process.env.CLAUDE_CLI_PATH && fs.existsSync(process.env.CLAUDE_CLI_PATH)) {
+    return process.env.CLAUDE_CLI_PATH;
+  }
+
+  const candidates = isWin ? [
     process.env.USERPROFILE && path.join(process.env.USERPROFILE, '.local', 'bin', 'claude.exe'),
     process.env.APPDATA     && path.join(process.env.APPDATA, 'npm', 'claude.cmd'),
     process.env.USERPROFILE && path.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm', 'claude.cmd'),
-  ].filter(Boolean);
+  ] : [
+    path.join(home, '.npm-global', 'bin', 'claude'),
+    path.join(home, '.local', 'bin', 'claude'),
+    '/usr/local/bin/claude',
+    '/usr/bin/claude',
+  ];
 
-  for (const p of candidates) {
+  for (const p of candidates.filter(Boolean)) {
     try { if (fs.existsSync(p)) return p; } catch {}
   }
 
-  // Fallback: ask the shell
-  for (const query of ['where claude.exe 2>nul', 'where claude 2>nul']) {
-    try {
-      const out   = execSync(query, { encoding: 'utf8', timeout: 2000 }).trim();
-      const lines = out.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-      const exe   = lines.find(l => l.endsWith('.exe'));
-      const cmd   = lines.find(l => l.endsWith('.cmd'));
-      const hit   = exe || cmd || lines[0];
-      if (hit) { try { if (fs.existsSync(hit)) return hit; } catch {} }
-    } catch {}
-  }
+  // Fallback: which/where
+  try {
+    const cmd = isWin ? 'where claude.exe' : 'which claude';
+    const out = execSync(cmd, { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const hit = out.split(/\r?\n/)[0]?.trim();
+    if (hit && fs.existsSync(hit)) return hit;
+  } catch {}
 
   return null;
 }

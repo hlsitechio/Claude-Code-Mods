@@ -357,8 +357,8 @@ ipcMain.handle('claude:sign-out', () => {
   getClaudeService().clearRawApiKey();
   try {
     const credPath = path.join(
-      process.env.USERPROFILE || process.env.HOME || '~',
-      '.claude', '.credentials.json'
+      process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || process.env.USERPROFILE || '~', '.claude'),
+      '.credentials.json'
     );
     if (fs.existsSync(credPath)) {
       const raw = JSON.parse(fs.readFileSync(credPath, 'utf8'));
@@ -382,8 +382,8 @@ ipcMain.handle('claude:abort', (_, requestId) => {
 // ── IPC: knowledge-base file editor ──────────────────────────────────────────
 // Whitelist of editable files. Paths are resolved at read/write time.
 const APP_ROOT   = path.join(__dirname, '..');
-const USER_HOME  = process.env.USERPROFILE || process.env.HOME || require('os').homedir();
-const CLAUDE_DIR = path.join(USER_HOME, '.claude');
+const USER_HOME  = process.env.HOME || process.env.USERPROFILE || require('os').homedir();
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(USER_HOME, '.claude');
 
 const KB_FILES = [
   { id: 'project-claude',   label: 'CLAUDE.md',           icon: 'list-checks',   path: () => path.join(APP_ROOT, 'CLAUDE.md') },
@@ -392,7 +392,17 @@ const KB_FILES = [
   { id: 'skill-design',     label: 'design-system.md',    icon: 'image',         path: () => path.join(APP_ROOT, 'skills', 'design-system.md') },
   { id: 'skill-agents',     label: 'agents.md',           icon: 'robot',         path: () => path.join(APP_ROOT, 'skills', 'agents.md') },
   { id: 'global-claude',    label: '~/.claude/CLAUDE.md', icon: 'gear-six',      path: () => path.join(CLAUDE_DIR, 'CLAUDE.md') },
-  { id: 'project-memory',   label: 'MEMORY.md',           icon: 'push-pin',      path: () => path.join(CLAUDE_DIR, 'projects', 'C--', 'memory', 'MEMORY.md') },
+  { id: 'project-memory',   label: 'MEMORY.md',           icon: 'push-pin',      path: () => {
+    // Find the first matching MEMORY.md in projects — path encoding varies by OS
+    const projDir = path.join(CLAUDE_DIR, 'projects');
+    try {
+      for (const d of fs.readdirSync(projDir)) {
+        const memPath = path.join(projDir, d, 'memory', 'MEMORY.md');
+        if (fs.existsSync(memPath)) return memPath;
+      }
+    } catch {}
+    return path.join(CLAUDE_DIR, 'projects', '-mnt-bounty-Claude', 'memory', 'MEMORY.md');
+  }},
 ];
 
 ipcMain.handle('kb:list', () => KB_FILES.map(f => ({ id: f.id, label: f.label, icon: f.icon })));
@@ -633,7 +643,7 @@ ipcMain.handle('notes:delete', async (_, id) => {
 });
 
 // ── IPC: file-system explorer ────────────────────────────────────────────────
-const FS_ROOT   = path.join(__dirname, '../..'); // G:\claude_code_mod
+const FS_ROOT   = process.env.CCM_FS_ROOT || path.resolve(__dirname, '..'); // app root (or CCM_FS_ROOT override)
 const FS_IGNORE = new Set([
   'node_modules', '.git', 'dist', 'release', '.cache',
   'coverage', '__pycache__', '.pytest_cache', '.parcel-cache',

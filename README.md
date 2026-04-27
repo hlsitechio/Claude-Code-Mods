@@ -151,9 +151,26 @@ npm install
 # Development (hot-reload)
 npm run electron:dev
 
-# Build Windows installer
-npm run dist
+# Build for your platform
+npm run dist:linux    # AppImage + .deb
+npm run dist:win      # NSIS installer + portable
+npm run dist          # Auto-detect platform
 ```
+
+### Linux notes
+
+Works on Ubuntu, Debian, Kali, Fedora, Arch — anywhere Electron 35 runs.
+
+The app auto-discovers the `claude` binary by checking common paths (`~/.npm-global/bin/claude`, `~/.local/bin/claude`, `/usr/local/bin/claude`). If your binary is elsewhere, set the env var:
+
+```bash
+export CLAUDE_CLI_PATH=/path/to/your/claude
+npm run electron:dev
+```
+
+Other optional env vars:
+- `CLAUDE_CONFIG_DIR` — custom `.claude` config directory (default: `~/.claude`)
+- `CCM_FS_ROOT` — override the file explorer root directory (default: app root)
 
 ---
 
@@ -178,7 +195,8 @@ npm run dist
 - [ ] Skills marketplace — browse and install community skill packs
 - [ ] Session replay — step through a session's tool calls frame by frame
 - [ ] MCP server manager — install / configure MCP servers from the UI
-- [ ] macOS / Linux builds
+- [x] Linux builds (AppImage + .deb)
+- [ ] macOS builds
 
 ---
 
