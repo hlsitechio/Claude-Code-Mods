@@ -657,6 +657,9 @@
         }
 
         const targetEl = this._currentAEl || aEl;
+        // Bubble may have been removed if the panel was closed mid-stream;
+        // skip the DOM write and let _abort/_finalize tidy up.
+        if (!targetEl || !targetEl.isConnected) return;
         responseText += chunk;
         this._streamToAssistantBubble(targetEl, responseText);
         lastActivityWasText = true;
@@ -726,8 +729,10 @@
         );
       } catch (err) {
         this._removeThinkingCard(thinkEl);
-        (this._currentAEl || aEl).innerHTML =
-          `<span class="sc-error">⚠ ${esc(err.message)}</span>`;
+        const errTarget = this._currentAEl || aEl;
+        if (errTarget?.isConnected) {
+          errTarget.innerHTML = `<span class="sc-error">⚠ ${esc(err.message)}</span>`;
+        }
         this._stopStreaming();
       }
     }
@@ -744,6 +749,7 @@
       if (text) this.history.push({ role: 'assistant', content: text });
       this._saveHistory();
       this._unsubChunk?.();
+      this._unsubDone?.();
       this._stopStreaming();
     }
 

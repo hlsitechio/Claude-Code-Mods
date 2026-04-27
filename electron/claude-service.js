@@ -602,7 +602,13 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
           if (ev.is_error || ev.subtype === 'error_during_execution') {
             const msg = ev.result || ev.error || 'CLI reported an error';
             const errStr = typeof msg === 'string' ? msg : JSON.stringify(msg);
-            if (/rate.?limit|429/i.test(errStr)) {
+            // Match an explicit 429 status or the phrase "rate limit" /
+            // "rate-limit" / "rate limited" — but not unrelated mentions of
+            // the word "limit".
+            const isRateLimit =
+                 /\b429\b/.test(errStr)
+              || /\brate[\s_-]?limit(?:ed|ing)?\b/i.test(errStr);
+            if (isRateLimit) {
               const e = new Error('429: Rate limited.'); e.code = 'RATE_LIMIT'; e.retryAfter = null;
               settle(false, e);
             } else {

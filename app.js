@@ -467,10 +467,26 @@ function loadSessionMessages(id) {
   try { return JSON.parse(localStorage.getItem('ccmod.msgs.' + id)) || []; }
   catch { return []; }
 }
+// Cap the in-browser cache so a long conversation can't blow the localStorage
+// quota and corrupt other persisted state. Disk backup retains the full history.
+const _MSG_CACHE_LIMIT = 400;
 function saveSessionMessages(id, msgs) {
-  try { localStorage.setItem('ccmod.msgs.' + id, JSON.stringify(msgs)); }
-  catch (e) { console.warn('[sessions] localStorage msgs save failed', e); }
-  // Write-through backup to disk
+  const key = 'ccmod.msgs.' + id;
+  const tail = Array.isArray(msgs) && msgs.length > _MSG_CACHE_LIMIT
+    ? msgs.slice(-_MSG_CACHE_LIMIT)
+    : msgs;
+  try {
+    localStorage.setItem(key, JSON.stringify(tail));
+  } catch (e) {
+    // Quota exceeded — try a smaller window before giving up.
+    try {
+      const rescue = (tail || []).slice(-Math.max(50, Math.floor(_MSG_CACHE_LIMIT / 4)));
+      localStorage.setItem(key, JSON.stringify(rescue));
+    } catch (e2) {
+      console.warn('[sessions] localStorage msgs save failed', e2);
+    }
+  }
+  // Write-through backup to disk (full history, not the cache cap).
   window.electronAPI?.sessions?.saveMsgs(id, msgs).catch(() => {});
 }
 function deleteSessionMessages(id) {
@@ -1505,7 +1521,13 @@ document.getElementById('workspace-dock')?.addEventListener('click', async e => 
   // Aperçu toolbar — Reload
   if (e.target.closest('#apercu-reload')) {
     const iframe = document.getElementById('apercu-iframe');
-    if (iframe) { const src = iframe.srcdoc; iframe.srcdoc = ''; requestAnimationFrame(() => { iframe.srcdoc = src; }); }
+    if (iframe?.isConnected) {
+      const src = iframe.srcdoc;
+      iframe.srcdoc = '';
+      requestAnimationFrame(() => {
+        if (iframe.isConnected) iframe.srcdoc = src;
+      });
+    }
     return;
   }
   // Aperçu toolbar — Fullscreen modal
@@ -1650,11 +1672,25 @@ navToggle.addEventListener('click', () => {
 });
 
 // ---------- Profile modal (Profile / Avatar / Greeting tabs) ----------
+// Reject anything that isn't a base64-encoded image data URL — prevents CSS
+// injection when the value is interpolated into url('…') or style attributes.
+function _isSafeAvatarDataUrl(v) {
+  return typeof v === 'string'
+      && /^data:image\/(?:png|jpeg|jpg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(v);
+}
+function _readSafeAvatar() {
+  const v = localStorage.getItem('ccmod.profile.avatarImage');
+  if (!_isSafeAvatarDataUrl(v)) {
+    if (v) localStorage.removeItem('ccmod.profile.avatarImage');
+    return null;
+  }
+  return v;
+}
 const profileState = {
   name:        localStorage.getItem('ccmod.profile.name')        || 'Hubert Larose Surprenant',
   email:       'hlarosesurprenant@gmail.com',
   avatarColor: localStorage.getItem('ccmod.profile.avatarColor') || '#c96442',
-  avatarImage: localStorage.getItem('ccmod.profile.avatarImage') || null,  // data: URL when user uploaded a photo
+  avatarImage: _readSafeAvatar(),
   greeting:    localStorage.getItem('ccmod.profile.greeting')    || 'How can I help you today?',
 };
 const AVATAR_PALETTE = [
@@ -1683,14 +1719,17 @@ function closeProfileModal() {
 function renderProfileBody() {
   const d = profileDraft;
   const initials = (d.name || '').trim().split(/\s+/).slice(0, 2).map(p => p[0] || '').join('').toUpperCase() || 'HL';
-  // Avatar preview element — click to upload a photo; hover shows upload overlay
+  // Only render the avatar image if it passes the data-URL whitelist; otherwise
+  // fall back to colour + initials. Colour is also restricted to a hex literal.
+  const safeColor = /^#[0-9a-f]{3,8}$/i.test(d.avatarColor) ? d.avatarColor : '#c96442';
+  const safeImage = _isSafeAvatarDataUrl(d.avatarImage) ? d.avatarImage : null;
   const avatarPreviewHTML = `
     <button class="avatar-preview avatar-preview--editable"
             id="pf-avatar-click"
             type="button"
             title="Click to upload an image"
-            style="--preview-bg: ${d.avatarColor}${d.avatarImage ? `; background-image: url('${d.avatarImage}'); background-size: cover; background-position: center;` : ''}">
-      ${d.avatarImage ? '' : escapeHTML(initials)}
+            style="--preview-bg: ${safeColor}${safeImage ? `; background-image: url('${safeImage}'); background-size: cover; background-position: center;` : ''}">
+      ${safeImage ? '' : escapeHTML(initials)}
       <span class="avatar-preview__overlay">${iconSVG('image')}</span>
     </button>
   `;
@@ -1703,7 +1742,12 @@ function renderProfileBody() {
         const f = e.target.files?.[0];
         if (!f) return;
         const reader = new FileReader();
-        reader.onload = () => { profileDraft.avatarImage = reader.result; renderProfileBody(); };
+        reader.onload = () => {
+          if (_isSafeAvatarDataUrl(reader.result)) {
+            profileDraft.avatarImage = reader.result;
+            renderProfileBody();
+          }
+        };
         reader.readAsDataURL(f);
       });
       inp.click();
@@ -1780,11 +1824,23 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !profileMo
 document.getElementById('profile-save').addEventListener('click', () => {
   if (!profileDraft) return;
   Object.assign(profileState, profileDraft);
-  localStorage.setItem('ccmod.profile.name',        profileState.name);
-  localStorage.setItem('ccmod.profile.avatarColor', profileState.avatarColor);
-  localStorage.setItem('ccmod.profile.greeting',    profileState.greeting);
-  if (profileState.avatarImage) localStorage.setItem('ccmod.profile.avatarImage', profileState.avatarImage);
-  else                          localStorage.removeItem('ccmod.profile.avatarImage');
+  try {
+    localStorage.setItem('ccmod.profile.name',        profileState.name);
+    localStorage.setItem('ccmod.profile.avatarColor', profileState.avatarColor);
+    localStorage.setItem('ccmod.profile.greeting',    profileState.greeting);
+    if (profileState.avatarImage && _isSafeAvatarDataUrl(profileState.avatarImage)) {
+      localStorage.setItem('ccmod.profile.avatarImage', profileState.avatarImage);
+    } else {
+      localStorage.removeItem('ccmod.profile.avatarImage');
+    }
+  } catch (e) {
+    // Most likely QuotaExceededError from a large avatar; drop the image so the
+    // rest of the profile still saves and tell the user.
+    console.warn('[profile] save failed', e);
+    try { localStorage.removeItem('ccmod.profile.avatarImage'); } catch {}
+    profileState.avatarImage = null;
+    alert('Could not save profile — the uploaded avatar is too large. Try a smaller image.');
+  }
   applyProfile();
   closeProfileModal();
 });
@@ -1793,7 +1849,7 @@ function applyProfile() {
   const avatarEl = document.getElementById('account-avatar');
   const nameEl   = document.getElementById('account-name');
   if (avatarEl) {
-    if (profileState.avatarImage) {
+    if (_isSafeAvatarDataUrl(profileState.avatarImage)) {
       avatarEl.textContent = '';
       // Order matters: set color first, THEN image (setting the shorthand would nuke everything)
       avatarEl.style.backgroundColor = 'transparent';
