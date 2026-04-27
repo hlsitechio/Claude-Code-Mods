@@ -8,13 +8,19 @@
     "url": "https://github.com/hlsitechio/Claude-Code-Mods.git"
   },
   "keywords": [
-    "claude",
     "claude-code",
+    "claude-code-plugin",
+    "claude-code-cli",
+    "claude-code-skills",
     "anthropic",
+    "mcp",
     "electron",
     "desktop",
-    "ai",
-    "coding-assistant"
+    "agentic-coding",
+    "dockview",
+    "skills",
+    "hooks",
+    "ai-coding-assistant"
   ],
   "private": true,
   "main": "electron/main.js",

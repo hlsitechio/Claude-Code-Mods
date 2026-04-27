@@ -1,0 +1,25 @@
+{
+  "name": "claude-code-mods",
+  "displayName": "Claude Code Mods",
+  "version": "0.2.0",
+  "description": "Native Electron desktop workspace for Claude Code CLI — Skills manager, MCP panel, live context, JSX preview, dockview panels.",
+  "homepage": "https://github.com/hlsitechio/Claude-Code-Mods",
+  "author": "hlsitechio",
+  "license": "MIT",
+  "type": "desktop-ui",
+  "extensionPoints": ["skills", "mcp", "hooks"],
+  "tags": ["desktop", "electron", "workspace", "skills", "mcp", "dockview", "context-panel"],
+  "runtime": "electron",
+  "requires": {
+    "claudeCode": ">=1.0.0",
+    "node": ">=18.0.0"
+  },
+  "install": {
+    "type": "git",
+    "url": "https://github.com/hlsitechio/Claude-Code-Mods.git",
+    "steps": [
+      "npm install",
+      "npm run electron:dev"
+    ]
+  }
+}

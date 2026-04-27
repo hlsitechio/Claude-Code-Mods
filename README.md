@@ -1,13 +1,14 @@
 # Claude Code Mods
 
-> A fan-made Electron desktop UI for the [Claude Code CLI](https://github.com/anthropics/claude-code) — built to make agentic coding sessions more transparent, safer, and easier to manage.
+> **The missing desktop layer for Claude Code CLI** — a native Electron workspace that makes every action Claude takes visible, organized, and one click away.
 
-**Not affiliated with Anthropic. Built by a developer who uses Claude Code every day.**
-
-[![Status](https://img.shields.io/badge/status-active-brightgreen)](https://github.com/hlsitechio/Claude-Code-Mods)
+[![Status](https://img.shields.io/badge/status-active%20development-brightgreen)](https://github.com/hlsitechio/Claude-Code-Mods)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Electron](https://img.shields.io/badge/electron-35-47848F?logo=electron)](https://electronjs.org)
-[![Claude Code](https://img.shields.io/badge/claude--code-CLI-D97757)](https://github.com/anthropics/claude-code)
+[![Electron](https://img.shields.io/badge/Electron-35-47848F?logo=electron&logoColor=white)](https://electronjs.org)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-CLI%20wrapper-D97757?logo=anthropic&logoColor=white)](https://github.com/anthropics/claude-code)
+[![Topics](https://img.shields.io/badge/topics-claude--code%20%7C%20mcp%20%7C%20skills%20%7C%20hooks-5a67d8)](https://github.com/hlsitechio/Claude-Code-Mods/topics)
+
+> Built on top of [Claude Code](https://github.com/anthropics/claude-code) by Anthropic. Not affiliated — just a developer who uses it every day and wanted a proper workspace.
 
 ---
 
@@ -15,39 +16,54 @@
 
 ---
 
-## What this is
+## Why this exists
 
-The Claude Code CLI is powerful but terminal-only. This project wraps it in a native desktop UI built around one idea: **everything Claude does should be visible, organized, and in reach.**
+Claude Code CLI is exceptional. The terminal is not the right interface for everything it can do.
+
+This project adds a native desktop shell around the CLI — fully respecting Anthropic's **Skills**, **Hooks**, and **MCP** extension points — so every session, every tool call, every context byte is visible in a real UI.
+
+**Zero wrappers. Zero proxies. The official CLI runs underneath, unchanged.**
 
 ---
 
-## Key features
+## Anthropic extension points — all three, fully wired
+
+This project is built around the three official Claude Code extension mechanisms:
+
+| Extension point | What it unlocks | How we surface it |
+|----------------|-----------------|-------------------|
+| **Skills** (`@skills/*.md`) | Inject domain knowledge into sessions | Skills panel — browse, activate/deactivate, edit inline |
+| **Hooks** (`CLAUDE.md` lifecycle hooks) | Control behavior at every CLI lifecycle event | Console → Skills page, CLAUDE.md editor |
+| **MCP servers** | Connect external tools to Claude | MCP panel — all servers + tool count at a glance |
+
+---
+
+## Feature overview
 
 ### 🪟 Dockview workspace
-A full drag-and-drop panel canvas. Every tool lives in its own resizable, re-dockable panel tab — open as many as you need side by side. Right-click anywhere to add panels from the context menu.
+A drag-and-drop panel canvas. Every tool in its own resizable, re-dockable panel. Right-click anywhere to add panels from the context menu.
 
 | Panel | What it does |
 |-------|-------------|
-| **Chat** | Main conversation + streaming indicators |
-| **Preview** | Live JSX/HTML/React iframe with zoom controls (−/+/reset) |
+| **Chat** | Main conversation + 9 streaming state variants with gradient shimmer |
+| **Preview** | Live JSX/HTML/React iframe — Claude writes a component, click 👁 to render it |
 | **Terminal** | Embedded shell (PowerShell / bash) |
 | **Files** | Full project file tree |
-| **Skills** | Browse, edit, activate/deactivate skill files — with inline editor |
+| **Skills** | Browse, edit, activate/deactivate skill files with inline editor + active badges |
 | **Notes** | Persistent markdown scratchpad with toolbar + live preview |
 | **Plan** | Claude's task plan rendered as a kanban-style checklist |
 | **MCP** | All connected MCP servers and their tools at a glance |
 | **Git** | Branch / status / diff view |
-| **Context** | Context window usage breakdown |
+| **Context** | Live context window usage — real data from CLI `result` events, not estimates |
 | **Shortcuts** | Keyboard shortcut reference |
 
 ### ✨ Skills manager
 Skill files (`@skills/filename.md`) are injected into sessions on demand. The Skills panel shows every skill with an **active** badge for files currently imported in `CLAUDE.md` — one click to activate or deactivate, inline editor to modify.
 
-### 🧠 Workspace awareness
-A `workspace-index.json` is written to disk on every state change. Claude reads it via file tools, so it always knows your project names, session history, model, and permission mode. A hidden system prompt layer injects the full context on every CLI turn.
+The Console → Skills page adds full CRUD: create new skills, copy the `@import` line, toggle active state, delete.
 
-### 🔐 Permission modes — visible by default
-Four modes mapped directly to CLI flags, always one click away and color-coded:
+### 🔐 Permission modes — visible, always one click away
+Four modes mapped directly to CLI flags, color-coded in the status bar:
 
 | Mode | CLI flag | When to use |
 |------|----------|-------------|
@@ -56,6 +72,9 @@ Four modes mapped directly to CLI flags, always one click away and color-coded:
 | **Accept** | `--auto-approve-everything` | Trusted scripted workflows |
 | **Bypass** | `--dangerously-skip-permissions` | Fully autonomous runs |
 
+### 🧠 Workspace awareness
+A `workspace-index.json` is written to disk on every state change. Claude reads it via file tools so it always knows project names, session history, model, and permission mode. A hidden system prompt layer injects full context on every CLI turn.
+
 ### 📁 Project organizer
 - Drag-to-reorder projects in the sidebar
 - Per-project color accents that cascade through the UI
@@ -63,15 +82,15 @@ Four modes mapped directly to CLI flags, always one click away and color-coded:
 - Fork, rename, pin, delete via context menu
 
 ### 🎨 Chat UI
-- 9 streaming state variants with gradient shimmer: `thinking` · `generating` · `coding` · `tools` · `searching` · `reading` · `running` · `applying` · `writing`
+- 9 streaming state variants: `thinking` · `generating` · `coding` · `tools` · `searching` · `reading` · `running` · `applying` · `writing`
 - Code blocks: syntax highlighting, line numbers, copy, download, inline JSX preview, open in panel
-- Code block scroll capped at 380px with Show more / Show less toggle
+- Scroll capped at 380px with Show more / Show less toggle
 
 ### 🖥️ JSX live preview
 Claude writes a React component → click 👁 → it renders inline. No build step.
 - Babel standalone compiles JSX synchronously
 - `<script type="importmap">` resolves `react`, `react-dom/client`, `framer-motion` to esm.sh
-- Preview panel with zoom in/out/reset controls
+- Preview panel with **zoom controls** (−/+/reset)
 
 ### 📊 Live context panel
 Real data from the CLI `result` event — not estimates:
@@ -107,10 +126,12 @@ Real data from the CLI `result` event — not estimates:
 └─────────────┬───────────────────────────┘
               │ JSON stream
 ┌─────────────▼───────────────────────────┐
-│  Claude Code CLI (official)             │
+│  Claude Code CLI  (official, unmodified)│
 │  github.com/anthropics/claude-code      │
 └─────────────────────────────────────────┘
 ```
+
+The CLI is never patched or intercepted — it runs as a child process with `--output-format stream-json`. All extension happens through the official surface: Skills injected via `CLAUDE.md`, Hooks declared in the same file, MCP servers registered normally.
 
 ---
 
@@ -118,7 +139,7 @@ Real data from the CLI `result` event — not estimates:
 
 ### Prerequisites
 - [Node.js](https://nodejs.org) 18+
-- [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated (`claude` in PATH)
+- [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated (`claude` in `PATH`)
 
 ### Install & run
 
@@ -142,12 +163,22 @@ npm run dist
 |-------|------|
 | Desktop | Electron 35 |
 | Panels | dockview-core |
-| UI | Vanilla JS (ES modules), no framework |
+| UI | Vanilla JS (ES modules) — no framework, no build pipeline for renderer |
 | Styles | Plain CSS with custom properties |
 | Icons | Phosphor Icons |
 | Build | Vite 5 |
 | Packaging | electron-builder (NSIS installer + portable) |
 | JSX preview | Babel standalone + importmap + esm.sh |
+
+---
+
+## Roadmap
+
+- [ ] Hooks editor — visual UI for every `CLAUDE.md` lifecycle hook
+- [ ] Skills marketplace — browse and install community skill packs
+- [ ] Session replay — step through a session's tool calls frame by frame
+- [ ] MCP server manager — install / configure MCP servers from the UI
+- [ ] macOS / Linux builds
 
 ---
 
@@ -157,13 +188,15 @@ PRs welcome. A few guidelines:
 
 - Keep `app.js` and `style.css` as the single source of truth — no framework, no build pipeline for the renderer
 - Any new IPC channel needs a handler in `main.js` and an entry in `preload.js`
-- New skills go in `skills/` as plain markdown — they're loaded by the CLI automatically via `CLAUDE.md`
+- New skills go in `skills/` as plain markdown — they're loaded via `CLAUDE.md` automatically
 
 ---
 
 ## Acknowledgements
 
-Built on top of [Claude Code](https://github.com/anthropics/claude-code) by Anthropic. This project exists because the CLI is excellent — the goal is to make it accessible to more people, not to improve it.
+Built entirely on top of [Claude Code](https://github.com/anthropics/claude-code) by Anthropic. This project exists because the CLI is excellent — the goal is to make it accessible to more people, not to improve it.
+
+The Skills / Hooks / MCP architecture is Anthropic's design. This project just gives it a window.
 
 ---
 
