@@ -66,7 +66,7 @@ const I18N = {
     // Right panel
     rp_apercu: 'Preview', rp_diff: 'Diff', rp_terminal: 'Terminal',
     rp_fichiers: 'Files', rp_taches: 'Tasks', rp_plan: 'Plan',
-    rp_shortcuts: 'Keyboard shortcuts',
+    rp_shortcuts: 'Keyboard shortcuts', rp_notes: 'Notes', rp_skills: 'Skills',
     rp_mcp: 'MCP', rp_git: 'Git', rp_context: 'Context',
     rp_placeholder: 'placeholder content',
     // Appearance
@@ -178,7 +178,7 @@ function applyLanguage() {
 // Write-through: every save also writes to disk asynchronously.
 // Recovery:      on startup, if localStorage is empty, load from disk and restore.
 
-const PROJECT_COLORS = ['#c96442', '#d97757', '#6a86c3', '#7ab389', '#b48ead', '#c9a96e', '#5aa1a1'];
+const PROJECT_COLORS = ['#c25c7a', '#d97757', '#6a86c3', '#7ab389', '#b48ead', '#c9a96e', '#5aa1a1'];
 
 // System prompt injected on every new CLI session (first turn only).
 // Prevents the CLI's default agent behaviour (filesystem exploration, tool use)
@@ -308,10 +308,28 @@ function updateTitleBar(sessionId) {
   const sessions = loadSessionList();
   const session  = sessions.find(s => s.id === sessionId);
   const project  = state.projects.find(p => p.sessions.some(s => s.id === sessionId));
-  const parts    = ['Claude Code Mods'];
+  // Build breadcrumb: show project → session (no redundant app-name prefix)
+  const parts = [];
   if (project) parts.push(project.name);
   if (session) parts.push(session.title);
-  titleEl.textContent = parts.join('  —  ');
+  titleEl.textContent = parts.length ? parts.join('  —  ') : 'Claude Code Mods';
+}
+
+// Directly set the titlebar text (e.g. when a console page is open)
+function setTitleText(text) {
+  const titleEl = document.querySelector('.titlebar__title');
+  if (titleEl) titleEl.textContent = text;
+}
+
+// Shift title right to visually center in the chat column (sidebar width / 2)
+function _updateTitleOffset() {
+  requestAnimationFrame(() => {
+    const sidebar = document.getElementById('sidebar');
+    const w = sidebar?.offsetWidth || 0;
+    // Divide by 2 to center in chat area; use 0 when sidebar is collapsed (≤60px)
+    const offset = w > 60 ? Math.round(w / 2) : 0;
+    document.documentElement.style.setProperty('--title-offset', offset + 'px');
+  });
 }
 
 // ── Claude session context ────────────────────────────────────────────────────
@@ -761,7 +779,25 @@ function _renderChatForSession(id) {
       if (m.role === 'user') {
         const div = document.createElement('div');
         div.className = 'msg msg--user';
-        div.innerHTML = `<div class="msg__body"><p>${escapeHTML(m.content)}</p></div>`;
+        // Content is either a plain string or an array of {type, source/text} blocks (with images)
+        let imgHtml = '', textContent = '';
+        if (Array.isArray(m.content)) {
+          for (const part of m.content) {
+            if (part.type === 'image' && part.source?.type === 'base64') {
+              const mt = part.source.media_type || 'image/png';
+              imgHtml += `<img class="msg__inline-img" src="data:${mt};base64,${part.source.data}" alt="attached image">`;
+            } else if (part.type === 'text') {
+              textContent = part.text || '';
+            }
+          }
+          if (imgHtml) imgHtml = `<div class="msg__imgs">${imgHtml}</div>`;
+        } else {
+          textContent = m.content || '';
+        }
+        const textHtml = textContent
+          ? `<div class="msg__body"><p>${escapeHTML(textContent).replace(/\n/g,'<br>')}</p></div>`
+          : '';
+        div.innerHTML = imgHtml + textHtml;
         conv.appendChild(div);
       } else if (m.role === 'assistant') {
         const div = document.createElement('div');
@@ -791,6 +827,9 @@ const recentEl  = document.getElementById('recent-list');
 const pinnedCountEl = document.getElementById('pinned-count');
 const recentCountEl = document.getElementById('recent-count');
 
+// Wire project list drag-to-reorder once (idempotent — called after DOM ready)
+_installProjectListDrop();
+
 function el(tag, attrs = {}, children = []) {
   const n = document.createElement(tag);
   Object.entries(attrs).forEach(([k, v]) => {
@@ -817,10 +856,14 @@ function iconSVG(name) {
 }
 
 function sessionRow(session, { showTime = true, accent = null } = {}) {
+  // Check if session has any messages — used to light up the dot
+  const _rawMsgs = localStorage.getItem('ccmod.msgs.' + session.id);
+  const hasMsgs  = _rawMsgs && _rawMsgs.length > 4; // '[]' = 2 chars, skip empties
   const row = el('div', {
     class: 'session'
       + (session.id === state.activeId ? ' is-active' : '')
-      + (session.processing ? ' is-processing' : ''),
+      + (session.processing ? ' is-processing' : '')
+      + (hasMsgs ? ' has-msgs' : ''),
     draggable: 'true',
     title: session.title,
     data: { sessionId: session.id, tooltip: session.title },
@@ -831,6 +874,12 @@ function sessionRow(session, { showTime = true, accent = null } = {}) {
     <span class="session__title">${escapeHTML(session.title)}</span>
     ${showTime ? `<span class="session__time">${escapeHTML(session.time || '')}</span>` : ''}
     <span class="session__actions">
+      <button class="icon-btn icon-btn--sm session__agent-btn" data-act="open-agent" title="Open as agent panel">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+          <polyline points="17 11 21 11 21 15"/>
+        </svg>
+      </button>
       <button class="icon-btn icon-btn--sm" data-act="pin" title="Pin">${iconSVG('push-pin')}</button>
       <button class="icon-btn icon-btn--sm" data-act="more" title="More">${iconSVG('dots-three-vertical')}</button>
     </span>
@@ -854,6 +903,12 @@ function sessionRow(session, { showTime = true, accent = null } = {}) {
   row.querySelector('[data-act="more"]').addEventListener('click', (e) => {
     e.stopPropagation();
     showContextMenu(e, session);
+  });
+  row.querySelector('[data-act="open-agent"]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (window.Workspace?.openSplitChat) {
+      window.Workspace.openSplitChat({ sessionId: session.id, sessionTitle: session.title });
+    }
   });
   row.querySelector('[data-act="pin"]').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -946,8 +1001,30 @@ function projectRow(project) {
 
   head.addEventListener('contextmenu', (e) => showProjectMenu(e, project));
 
-  // drop target: project
+  // ── Project reorder: drag handle on the head ──────────────────────────────
+  head.setAttribute('draggable', 'true');
+  head.addEventListener('dragstart', (e) => {
+    // Don't reorder while sidebar is icon-only (collapsed)
+    if (document.getElementById('sidebar').classList.contains('is-collapsed')) {
+      e.preventDefault(); return;
+    }
+    // Don't start drag if a rename input is focused
+    if (head.querySelector('.project__name-input')) { e.preventDefault(); return; }
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('project-reorder', project.id);
+    // tiny timeout so the drag image doesn't flicker on the grabbed element
+    requestAnimationFrame(() => wrap.classList.add('proj-dragging'));
+  });
+  head.addEventListener('dragend', () => {
+    wrap.classList.remove('proj-dragging');
+    _clearProjDropIndicator();
+  });
+
+  // ── drop target: session moves into this project ──────────────────────────
   wrap.addEventListener('dragover', (e) => {
+    // project reorder — handled by the list container, skip here
+    if (e.dataTransfer.types.includes('project-reorder')) return;
     if (!e.dataTransfer.types.includes('text/plain')) return;
     e.preventDefault();
     wrap.classList.add('drag-over');
@@ -956,12 +1033,79 @@ function projectRow(project) {
     if (e.target === wrap || !wrap.contains(e.relatedTarget)) wrap.classList.remove('drag-over');
   });
   wrap.addEventListener('drop', (e) => {
+    if (e.dataTransfer.types.includes('project-reorder')) return;
     e.preventDefault();
     wrap.classList.remove('drag-over');
     const sessionId = e.dataTransfer.getData('text/plain');
     moveSessionToProject(sessionId, project.id);
   });
   return wrap;
+}
+
+// ── Project list reorder helpers ─────────────────────────────────────────────
+let _projDropEl = null;   // the live indicator <div>
+
+function _clearProjDropIndicator() {
+  if (_projDropEl) { _projDropEl.remove(); _projDropEl = null; }
+  projectsEl.querySelectorAll('.project').forEach(p => p.classList.remove('proj-drop-above', 'proj-drop-below'));
+}
+
+function _installProjectListDrop() {
+  projectsEl.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer.types.includes('project-reorder')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    // Find which project row we're over
+    const rows = [...projectsEl.querySelectorAll(':scope > .project')];
+    let target = null, insertBefore = true;
+    for (const row of rows) {
+      const rect = row.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) { target = row; insertBefore = true; break; }
+      if (e.clientY < rect.bottom) { target = row; insertBefore = false; break; }
+    }
+
+    // Draw the indicator line
+    _clearProjDropIndicator();
+    if (target) {
+      const rect = target.getBoundingClientRect();
+      const listRect = projectsEl.getBoundingClientRect();
+      const indicator = document.createElement('div');
+      indicator.className = 'proj-drop-indicator';
+      const yOff = (insertBefore ? rect.top : rect.bottom) - listRect.top;
+      indicator.style.top = yOff + 'px';
+      projectsEl.style.position = 'relative';
+      projectsEl.appendChild(indicator);
+      _projDropEl = indicator;
+      indicator._targetId  = target.dataset.projectId;
+      indicator._insertBefore = insertBefore;
+    }
+  });
+
+  projectsEl.addEventListener('dragleave', (e) => {
+    if (!projectsEl.contains(e.relatedTarget)) _clearProjDropIndicator();
+  });
+
+  projectsEl.addEventListener('drop', (e) => {
+    const dragId = e.dataTransfer.getData('project-reorder');
+    if (!dragId) return;
+    e.preventDefault();
+
+    const targetId    = _projDropEl?._targetId;
+    const before      = _projDropEl?._insertBefore ?? true;
+    _clearProjDropIndicator();
+
+    if (!targetId || dragId === targetId) return;
+
+    const fromIdx = state.projects.findIndex(p => p.id === dragId);
+    const toIdx   = state.projects.findIndex(p => p.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+
+    const [moved] = state.projects.splice(fromIdx, 1);
+    const insertAt = state.projects.findIndex(p => p.id === targetId);
+    state.projects.splice(before ? insertAt : insertAt + 1, 0, moved);
+    render();
+  });
 }
 
 function render() {
@@ -1096,7 +1240,7 @@ function openNewProjectModal() {
   document.getElementById('new-project-name').value = '';
   _renderNewProjectSwatches();
   modal.classList.remove('hidden');
-  requestAnimationFrame(() => document.getElementById('new-project-name').focus());
+  setTimeout(() => document.getElementById('new-project-name')?.focus(), 50);
 }
 function closeNewProjectModal() {
   document.getElementById('new-project-modal')?.classList.add('hidden');
@@ -1104,17 +1248,47 @@ function closeNewProjectModal() {
 function _renderNewProjectSwatches() {
   const grid = document.getElementById('np-swatches');
   if (!grid) return;
+
+  // Check if _newProjectColor is a custom color (not in presets)
+  const isCustom = _newProjectColor && !PROJECT_COLORS.includes(_newProjectColor);
+
   grid.innerHTML = PROJECT_COLORS.map(c => `
     <button class="np-swatch${c === _newProjectColor ? ' is-selected' : ''}"
             data-color="${c}" style="--c:${c}" type="button" aria-label="${c}"></button>
-  `).join('');
-  grid.querySelectorAll('.np-swatch').forEach(b => {
+  `).join('')
+  + `<label class="np-swatch np-swatch--custom${isCustom ? ' is-selected' : ''}" title="Custom colour"
+             style="--c:${isCustom ? _newProjectColor : 'transparent'}" aria-label="Pick custom colour">
+       <input type="color" id="np-color-picker" value="${isCustom ? _newProjectColor : '#7a8fb5'}"
+              style="position:absolute;width:0;height:0;opacity:0;pointer-events:none">
+       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round" class="np-swatch__plus">
+         <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+       </svg>
+     </label>`;
+
+  // Wire preset swatches
+  grid.querySelectorAll('.np-swatch:not(.np-swatch--custom)').forEach(b => {
     b.addEventListener('click', () => {
       _newProjectColor = b.dataset.color;
       grid.querySelectorAll('.np-swatch').forEach(s => s.classList.remove('is-selected'));
       b.classList.add('is-selected');
     });
   });
+
+  // Wire custom colour picker
+  const customLabel = grid.querySelector('.np-swatch--custom');
+  const colorInput  = grid.querySelector('#np-color-picker');
+  if (customLabel && colorInput) {
+    customLabel.addEventListener('click', () => colorInput.click());
+    colorInput.addEventListener('input', () => {
+      const hex = colorInput.value;
+      _newProjectColor = hex;
+      customLabel.style.setProperty('--c', hex);
+      colorInput.value = hex;
+      grid.querySelectorAll('.np-swatch').forEach(s => s.classList.remove('is-selected'));
+      customLabel.classList.add('is-selected');
+    });
+  }
 }
 function confirmNewProject() {
   const input = document.getElementById('new-project-name');
@@ -1357,11 +1531,18 @@ function setSidebarCollapsed(collapsed) {
   sidebarToggle.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
   sidebarToggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
   localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+  _updateTitleOffset();
 }
 if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') setSidebarCollapsed(true);
 sidebarToggle.addEventListener('click', () => {
   setSidebarCollapsed(!sidebarEl.classList.contains('is-collapsed'));
 });
+// Initial offset on DOMContentLoaded (sidebar may not have rendered yet on first eval)
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _updateTitleOffset);
+} else {
+  _updateTitleOffset();
+}
 
 // Sidebar resize (drag handle on the inner edge).
 // The handle is the dockview splitter now — we just restore saved width on load.
@@ -1371,6 +1552,7 @@ const SIDEBAR_MAX = 520;
 const savedWidth = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
 if (savedWidth >= SIDEBAR_MIN && savedWidth <= SIDEBAR_MAX && !sidebarEl.classList.contains('is-collapsed')) {
   sidebarEl.style.width = savedWidth + 'px';
+  _updateTitleOffset();
 }
 
 // Manual resize via drag on the sidebar's inner border edge.
@@ -1434,6 +1616,15 @@ setSidebarSide(savedSide === 'right' ? 'right' : 'left');
 sidebarPosBtn?.addEventListener('click', () => {
   setSidebarSide((sidebarEl.dataset.sidebarSide || 'left') === 'left' ? 'right' : 'left');
 });
+
+// ── New agent panel button ────────────────────────────────────────────────────
+document.getElementById('new-agent-panel-btn')?.addEventListener('click', () => {
+  if (window.Workspace?.openSplitChat) {
+    window.Workspace.openSplitChat();
+  }
+});
+
+document.getElementById('notes-btn')?.addEventListener('click', () => showNotesEditor());
 
 // ── New session button (top of sidebar quick-actions) ────────────────────────
 document.querySelector('.nav-item--primary')?.addEventListener('click', () => {
@@ -1781,6 +1972,25 @@ function showUserMenu(anchor) {
     if (btn.classList.contains('has-sub')) return;
     const act = btn.dataset.user;
     if (act === 'settings') { hideSub(); hideCtx(); openProfileModal('profile'); return; }
+
+    // ── External links ────────────────────────────────────────────────────────
+    const EXTERNAL = {
+      help:  'https://support.anthropic.com',
+      plans: 'https://claude.ai/upgrade',
+      apps:  'https://claude.ai/download',
+      gift:  'https://claude.ai/refer',
+      learn: 'https://www.anthropic.com',
+    };
+    if (EXTERNAL[act]) {
+      hideSub(); hideCtx();
+      if (window.electronAPI?.openExternal) {
+        window.electronAPI.openExternal(EXTERNAL[act]);
+      } else {
+        window.open(EXTERNAL[act], '_blank', 'noopener');
+      }
+      return;
+    }
+
     if (act === 'logout' && window.electronAPI?.signOut) {
       hideSub(); hideCtx();
       window.electronAPI.signOut().then(() => {
@@ -2111,7 +2321,7 @@ function showConsole(initialPage = 'overview') {
   /* ── Nav items ────────────────────────────────────────────── */
   const NAV = [
     { id: 'overview',    icon: 'lightning',        label: 'Overview'      },
-    { id: 'knowledge',   icon: 'list-checks',      label: 'Knowledge Base'},
+    { id: 'knowledge',   icon: 'sparkle',          label: 'Skills'        },
     { id: 'memory',      icon: 'push-pin',         label: 'Memory'        },
     { id: 'agents',      icon: 'gear-six',         label: 'AI Agents'     },
     { id: 'models',      icon: 'circle-wavy-check',label: 'Models'        },
@@ -2186,105 +2396,129 @@ function showConsole(initialPage = 'overview') {
   function pageOverview() {
     const agents      = loadAgents?.() || [];
     const model       = modelState?.currentModel || 'claude-sonnet-4-6';
-    const effort      = modelState?.currentEffort || 'normal';
     const permCurrent = permState?.current || 'bypass';
-    // Accurate total: projects + recent + pinned (same formula as buildSessionContext)
     const projCount   = state.projects.reduce((n, p) => n + p.sessions.length, 0);
     const totalSessions = projCount + (state.recent?.length || 0) + (state.pinned?.length || 0);
-    // Skills: read actual files from the skills/ folder via IPC (async, patched in after render)
     const knownSkills = ['app-context.md', 'agents.md', 'jsx-code-blocks.md', 'design-system.md'];
+    const permColor   = permCurrent === 'bypass' ? '#c96442' : permCurrent === 'accept' ? '#7ab389' : permCurrent === 'plan' ? '#6a86c3' : '#a0a0ab';
+
+    const CLAUDE_SVG = `<svg viewBox="0 0 24 24" fill="none" width="44" height="44"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" fill="#d97757"/></svg>`;
+
+    const _featureSVG = {
+      layout:        `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>`,
+      'arrows-out':  `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>`,
+      shield:        `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+      'tree-structure': `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v4M6 21v-4M6 11v2"/><rect x="3" y="7" width="6" height="4" rx="1"/><rect x="3" y="17" width="6" height="4" rx="1"/><rect x="15" y="11" width="6" height="4" rx="1"/><path d="M9 13h3a3 3 0 0 0 3-3V7"/></svg>`,
+      brain:         `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.955.5A3 3 0 0 0 6 11a3 3 0 0 0 0 6c.352 0 .697-.04 1.03-.12A3.001 3.001 0 0 0 12 19a3.001 3.001 0 0 0 4.97-1.88c.333.08.678.12 1.03.12a3 3 0 0 0 0-6 3 3 0 0 0-.045-5.5A3 3 0 0 0 12 5z"/><path d="M12 5v14M6 11h12M6 17h12"/></svg>`,
+      terminal:      `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
+    };
+    const _fsvg = (name) => _featureSVG[name] || iconSVG(name) || '';
+    const features = [
+      { icon: 'layout',          color: '#7ab8f5', label: 'Parallel Agent Panels',     desc: 'Run multiple independent Claude agents side-by-side in a dockview canvas. Each has its own session, model, and permission mode.' },
+      { icon: 'arrows-out',      color: '#d97757', label: 'Drag Sessions to Dockview', desc: 'Grab any session from the sidebar and drop it onto the canvas — it opens as a live agent panel, pre-loaded with full conversation history.' },
+      { icon: 'lightning',       color: '#e5c55a', label: 'Auto Code Review',          desc: 'When Claude generates code in the main chat, attached Code Reviewer agents auto-trigger instantly. No copy-paste, no manual prompt.' },
+      { icon: 'shield',          color: '#8b3a3a', label: 'Security Code Analyst',     desc: 'OWASP-aligned audit agent. Tracks sources to sinks, calibrates severity by exploitability, outputs structured reports with exact fix patches.' },
+      { icon: 'tree-structure',  color: '#7ab389', label: 'Project Tree',              desc: 'Organize sessions into projects with per-project color accents that cascade through the entire UI. Drag sessions between projects.' },
+      { icon: 'brain',           color: '#9b7fd4', label: 'Persistent Memory',         desc: 'User profile, tech stack preferences, and project notes are injected into every session — main chat and agent panels alike.' },
+      { icon: 'code',            color: '#5a9fd4', label: 'Knowledge Base',            desc: 'In-app editor for CLAUDE.md, skills, and memory files. Edit, preview, and publish to disk — the CLI picks up changes on the next session.' },
+      { icon: 'terminal',        color: '#a0a0ab', label: 'Embedded Terminal',         desc: 'Full shell (PowerShell / bash / zsh) inside the right panel. Run commands alongside your chat without leaving the app.' },
+    ];
+
     return `
-      <div class="console-page">
+      <div class="console-page ov-page">
 
-        <!-- ── Hero card ───────────────────────────────────────── -->
-        <div class="ov-hero">
-          <!-- Glow orbs -->
-          <div class="ov-hero__orb ov-hero__orb--1"></div>
-          <div class="ov-hero__orb ov-hero__orb--2"></div>
+        <!-- ═══════════════════════════ HERO ═══════════════════════════ -->
+        <div class="ov2-hero">
+          <div class="ov2-hero__glow ov2-hero__glow--1"></div>
+          <div class="ov2-hero__glow ov2-hero__glow--2"></div>
 
-          <div class="ov-hero__inner">
-            <!-- Top badges row -->
-            <div class="ov-hero__badges">
-              <span class="ov-badge ov-badge--accent">
-                <span class="ov-badge__dot"></span>Fan-made · v0.1 · Concept
-              </span>
-              <code class="ov-badge ov-badge--code">$ claude --dangerously-skip-permissions</code>
+          <div class="ov2-hero__top">
+            <span class="ov2-badge ov2-badge--live">
+              <span class="ov2-badge__pulse"></span>Live build
+            </span>
+            <span class="ov2-badge ov2-badge--code">v0.2 · Electron + Vite</span>
+            <span class="ov2-badge ov2-badge--code" style="font-family:monospace;font-size:10px">$ claude --dangerously-skip-permissions</span>
+          </div>
+
+          <div class="ov2-hero__body">
+            <div class="ov2-logo">${CLAUDE_SVG}</div>
+            <div class="ov2-hero__text">
+              <h1 class="ov2-h1">Claude Code <em>Mods</em></h1>
+              <p class="ov2-tagline">A custom Electron shell for Claude Code CLI — parallel agent panels, live code review, drag-to-dockview sessions, and a full settings dashboard. Fan-made. Open source.</p>
             </div>
+          </div>
 
-            <!-- Logo + title -->
-            <div class="ov-hero__title-row">
-              <div class="ov-logo">
-                <svg viewBox="0 0 24 24" fill="none" width="36" height="36">
-                  <path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" fill="#d97757"/>
-                </svg>
+          <div class="ov2-hero__actions">
+            <button class="ov2-btn ov2-btn--primary" data-quick="new-session">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              New session
+            </button>
+            <button class="ov2-btn ov2-btn--ghost" data-quick="open-kb">Knowledge Base</button>
+            <a class="ov2-btn ov2-btn--ghost" href="https://github.com/hlsitechio/Claude-Code-Mods" target="_blank">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+              GitHub
+            </a>
+          </div>
+        </div>
+
+        <!-- ═══════════════════════════ LIVE STATS ═══════════════════════════ -->
+        <div class="ov2-section-label">YOUR WORKSPACE</div>
+        <div class="ov2-stats">
+          <div class="ov2-stat-card">
+            <div class="ov2-stat-card__val">${totalSessions}</div>
+            <div class="ov2-stat-card__key">Sessions</div>
+          </div>
+          <div class="ov2-stat-card">
+            <div class="ov2-stat-card__val">${agents.length}</div>
+            <div class="ov2-stat-card__key">Agents</div>
+          </div>
+          <div class="ov2-stat-card">
+            <div class="ov2-stat-card__val ov2-stat-card__val--sm">${escapeHTML(model.replace('claude-',''))}</div>
+            <div class="ov2-stat-card__key">Active model</div>
+          </div>
+          <div class="ov2-stat-card">
+            <div class="ov2-stat-card__val ov2-stat-card__val--sm" style="color:${permColor};text-transform:uppercase;letter-spacing:.06em">${permCurrent}</div>
+            <div class="ov2-stat-card__key">Permission mode</div>
+          </div>
+          <div class="ov2-stat-card">
+            <div class="ov2-stat-card__val ov2-stat-card__val--sm">${state.projects.length}</div>
+            <div class="ov2-stat-card__key">Projects</div>
+          </div>
+          <div class="ov2-stat-card">
+            <div class="ov2-stat-card__val ov2-stat-card__val--sm" style="color:#7ab389">Live</div>
+            <div class="ov2-stat-card__key">API status</div>
+          </div>
+        </div>
+
+        <!-- ═══════════════════════════ FEATURES ═══════════════════════════ -->
+        <div class="ov2-section-label" style="margin-top:32px">CAPABILITIES</div>
+        <div class="ov2-features">
+          ${features.map(f => `
+            <div class="ov2-feat">
+              <div class="ov2-feat__icon" style="color:${f.color};background:${f.color}18">
+                ${_fsvg(f.icon)}
               </div>
-              <h1 class="ov-hero__h1">Claude Code <span class="ov-hero__accent">Mods</span></h1>
-            </div>
-
-            <!-- Tagline stats row -->
-            <div class="ov-hero__tagline-row">
-              <span class="ov-stat">${totalSessions} session${totalSessions !== 1 ? 's' : ''} built</span>
-              <span class="ov-stat__sep">·</span>
-              <span class="ov-stat">${agents.length} agent${agents.length !== 1 ? 's' : ''}</span>
-              <span class="ov-stat__sep">·</span>
-              <span class="ov-stat">Live Anthropic API</span>
-            </div>
-
-            <!-- Description -->
-            <p class="ov-hero__desc">
-              A community sketch exploring what the Claude Code desktop sidebar
-              <em>could</em> feel like — tree-style projects, per-color accents, and a calmer settings surface.
-            </p>
-
-            <!-- Feature chips -->
-            <div class="ov-chips">
-              <span class="ov-chip ov-chip--orange">Projects &amp; sessions</span>
-              <span class="ov-chip ov-chip--blue">Per-project color cascade</span>
-              <span class="ov-chip ov-chip--green">Consolidated settings tree</span>
-              <span class="ov-chip ov-chip--purple">Light + dark themes</span>
-              <span class="ov-chip ov-chip--yellow">i18n (EN/FR)</span>
-            </div>
-
-            <!-- CTA row -->
-            <div class="ov-hero__cta">
-              <button class="ov-btn ov-btn--filled" data-quick="new-session">
-                ${iconSVG('plus')}<span>New session</span>
-              </button>
-              <button class="ov-btn ov-btn--ghost" data-quick="open-kb">
-                <span>Knowledge Base →</span>
-              </button>
-              <span class="ov-hero__hint">New session · ${escapeHTML(model.replace('claude-','').replace(/-\d+$/,''))}</span>
-            </div>
-          </div>
+              <div class="ov2-feat__body">
+                <div class="ov2-feat__label">${f.label}</div>
+                <div class="ov2-feat__desc">${f.desc}</div>
+              </div>
+            </div>`).join('')}
         </div>
 
-        <!-- ── Stats cards ──────────────────────────────────────── -->
-        <div class="console-cards" style="margin-top:20px">
-          <div class="console-card">
-            <div class="console-card__val">${totalSessions}</div>
-            <div class="console-card__label">Sessions</div>
-          </div>
-          <div class="console-card">
-            <div class="console-card__val">${agents.length}</div>
-            <div class="console-card__label">Agents</div>
-          </div>
-          <div class="console-card">
-            <div class="console-card__val" style="font-size:13px">${escapeHTML(model.replace('claude-',''))}</div>
-            <div class="console-card__label">Active model</div>
-          </div>
-          <div class="console-card">
-            <div class="console-card__val" style="font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:${permCurrent==='bypass'?'#c96442':permCurrent==='accept'?'#7ab389':permCurrent==='plan'?'#6a86c3':'#a0a0ab'}">${permCurrent}</div>
-            <div class="console-card__label">Permission mode</div>
-          </div>
+        <!-- ═══════════════════════════ SKILLS ═══════════════════════════ -->
+        <div class="ov2-section-label" style="margin-top:32px">ACTIVE CLAUDE.md SKILLS</div>
+        <div class="ov2-chips" id="ov-skill-chips">
+          ${knownSkills.map(s => `<span class="ov2-chip ov2-chip--active">${escapeHTML(s)}</span>`).join('')}
+          <span class="ov2-chip">workspace-index.json</span>
+          <span class="ov2-chip">cwd = app root</span>
         </div>
 
-        <!-- ── Skills ───────────────────────────────────────────── -->
-        <div class="console-section-title" style="margin-top:24px">CLAUDE.md skills active</div>
-        <div class="console-skill-chips" id="ov-skill-chips">
-          ${knownSkills.map(s => `<span class="console-chip">${escapeHTML(s)}</span>`).join('')}
-          <span class="console-chip console-chip--dim">workspace-index.json</span>
-          <span class="console-chip console-chip--dim">cwd → app root</span>
+        <!-- ═══════════════════════════ FOOTER ═══════════════════════════ -->
+        <div class="ov2-footer">
+          <span>Claude Code Mods · Fan-made · Not affiliated with Anthropic</span>
+          <a class="ov2-footer__link" href="https://github.com/hlsitechio/Claude-Code-Mods" target="_blank">github.com/hlsitechio/Claude-Code-Mods</a>
         </div>
+
       </div>`;
   }
 
@@ -2292,16 +2526,19 @@ function showConsole(initialPage = 'overview') {
     return `
       <div class="console-page console-page--kb">
         <div class="console-page__head" style="padding-bottom:0">
-          <h1 class="console-page__title">Knowledge Base</h1>
+          <h1 class="console-page__title">Skills</h1>
           <p class="console-page__sub" style="margin-bottom:12px">
-            Internal config editor — <strong>drafts stay in-app</strong>; publish to push to disk (what the CLI reads).
+            Reusable instruction files injected via <code style="font-size:11px;background:#1a1a1d;padding:1px 5px;border-radius:3px">@skills/filename.md</code> — edit, create, or toggle active in CLAUDE.md.
           </p>
         </div>
 
         <div class="console-kb-layout">
           <!-- File list sidebar -->
           <div class="console-kb-sidebar" id="cons-kb-list">
-            <div class="cons-kb-sidebar-head">Files</div>
+            <div class="cons-kb-sidebar-head" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Files</span>
+              <button class="icon-btn icon-btn--sm" id="cons-kb-new" title="New skill file" style="-webkit-app-region:no-drag">${iconSVG('plus')}</button>
+            </div>
             <div style="padding:8px;color:#5a5a63;font-size:12px">Loading…</div>
           </div>
 
@@ -2312,35 +2549,42 @@ function showConsole(initialPage = 'overview') {
             <div class="console-kb-editor__bar">
               <span class="console-kb-path" id="cons-kb-path" title="">Select a file</span>
 
+              <!-- Skill-specific quick actions (hidden for system files) -->
+              <div id="cons-kb-skill-actions" style="display:none;align-items:center;gap:5px">
+                <button class="console-btn console-btn--sm" id="cons-kb-copy-import" title="Copy @skills/… path to clipboard">Copy @import</button>
+                <button class="console-btn console-btn--sm" id="cons-kb-toggle-active" title="Add/remove this skill from CLAUDE.md">Activate</button>
+                <button class="console-btn console-btn--sm console-btn--danger" id="cons-kb-delete-skill" title="Delete this skill file">Delete</button>
+              </div>
+
               <!-- View-mode toggle -->
               <div class="kb-view-toggle" id="kb-view-toggle">
-                <button class="kb-view-btn is-active" data-view="edit"  title="Edit">Edit</button>
-                <button class="kb-view-btn"            data-view="split" title="Split">Split</button>
+                <button class="kb-view-btn is-active" data-view="edit"    title="Edit">Edit</button>
+                <button class="kb-view-btn"            data-view="split"   title="Split">Split</button>
                 <button class="kb-view-btn"            data-view="preview" title="Preview">Preview</button>
               </div>
 
               <!-- Save state badge + action buttons -->
               <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
                 <span class="kb-state-badge kb-state-badge--clean" id="cons-kb-badge" style="display:none"></span>
-                <button class="console-btn console-btn--sm" id="cons-kb-revert" disabled title="Discard unsaved edits and reload">Revert</button>
-                <button class="console-btn console-btn--sm" id="cons-kb-draft"  disabled title="Save draft (in-app only, not written to disk — Ctrl+S)">Save draft</button>
+                <button class="console-btn console-btn--sm" id="cons-kb-revert"  disabled title="Discard unsaved edits">Revert</button>
+                <button class="console-btn console-btn--sm" id="cons-kb-draft"   disabled title="Save draft in-app (Ctrl+S)">Save draft</button>
                 <button class="console-btn console-btn--sm console-btn--publish" id="cons-kb-publish" disabled title="Write to disk — CLI picks this up on next session">Publish →</button>
               </div>
             </div>
 
             <!-- Markdown toolbar -->
             <div class="kb-toolbar" id="kb-toolbar">
-              <button class="kb-tb-btn" data-insert="# "     title="Heading 1">H1</button>
-              <button class="kb-tb-btn" data-insert="## "    title="Heading 2">H2</button>
-              <button class="kb-tb-btn" data-insert="### "   title="Heading 3">H3</button>
+              <button class="kb-tb-btn" data-insert="# "        title="Heading 1">H1</button>
+              <button class="kb-tb-btn" data-insert="## "       title="Heading 2">H2</button>
+              <button class="kb-tb-btn" data-insert="### "      title="Heading 3">H3</button>
               <span class="kb-tb-sep"></span>
-              <button class="kb-tb-btn" data-wrap="**"       title="Bold">B</button>
-              <button class="kb-tb-btn" data-wrap="*"        title="Italic" style="font-style:italic">I</button>
-              <button class="kb-tb-btn" data-wrap="BACKTICK"  title="Inline code" style="font-family:monospace">&#96;c&#96;</button>
+              <button class="kb-tb-btn" data-wrap="**"          title="Bold">B</button>
+              <button class="kb-tb-btn" data-wrap="*"           title="Italic" style="font-style:italic">I</button>
+              <button class="kb-tb-btn" data-wrap="BACKTICK"    title="Inline code" style="font-family:monospace">&#96;c&#96;</button>
               <span class="kb-tb-sep"></span>
               <button class="kb-tb-btn" data-insert="CODEBLOCK" title="Code block">&#96;&#96;&#96;</button>
-              <button class="kb-tb-btn" data-insert="\n---\n" title="Divider">—</button>
-              <button class="kb-tb-btn" data-insert="@skills/" title="Import skill">@</button>
+              <button class="kb-tb-btn" data-insert="\n---\n"   title="Divider">—</button>
+              <button class="kb-tb-btn" data-insert="@skills/"  title="Insert @skills/ import">@</button>
             </div>
 
             <!-- Edit + Preview panes -->
@@ -2741,6 +2985,9 @@ function showConsole(initialPage = 'overview') {
     mainEl.innerHTML = PAGES[pageId]();
     if (window.renderIcons) window.renderIcons(mainEl);
     wirePageEvents(pageId);
+    // Update titlebar to reflect current console page
+    const pageLabel = NAV.find(n => n.id === pageId)?.label || pageId;
+    setTitleText(pageLabel);
   }
 
   function wirePageEvents(pageId) {
@@ -2838,17 +3085,22 @@ function showConsole(initialPage = 'overview') {
     const kb = window.electronAPI?.kb;
 
     // DOM refs
-    const listEl     = mainEl.querySelector('#cons-kb-list');
-    const ta         = mainEl.querySelector('#cons-kb-ta');
-    const pathEl     = mainEl.querySelector('#cons-kb-path');
-    const badge      = mainEl.querySelector('#cons-kb-badge');
-    const revertBtn  = mainEl.querySelector('#cons-kb-revert');
-    const draftBtn   = mainEl.querySelector('#cons-kb-draft');
-    const publishBtn = mainEl.querySelector('#cons-kb-publish');
-    const statEl     = mainEl.querySelector('#cons-kb-status');
-    const panesEl    = mainEl.querySelector('#kb-panes');
-    const previewEl  = mainEl.querySelector('#kb-preview-body');
-    const toolbar    = mainEl.querySelector('#kb-toolbar');
+    const listEl         = mainEl.querySelector('#cons-kb-list');
+    const ta             = mainEl.querySelector('#cons-kb-ta');
+    const pathEl         = mainEl.querySelector('#cons-kb-path');
+    const badge          = mainEl.querySelector('#cons-kb-badge');
+    const revertBtn      = mainEl.querySelector('#cons-kb-revert');
+    const draftBtn       = mainEl.querySelector('#cons-kb-draft');
+    const publishBtn     = mainEl.querySelector('#cons-kb-publish');
+    const statEl         = mainEl.querySelector('#cons-kb-status');
+    const panesEl        = mainEl.querySelector('#kb-panes');
+    const previewEl      = mainEl.querySelector('#kb-preview-body');
+    const toolbar        = mainEl.querySelector('#kb-toolbar');
+    const newBtn         = mainEl.querySelector('#cons-kb-new');
+    const skillActionsEl = mainEl.querySelector('#cons-kb-skill-actions');
+    const copyImportBtn  = mainEl.querySelector('#cons-kb-copy-import');
+    const toggleActiveBtn= mainEl.querySelector('#cons-kb-toggle-active');
+    const deleteSkillBtn = mainEl.querySelector('#cons-kb-delete-skill');
 
     // Draft storage helpers
     const DRAFT_PREFIX = 'ccmod.kb.draft.';
@@ -2910,28 +3162,65 @@ function showConsole(initialPage = 'overview') {
     }
 
     kb.list().then(files => {
-      // Render file list with draft indicator dots
+      // Track which skills are @-imported in CLAUDE.md
+      let activeSkills = new Set();
+      async function refreshActiveSkills() {
+        try {
+          const res = await kb.read('project-claude');
+          if (!res.ok) return;
+          activeSkills = new Set(
+            [...res.content.matchAll(/@skills\/([^\s\n]+)/g)].map(m => m[1])
+          );
+        } catch {}
+      }
+
+      // ── Render grouped file list ──────────────────────────
       function renderList() {
         const inner = listEl.querySelector('.cons-kb-files') || (() => {
           const d = document.createElement('div'); d.className = 'cons-kb-files'; return listEl.appendChild(d);
         })();
-        inner.innerHTML = files.map(f => {
-          const hasDraft = getDraft(f.id) !== null;
+
+        const skills = files.filter(f => f.id.startsWith('skill-'));
+        const system = files.filter(f => !f.id.startsWith('skill-'));
+
+        function fileRow(f) {
+          const hasDraft  = getDraft(f.id) !== null;
+          const isActive  = f.id.startsWith('skill-') && activeSkills.has(f.label);
           return `
             <button class="cons-kb-item${activeId === f.id ? ' is-active' : ''}" data-id="${f.id}">
               <span class="cons-kb-item__ico">${iconSVG(f.icon)}</span>
               <span class="cons-kb-item__label">${escapeHTML(f.label)}</span>
-              ${hasDraft ? '<span class="cons-kb-dot" title="Has unsaved draft"></span>' : ''}
+              <span style="margin-left:auto;display:flex;align-items:center;gap:4px">
+                ${isActive  ? '<span style="font-size:9px;color:#7ab389;background:#0d2218;border:1px solid #1a3d2a;border-radius:3px;padding:0 4px;line-height:16px">active</span>' : ''}
+                ${hasDraft  ? '<span class="cons-kb-dot" title="Has unsaved draft"></span>' : ''}
+              </span>
             </button>`;
-        }).join('');
+        }
+
+        inner.innerHTML = `
+          <div class="cons-kb-group-label">Skills</div>
+          ${skills.map(fileRow).join('')}
+          <div class="cons-kb-group-label" style="margin-top:10px">System</div>
+          ${system.map(fileRow).join('')}`;
         if (window.renderIcons) window.renderIcons(inner);
       }
-      renderList();
+
+      // ── Update skill-specific action bar ─────────────────
+      function updateSkillActions(id) {
+        const isSkill = id?.startsWith('skill-');
+        if (skillActionsEl) skillActionsEl.style.display = isSkill ? 'flex' : 'none';
+        if (!isSkill || !toggleActiveBtn) return;
+        const file = files.find(f => f.id === id);
+        const isActive = file && activeSkills.has(file.label);
+        toggleActiveBtn.textContent = isActive ? 'Deactivate' : 'Activate';
+        toggleActiveBtn.style.color = isActive ? '#c96442' : '';
+      }
+
+      refreshActiveSkills().then(() => renderList());
 
       // ── Load a file ──────────────────────────────────────
       async function loadFile(id) {
         if (activeId === id) return;
-        // Warn if current file has unsaved in-memory edits
         if (activeId && ta.value !== (draftContent ?? diskContent)) {
           if (!confirm('You have unsaved edits. Switch anyway? (Your draft is already saved.)')) return;
         }
@@ -2941,15 +3230,13 @@ function showConsole(initialPage = 'overview') {
         pathEl.textContent = 'Loading…';
         badge.style.display = 'none';
         [revertBtn, draftBtn, publishBtn].forEach(b => b.disabled = true);
+        updateSkillActions(id);
 
-        // Read from disk
         const res = await kb.read(id);
         if (!res.ok) { setStatus(res.error, true); ta.disabled = false; return; }
 
         diskContent  = res.content;
-        draftContent = getDraft(id);       // null if no draft
-
-        // Load draft if exists, otherwise disk content
+        draftContent = getDraft(id);
         ta.value     = draftContent ?? diskContent;
         pathEl.textContent = res.path;
         ta.disabled  = false;
@@ -3050,6 +3337,73 @@ function showConsole(initialPage = 'overview') {
           setStatus(res.error, true);
           publishBtn.disabled = false;
         }
+      });
+
+      // ── New skill ────────────────────────────────────────
+      if (newBtn) newBtn.addEventListener('click', async () => {
+        const name = prompt('Skill name (e.g. "testing-guide"):');
+        if (!name?.trim()) return;
+        const res = await kb.createSkill(name.trim());
+        if (!res.ok) { setStatus(res.error, true); return; }
+        files.push({ id: res.id, label: res.label, icon: 'sparkle' });
+        renderList();
+        loadFile(res.id);
+        setStatus('Skill created — add instructions and publish to disk');
+      });
+
+      // ── Copy @import path ─────────────────────────────────
+      if (copyImportBtn) copyImportBtn.addEventListener('click', () => {
+        const file = files.find(f => f.id === activeId);
+        if (!file) return;
+        const importStr = `@skills/${file.label}`;
+        navigator.clipboard?.writeText(importStr).then(() => setStatus(`Copied: ${importStr}`));
+      });
+
+      // ── Toggle active in CLAUDE.md ────────────────────────
+      if (toggleActiveBtn) toggleActiveBtn.addEventListener('click', async () => {
+        const file = files.find(f => f.id === activeId);
+        if (!file) return;
+        const claudeRes = await kb.read('project-claude');
+        if (!claudeRes.ok) { setStatus('Could not read CLAUDE.md', true); return; }
+        const importLine = `@skills/${file.label}`;
+        let content = claudeRes.content;
+        if (activeSkills.has(file.label)) {
+          // Remove
+          content = content.split('\n').filter(l => l.trim() !== importLine).join('\n');
+          activeSkills.delete(file.label);
+        } else {
+          // Add at top (after first line if it starts with #)
+          const lines = content.split('\n');
+          const insertAt = lines[0]?.startsWith('#') ? 1 : 0;
+          lines.splice(insertAt, 0, importLine);
+          content = lines.join('\n');
+          activeSkills.add(file.label);
+        }
+        const writeRes = await kb.write('project-claude', content);
+        if (!writeRes.ok) { setStatus(writeRes.error, true); return; }
+        renderList();
+        updateSkillActions(activeId);
+        setStatus(activeSkills.has(file.label) ? `${file.label} activated in CLAUDE.md` : `${file.label} removed from CLAUDE.md`);
+      });
+
+      // ── Delete skill ──────────────────────────────────────
+      if (deleteSkillBtn) deleteSkillBtn.addEventListener('click', async () => {
+        const file = files.find(f => f.id === activeId);
+        if (!file) return;
+        if (!confirm(`Delete "${file.label}"? This cannot be undone.`)) return;
+        const res = await kb.deleteSkill(activeId);
+        if (!res.ok) { setStatus(res.error, true); return; }
+        const idx = files.findIndex(f => f.id === activeId);
+        if (idx !== -1) files.splice(idx, 1);
+        activeId = null;
+        ta.value = ''; ta.disabled = true;
+        pathEl.textContent = 'Select a file';
+        badge.style.display = 'none';
+        [revertBtn, draftBtn, publishBtn].forEach(b => b.disabled = true);
+        updateSkillActions(null);
+        renderList();
+        setStatus('Skill deleted');
+        if (files.length) loadFile(files[0].id);
       });
 
       // Auto-open first file
@@ -3414,6 +3768,8 @@ function showConsole(initialPage = 'overview') {
   function closeConsole() {
     overlay.remove();
     document.removeEventListener('keydown', onConsoleKey);
+    // Restore session-based title now that the console is gone
+    updateTitleBar(state.activeId);
   }
 
   navigate(initialPage);
@@ -3571,6 +3927,440 @@ async function showKnowledgeBaseEditor() {
   }
 }
 
+// ── Notes Editor ─────────────────────────────────────────────────────────────
+async function showNotesEditor() {
+  if (document.getElementById('notes-overlay')) {
+    document.getElementById('notes-overlay').focus?.();
+    return;
+  }
+
+  const api = window.electronAPI?.notes;
+
+  // ── Simple MD → HTML renderer for the preview pane ──────────────────────
+  function renderNotesMd(raw) {
+    if (!raw) return '<p class="notes-preview__empty">Nothing to preview.</p>';
+    let html = raw
+      // Fenced code blocks
+      .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+        `<pre class="notes-pre"><code>${escapeHTML(code.trim())}</code></pre>`)
+      // Inline code
+      .replace(/`([^`]+)`/g, (_, c) => `<code class="notes-inline-code">${escapeHTML(c)}</code>`)
+      // Bold + italic
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*(.+?)\*\*/g,     '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g,         '<em>$1</em>')
+      // Horizontal rule
+      .replace(/^---+$/gm, '<hr class="notes-hr">')
+      // Blockquote
+      .replace(/^>\s?(.*)/gm, '<blockquote class="notes-bq">$1</blockquote>');
+    // Process line-by-line for headings, lists, paragraphs
+    const lines = html.split('\n');
+    const out   = [];
+    let inUL = false, inOL = false;
+    for (const line of lines) {
+      if (line.startsWith('<pre') || line.startsWith('<hr') || line.startsWith('<blockquote')) {
+        if (inUL) { out.push('</ul>'); inUL = false; }
+        if (inOL) { out.push('</ol>'); inOL = false; }
+        out.push(line); continue;
+      }
+      const h3 = line.match(/^###\s+(.*)/); if (h3) { out.push(`<h3>${h3[1]}</h3>`); inUL=inOL=false; continue; }
+      const h2 = line.match(/^##\s+(.*)/);  if (h2) { out.push(`<h2>${h2[1]}</h2>`); inUL=inOL=false; continue; }
+      const h1 = line.match(/^#\s+(.*)/);   if (h1) { out.push(`<h1>${h1[1]}</h1>`); inUL=inOL=false; continue; }
+      const ul = line.match(/^[-*]\s+(.*)/);
+      if (ul) { if (!inUL) { if (inOL) { out.push('</ol>'); inOL=false; } out.push('<ul>'); inUL=true; } out.push(`<li>${ul[1]}</li>`); continue; }
+      const ol = line.match(/^\d+\.\s+(.*)/);
+      if (ol) { if (!inOL) { if (inUL) { out.push('</ul>'); inUL=false; } out.push('<ol>'); inOL=true; } out.push(`<li>${ol[1]}</li>`); continue; }
+      if (inUL) { out.push('</ul>'); inUL = false; }
+      if (inOL) { out.push('</ol>'); inOL = false; }
+      if (!line.trim()) { out.push('<br>'); continue; }
+      out.push(`<p>${line}</p>`);
+    }
+    if (inUL) out.push('</ul>');
+    if (inOL) out.push('</ol>');
+    return out.join('\n');
+  }
+
+  // ── Toolbar helpers ──────────────────────────────────────────────────────
+  function wrapSelection(ta, before, after = before, placeholder = '') {
+    const start = ta.selectionStart, end = ta.selectionEnd;
+    const sel   = ta.value.slice(start, end) || placeholder;
+    const newVal = ta.value.slice(0, start) + before + sel + after + ta.value.slice(end);
+    ta.value = newVal;
+    const cursor = start + before.length + sel.length;
+    ta.setSelectionRange(cursor, cursor);
+    ta.dispatchEvent(new Event('input'));
+    ta.focus();
+  }
+  function insertLine(ta, prefix) {
+    const start = ta.selectionStart;
+    const lineStart = ta.value.lastIndexOf('\n', start - 1) + 1;
+    const lineEnd   = ta.value.indexOf('\n', start);
+    const line = ta.value.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+    const already = line.startsWith(prefix);
+    const newLine  = already ? line.slice(prefix.length) : prefix + line;
+    ta.value = ta.value.slice(0, lineStart) + newLine + (lineEnd === -1 ? '' : ta.value.slice(lineEnd));
+    ta.setSelectionRange(lineStart + newLine.length, lineStart + newLine.length);
+    ta.dispatchEvent(new Event('input'));
+    ta.focus();
+  }
+
+  // ── Overlay shell ────────────────────────────────────────────────────────
+  const overlay = document.createElement('div');
+  overlay.id = 'notes-overlay';
+  overlay.className = 'notes-overlay';
+  overlay.innerHTML = `
+    <div class="notes-modal">
+
+      <!-- ── Left sidebar: note list ── -->
+      <aside class="notes-sidebar">
+        <div class="notes-sidebar__head">
+          <span class="notes-sidebar__title">Notes</span>
+          <button class="notes-icon-btn" id="notes-new-btn" title="New note">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+        </div>
+        <div class="notes-search-wrap">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="notes-search" id="notes-search" placeholder="Search notes…" spellcheck="false">
+        </div>
+        <div class="notes-list" id="notes-list">
+          <div class="notes-list__empty">Loading…</div>
+        </div>
+      </aside>
+
+      <!-- ── Right editor ── -->
+      <div class="notes-editor" id="notes-editor">
+        <div class="notes-editor__head">
+          <input class="notes-title-input" id="notes-title-input" placeholder="Note title…" spellcheck="false">
+          <div class="notes-editor__tools">
+            <span class="notes-status" id="notes-status"></span>
+            <button class="notes-tool-btn" id="notes-preview-btn" title="Toggle preview">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span>Preview</span>
+            </button>
+            <button class="notes-tool-btn notes-tool-btn--danger" id="notes-delete-btn" title="Delete note">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+            </button>
+            <button class="notes-icon-btn notes-close-btn" id="notes-close-btn" title="Close (Esc)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="notes-toolbar" id="notes-toolbar">
+          <button class="notes-tb-btn" data-tb="bold"    title="Bold (Ctrl+B)"><strong>B</strong></button>
+          <button class="notes-tb-btn" data-tb="italic"  title="Italic (Ctrl+I)"><em>I</em></button>
+          <div class="notes-tb-sep"></div>
+          <button class="notes-tb-btn" data-tb="h1"      title="Heading 1">H1</button>
+          <button class="notes-tb-btn" data-tb="h2"      title="Heading 2">H2</button>
+          <button class="notes-tb-btn" data-tb="h3"      title="Heading 3">H3</button>
+          <div class="notes-tb-sep"></div>
+          <button class="notes-tb-btn" data-tb="code"    title="Inline code"><code style="font-size:11px">\`\`</code></button>
+          <button class="notes-tb-btn" data-tb="codeblock" title="Code block">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          </button>
+          <div class="notes-tb-sep"></div>
+          <button class="notes-tb-btn" data-tb="ul"      title="Bullet list">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button class="notes-tb-btn" data-tb="ol"      title="Numbered list">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1.5"/></svg>
+          </button>
+          <button class="notes-tb-btn" data-tb="bq"      title="Blockquote">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
+          </button>
+          <div class="notes-tb-sep"></div>
+          <button class="notes-tb-btn" data-tb="link"    title="Link">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          </button>
+          <button class="notes-tb-btn" data-tb="hr"      title="Horizontal rule">—</button>
+        </div>
+
+        <div class="notes-panes" id="notes-panes">
+          <textarea class="notes-textarea" id="notes-textarea"
+            placeholder="Start writing… (Markdown supported)"
+            spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+          <div class="notes-preview" id="notes-preview"></div>
+        </div>
+
+        <div class="notes-footer" id="notes-footer">
+          <span id="notes-word-count" class="notes-footer__stat"></span>
+          <span id="notes-char-count" class="notes-footer__stat"></span>
+          <span class="notes-footer__hint">Ctrl+S  save · Ctrl+P  preview</span>
+        </div>
+      </div>
+
+    </div>`;
+  document.body.appendChild(overlay);
+
+  // ── State ────────────────────────────────────────────────────────────────
+  let activeId      = null;
+  let savedContent  = '';
+  let _saveTimer    = null;
+  let _previewMode  = false;
+  let _allNotes     = [];
+
+  // ── Element refs ─────────────────────────────────────────────────────────
+  const listEl      = overlay.querySelector('#notes-list');
+  const searchEl    = overlay.querySelector('#notes-search');
+  const titleInput  = overlay.querySelector('#notes-title-input');
+  const textarea    = overlay.querySelector('#notes-textarea');
+  const previewEl   = overlay.querySelector('#notes-preview');
+  const statusEl    = overlay.querySelector('#notes-status');
+  const wordCountEl = overlay.querySelector('#notes-word-count');
+  const charCountEl = overlay.querySelector('#notes-char-count');
+  const previewBtn  = overlay.querySelector('#notes-preview-btn');
+  const toolbar     = overlay.querySelector('#notes-toolbar');
+  const editorPane  = overlay.querySelector('#notes-editor');
+
+  // ── Status helpers ───────────────────────────────────────────────────────
+  function setStatus(msg, isError = false) {
+    statusEl.textContent  = msg;
+    statusEl.style.color  = isError ? '#c96442' : '#7ab389';
+    if (msg && !isError) setTimeout(() => { if (statusEl.textContent === msg) statusEl.textContent = ''; }, 2500);
+  }
+  function updateCounts() {
+    const txt = textarea.value;
+    const words = txt.trim() ? txt.trim().split(/\s+/).length : 0;
+    wordCountEl.textContent = `${words} word${words !== 1 ? 's' : ''}`;
+    charCountEl.textContent = `${txt.length} chars`;
+  }
+
+  // ── Note list rendering ──────────────────────────────────────────────────
+  function renderList(notes, filterQ = '') {
+    const q = filterQ.toLowerCase().trim();
+    const filtered = q ? notes.filter(n =>
+      n.title.toLowerCase().includes(q) || (n.preview || '').toLowerCase().includes(q)
+    ) : notes;
+    if (!filtered.length) {
+      listEl.innerHTML = `<div class="notes-list__empty">${q ? 'No results' : 'No notes yet'}</div>`;
+      return;
+    }
+    listEl.innerHTML = filtered.map(n => `
+      <button class="notes-list__item${n.id === activeId ? ' is-active' : ''}" data-id="${n.id}">
+        <span class="notes-list__item-title">${escapeHTML(n.title)}</span>
+        <span class="notes-list__item-preview">${escapeHTML(n.preview || '')}</span>
+      </button>`).join('');
+    listEl.querySelectorAll('.notes-list__item').forEach(btn => {
+      btn.addEventListener('click', () => loadNote(btn.dataset.id));
+    });
+  }
+
+  // ── Load a note ──────────────────────────────────────────────────────────
+  async function loadNote(id) {
+    if (activeId === id) return;
+    if (activeId && textarea.value !== savedContent) await autoSave();
+    activeId = id;
+    const meta = _allNotes.find(n => n.id === id);
+    titleInput.value = meta?.title || id.replace(/\.md$/, '');
+    textarea.value   = '';
+    savedContent     = '';
+    updateCounts();
+    renderList(_allNotes, searchEl.value);
+    // Switch off preview
+    if (_previewMode) togglePreview(false);
+    editorPane.dataset.loaded = '0';
+    setStatus('Loading…');
+    if (api) {
+      const res = await api.read(id);
+      if (res?.ok) {
+        textarea.value = res.content;
+        savedContent   = res.content;
+        // Derive title from first heading if present
+        const headMatch = res.content.match(/^#\s+(.+)/m);
+        if (headMatch) titleInput.value = headMatch[1].trim();
+        setStatus('');
+      } else {
+        setStatus('Failed to load', true);
+      }
+    } else {
+      // Dev mode: stub
+      textarea.value = savedContent = `# ${titleInput.value}\n\nDev mode — no Electron API.`;
+    }
+    editorPane.dataset.loaded = '1';
+    updateCounts();
+    textarea.focus();
+  }
+
+  // ── Auto-save (debounced 800 ms) ─────────────────────────────────────────
+  async function autoSave() {
+    if (!activeId || textarea.value === savedContent) return;
+    clearTimeout(_saveTimer);
+    const content = textarea.value;
+    savedContent  = content;
+    setStatus('Saving…');
+    if (api) {
+      const res = await api.write(activeId, content);
+      if (res?.ok) {
+        setStatus('Saved ✓');
+        // Update in-memory list entry
+        const idx = _allNotes.findIndex(n => n.id === activeId);
+        if (idx >= 0) {
+          _allNotes[idx].mtime = Date.now();
+          const lines = content.split('\n');
+          if (lines[0]?.startsWith('# ')) _allNotes[idx].title = lines[0].slice(2).trim();
+          _allNotes[idx].preview = lines.filter(l => l.trim() && !l.startsWith('#')).slice(0,2).join(' ').slice(0,80);
+        }
+      } else {
+        setStatus('Save failed', true);
+      }
+    } else {
+      setStatus('Saved ✓ (dev)');
+    }
+  }
+  function scheduleAutoSave() {
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(autoSave, 800);
+  }
+
+  // ── Preview toggle ───────────────────────────────────────────────────────
+  function togglePreview(force) {
+    _previewMode = typeof force === 'boolean' ? force : !_previewMode;
+    if (_previewMode) {
+      previewEl.innerHTML = renderNotesMd(textarea.value);
+      previewEl.style.display = 'block';
+      textarea.style.display  = 'none';
+      previewBtn.classList.add('is-active');
+      toolbar.style.opacity   = '0.35';
+      toolbar.style.pointerEvents = 'none';
+    } else {
+      previewEl.style.display = 'none';
+      textarea.style.display  = 'block';
+      previewBtn.classList.remove('is-active');
+      toolbar.style.opacity   = '';
+      toolbar.style.pointerEvents = '';
+      textarea.focus();
+    }
+  }
+
+  // ── Toolbar actions ──────────────────────────────────────────────────────
+  toolbar.addEventListener('click', e => {
+    const btn = e.target.closest('[data-tb]');
+    if (!btn || _previewMode) return;
+    const ta = textarea;
+    switch (btn.dataset.tb) {
+      case 'bold':      wrapSelection(ta, '**', '**', 'bold text'); break;
+      case 'italic':    wrapSelection(ta, '*',  '*',  'italic text'); break;
+      case 'code':      wrapSelection(ta, '`',  '`',  'code'); break;
+      case 'codeblock': wrapSelection(ta, '```\n', '\n```', 'code here'); break;
+      case 'h1':        insertLine(ta, '# ');  break;
+      case 'h2':        insertLine(ta, '## '); break;
+      case 'h3':        insertLine(ta, '### '); break;
+      case 'ul':        insertLine(ta, '- ');  break;
+      case 'ol':        insertLine(ta, '1. '); break;
+      case 'bq':        insertLine(ta, '> ');  break;
+      case 'link':      wrapSelection(ta, '[', '](url)', 'link text'); break;
+      case 'hr':        {
+        const pos = ta.selectionEnd;
+        ta.value = ta.value.slice(0, pos) + '\n\n---\n\n' + ta.value.slice(pos);
+        ta.setSelectionRange(pos + 7, pos + 7);
+        ta.dispatchEvent(new Event('input'));
+        ta.focus();
+        break;
+      }
+    }
+  });
+
+  // ── Title blur → rename ──────────────────────────────────────────────────
+  titleInput.addEventListener('blur', async () => {
+    if (!activeId) return;
+    const newTitle = titleInput.value.trim();
+    if (!newTitle) return;
+    const current = _allNotes.find(n => n.id === activeId);
+    if (current && current.title === newTitle) return;
+    // Sync title into note content (first heading)
+    let content = textarea.value;
+    if (content.match(/^#\s+/m)) {
+      content = content.replace(/^#\s+.*/m, `# ${newTitle}`);
+    } else {
+      content = `# ${newTitle}\n\n${content}`;
+    }
+    textarea.value = content;
+    await autoSave();
+    if (current) { current.title = newTitle; renderList(_allNotes, searchEl.value); }
+  });
+
+  // ── Textarea events ──────────────────────────────────────────────────────
+  textarea.addEventListener('input',   () => { updateCounts(); scheduleAutoSave(); });
+  textarea.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); clearTimeout(_saveTimer); autoSave(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'p') { e.preventDefault(); togglePreview(); }
+    // Tab → 2 spaces
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const s = textarea.selectionStart;
+      textarea.value = textarea.value.slice(0, s) + '  ' + textarea.value.slice(textarea.selectionEnd);
+      textarea.setSelectionRange(s + 2, s + 2);
+    }
+  });
+
+  // ── Search ───────────────────────────────────────────────────────────────
+  searchEl.addEventListener('input', () => renderList(_allNotes, searchEl.value));
+
+  // ── New note ─────────────────────────────────────────────────────────────
+  overlay.querySelector('#notes-new-btn').addEventListener('click', async () => {
+    if (api) {
+      const res = await api.create('Untitled');
+      if (res?.ok) {
+        await refreshList();
+        loadNote(res.id);
+      }
+    }
+  });
+
+  // ── Delete ───────────────────────────────────────────────────────────────
+  overlay.querySelector('#notes-delete-btn').addEventListener('click', async () => {
+    if (!activeId) return;
+    if (!confirm('Delete this note? This cannot be undone.')) return;
+    if (api) {
+      await api.delete(activeId);
+      activeId = null;
+      await refreshList();
+      if (_allNotes.length) loadNote(_allNotes[0].id);
+      else { titleInput.value = ''; textarea.value = ''; updateCounts(); }
+    }
+  });
+
+  // ── Preview toggle button ────────────────────────────────────────────────
+  previewBtn.addEventListener('click', () => togglePreview());
+
+  // ── Keyboard shortcut ────────────────────────────────────────────────────
+  function onNotesKey(e) {
+    if (e.key === 'Escape') close();
+  }
+  document.addEventListener('keydown', onNotesKey);
+
+  // ── Close ────────────────────────────────────────────────────────────────
+  function close() {
+    clearTimeout(_saveTimer);
+    if (activeId && textarea.value !== savedContent) autoSave();
+    overlay.remove();
+    document.removeEventListener('keydown', onNotesKey);
+  }
+  overlay.querySelector('#notes-close-btn').addEventListener('click', close);
+  overlay.addEventListener('mousedown', e => { if (e.target === overlay) close(); });
+
+  // ── Refresh note list ────────────────────────────────────────────────────
+  async function refreshList() {
+    if (api) {
+      _allNotes = await api.list() || [];
+    } else {
+      _allNotes = [{ id: 'live-note.md', title: 'Live Note', preview: 'Dev mode stub', mtime: Date.now() }];
+    }
+    renderList(_allNotes);
+  }
+
+  // ── Init ─────────────────────────────────────────────────────────────────
+  await refreshList();
+  if (_allNotes.length) {
+    loadNote(_allNotes[0].id);
+  } else if (api) {
+    // Create a starter note
+    const res = await api.create('Live Note');
+    if (res?.ok) { await refreshList(); loadNote(res.id); }
+  }
+}
+
 // ---------- Code-block actions (copy / download / preview / pin-canvas) ----------
 const langToExt = { css: 'css', javascript: 'js', typescript: 'ts', html: 'html',
                     json: 'json', markdown: 'md', python: 'py', bash: 'sh', sh: 'sh' };
@@ -3677,6 +4467,40 @@ document.addEventListener('click', (e) => {
         loadPhosphorIcons?.();
         requestAnimationFrame(() => initApercuScaling(bodyEl));
       }
+    }
+    return;
+  }
+  if (action === 'copy-path') {
+    const titleInput = block.querySelector('.code-block__title');
+    const pathTip    = block.querySelector('.code-block__path-tip');
+    const filename   = titleInput?.value.trim() || `untitled.${lang}`;
+    const rawCode    = body?.innerText || '';
+
+    const flashPath = (fullPath) => {
+      navigator.clipboard?.writeText(fullPath);
+      btn.classList.add('is-flashed');
+      btn.title = '✓ Path copied';
+      if (pathTip) {
+        pathTip.textContent = fullPath;
+        pathTip.classList.add('is-visible');
+      }
+      setTimeout(() => {
+        btn.classList.remove('is-flashed');
+        btn.title = 'Save & copy path';
+        pathTip?.classList.remove('is-visible');
+      }, 3000);
+    };
+
+    if (window.electronAPI?.codeblocks?.saveSrc) {
+      window.electronAPI.codeblocks.saveSrc(filename, lang, rawCode)
+        .then(res => { if (res?.filePath) { block.dataset.cbPath = res.filePath; flashPath(res.filePath); } })
+        .catch(() => {});
+    } else if (block.dataset.cbPath) {
+      // Already saved — just re-copy
+      flashPath(block.dataset.cbPath);
+    } else {
+      // Fallback: no Electron (dev browser) — copy a relative placeholder
+      flashPath(`./codeblocks/${filename.replace(/[^a-z0-9._\-]/gi,'_')}/${filename}`);
     }
     return;
   }
@@ -4309,6 +5133,8 @@ const rightPanelTabs = [
   { id: 'fichiers',  labelKey: 'rp_fichiers',  icon: 'folder-simple',shortcut: '⇧ Ctrl F' },
   { id: 'taches',    labelKey: 'rp_taches',    icon: 'kanban',       shortcut: ''         },
   { id: 'plan',      labelKey: 'rp_plan',      icon: 'list-bullets', shortcut: ''         },
+  { id: 'notes',     labelKey: 'rp_notes',     icon: 'note',         shortcut: ''         },
+  { id: 'skills',    labelKey: 'rp_skills',    icon: 'sparkle',      shortcut: ''         },
   { id: 'shortcuts', labelKey: 'rp_shortcuts', icon: 'keyboard',     shortcut: 'Ctrl /'   },
   { id: 'mcp',       labelKey: 'rp_mcp',       icon: 'plugs-connected', shortcut: ''      },
   { id: 'git',       labelKey: 'rp_git',       icon: 'git-branch',   shortcut: ''         },
@@ -4428,7 +5254,11 @@ function renderApercuPanel() {
             <i data-phosphor="circle-wavy-check" style="color:#7ab389;font-size:11px"></i>
             <span style="font-size:11.5px;color:#6a6a72">Claude · live preview</span>
           </div>
-          <span id="apercu-zoom-label" style="font-size:10.5px;color:#5a5a63;min-width:28px;text-align:right"></span>
+          <div class="apercu-zoom-ctrl" style="display:flex;align-items:center;gap:1px;background:#111114;border:1px solid #1e1e24;border-radius:5px;padding:0 2px">
+            <button class="icon-btn icon-btn--sm" id="apercu-zoom-out"   title="Zoom out (-)"><i data-phosphor="minus"></i></button>
+            <button id="apercu-zoom-label" title="Reset zoom" style="font-size:10.5px;color:#5a5a63;min-width:34px;text-align:center;background:none;border:none;cursor:pointer;padding:2px 3px;border-radius:3px">--</button>
+            <button class="icon-btn icon-btn--sm" id="apercu-zoom-in"    title="Zoom in (+)"><i data-phosphor="plus"></i></button>
+          </div>
           <button class="icon-btn icon-btn--sm" id="apercu-reload"      title="Reload"><i data-phosphor="arrow-clockwise"></i></button>
           <button class="icon-btn icon-btn--sm" id="apercu-fullscreen"  title="Full-screen"><i data-phosphor="arrows-out"></i></button>
         </div>
@@ -4467,20 +5297,57 @@ function initApercuScaling(container) {
   const wrap  = root.getElementById?.('apercu-vp-wrap')  || root.querySelector?.('#apercu-vp-wrap');
   const frame = root.getElementById?.('apercu-iframe')   || root.querySelector?.('#apercu-iframe');
   const label = root.getElementById?.('apercu-zoom-label') || root.querySelector?.('#apercu-zoom-label');
+  const btnIn  = root.getElementById?.('apercu-zoom-in')  || root.querySelector?.('#apercu-zoom-in');
+  const btnOut = root.getElementById?.('apercu-zoom-out') || root.querySelector?.('#apercu-zoom-out');
   if (!wrap || !frame) return;
 
   const VIRTUAL_W = 1280;
+  const STEP = 0.1;   // 10% per click
+  const MIN  = 0.2;
+  const MAX  = 3.0;
 
-  function applyScale() {
+  // Manual multiplier on top of auto-fit; null = auto-fit mode
+  let _manual = null;
+
+  function autoFitScale() {
     const w = wrap.clientWidth;
-    if (!w) return;
-    const scale = w / VIRTUAL_W;
-    frame.style.transform = `scale(${scale})`;
-    if (label) label.textContent = Math.round(scale * 100) + '%';
+    return w ? w / VIRTUAL_W : 1;
   }
 
+  function applyScale() {
+    const base  = autoFitScale();
+    const scale = _manual !== null ? _manual : base;
+    frame.style.transform = `scale(${scale})`;
+    // Keep iframe height proportional so scrollbar appears when zoomed in
+    frame.style.height = Math.round(900 / scale * (_manual !== null ? 1 : 1)) + 'px';
+    if (label) {
+      label.textContent = Math.round(scale * 100) + '%';
+      label.title = _manual !== null ? 'Reset to fit' : 'Zoom is auto-fit — click +/- to lock';
+    }
+    if (btnIn)  btnIn.disabled  = scale >= MAX;
+    if (btnOut) btnOut.disabled = scale <= MIN;
+  }
+
+  if (btnIn) btnIn.addEventListener('click', () => {
+    const base = autoFitScale();
+    _manual = Math.min(MAX, Math.round((_manual ?? base) * 10 + STEP * 10) / 10);
+    applyScale();
+  });
+
+  if (btnOut) btnOut.addEventListener('click', () => {
+    const base = autoFitScale();
+    _manual = Math.max(MIN, Math.round((_manual ?? base) * 10 - STEP * 10) / 10);
+    applyScale();
+  });
+
+  // Click the zoom label to reset back to auto-fit
+  if (label) label.addEventListener('click', () => {
+    _manual = null;
+    applyScale();
+  });
+
   applyScale();
-  // Watch for panel resize (sidebar drag, window resize)
+  // Watch for panel resize (sidebar drag, window resize) — recalcs auto-fit
   const ro = new ResizeObserver(applyScale);
   ro.observe(wrap);
   // Stash so we can disconnect if panel is swapped out
@@ -4936,6 +5803,306 @@ async function initTerminalPanel() {
       try { term.dispose(); } catch { /* ignore */ }
     },
   };
+}
+
+// ---------- Notes panel (dockview version) ----------
+function renderNotesPanel() {
+  return `
+  <div class="notes-panel" id="notes-panel">
+    <div class="notes-panel__sidebar" id="np-sidebar">
+      <div class="notes-panel__sidebar-head">
+        <span class="notes-panel__sidebar-title">Notes</span>
+        <button class="notes-icon-btn" id="np-new-btn" title="New note">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+      </div>
+      <div class="notes-search-wrap" style="padding:0 8px 6px">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input class="notes-search" id="np-search" placeholder="Search…" spellcheck="false">
+      </div>
+      <div class="notes-list" id="np-list"><div class="notes-list__empty">Loading…</div></div>
+    </div>
+
+    <div class="notes-panel__editor" id="np-editor">
+      <div class="notes-editor__head" style="padding:8px 10px 6px">
+        <input class="notes-title-input" id="np-title" placeholder="Note title…" spellcheck="false">
+        <div class="notes-editor__tools">
+          <span class="notes-status" id="np-status"></span>
+          <button class="notes-tool-btn" id="np-preview-btn" title="Toggle preview">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <span>Preview</span>
+          </button>
+          <button class="notes-tool-btn notes-tool-btn--danger" id="np-delete-btn" title="Delete">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="notes-toolbar" id="np-toolbar">
+        <button class="notes-tb-btn" data-tb="bold"      title="Bold"><strong>B</strong></button>
+        <button class="notes-tb-btn" data-tb="italic"    title="Italic"><em>I</em></button>
+        <div class="notes-tb-sep"></div>
+        <button class="notes-tb-btn" data-tb="h1"        title="H1">H1</button>
+        <button class="notes-tb-btn" data-tb="h2"        title="H2">H2</button>
+        <button class="notes-tb-btn" data-tb="h3"        title="H3">H3</button>
+        <div class="notes-tb-sep"></div>
+        <button class="notes-tb-btn" data-tb="code"      title="Inline code"><code style="font-size:10px">\`\`</code></button>
+        <button class="notes-tb-btn" data-tb="codeblock" title="Code block">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        </button>
+        <div class="notes-tb-sep"></div>
+        <button class="notes-tb-btn" data-tb="ul"        title="Bullet list">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>
+        </button>
+        <button class="notes-tb-btn" data-tb="ol"        title="Numbered list">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1.5"/></svg>
+        </button>
+        <button class="notes-tb-btn" data-tb="bq"        title="Blockquote">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
+        </button>
+        <button class="notes-tb-btn" data-tb="hr"        title="Horizontal rule">—</button>
+      </div>
+      <div class="notes-panes" id="np-panes">
+        <textarea class="notes-textarea" id="np-textarea"
+          placeholder="Start writing… (Markdown supported)"
+          spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+        <div class="notes-preview" id="np-preview"></div>
+      </div>
+      <div class="notes-footer" id="np-footer">
+        <span id="np-word-count" class="notes-footer__stat"></span>
+        <span id="np-char-count" class="notes-footer__stat"></span>
+        <span class="notes-footer__hint">Ctrl+S  save</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function initNotesPanel() {
+  const container = document.getElementById('notes-panel');
+  if (!container || container.dataset.npInited) return;
+  container.dataset.npInited = '1';
+
+  const api = window.electronAPI?.notes;
+
+  // ── shared MD renderer (same logic as overlay) ───────────────────────────
+  function renderMd(raw) {
+    if (!raw) return '<p class="notes-preview__empty">Nothing to preview.</p>';
+    let html = raw
+      .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+        `<pre class="notes-pre"><code>${escapeHTML(code.trim())}</code></pre>`)
+      .replace(/`([^`]+)`/g, (_, c) => `<code class="notes-inline-code">${escapeHTML(c)}</code>`)
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/^---+$/gm, '<hr class="notes-hr">')
+      .replace(/^>\s?(.*)/gm, '<blockquote class="notes-bq">$1</blockquote>');
+    const lines = html.split('\n'), out = [];
+    let inUL = false, inOL = false;
+    for (const line of lines) {
+      if (line.startsWith('<pre') || line.startsWith('<hr') || line.startsWith('<blockquote')) {
+        if (inUL) { out.push('</ul>'); inUL = false; }
+        if (inOL) { out.push('</ol>'); inOL = false; }
+        out.push(line); continue;
+      }
+      const h3 = line.match(/^###\s+(.*)/); if (h3) { out.push(`<h3>${h3[1]}</h3>`); inUL=inOL=false; continue; }
+      const h2 = line.match(/^##\s+(.*)/);  if (h2) { out.push(`<h2>${h2[1]}</h2>`); inUL=inOL=false; continue; }
+      const h1 = line.match(/^#\s+(.*)/);   if (h1) { out.push(`<h1>${h1[1]}</h1>`); inUL=inOL=false; continue; }
+      const ul = line.match(/^[-*]\s+(.*)/);
+      if (ul) { if (!inUL) { if (inOL) { out.push('</ol>'); inOL=false; } out.push('<ul>'); inUL=true; } out.push(`<li>${ul[1]}</li>`); continue; }
+      const ol = line.match(/^\d+\.\s+(.*)/);
+      if (ol) { if (!inOL) { if (inUL) { out.push('</ul>'); inUL=false; } out.push('<ol>'); inOL=true; } out.push(`<li>${ol[1]}</li>`); continue; }
+      if (inUL) { out.push('</ul>'); inUL = false; }
+      if (inOL) { out.push('</ol>'); inOL = false; }
+      if (!line.trim()) { out.push('<br>'); continue; }
+      out.push(`<p>${line}</p>`);
+    }
+    if (inUL) out.push('</ul>');
+    if (inOL) out.push('</ol>');
+    return out.join('\n');
+  }
+
+  function wrapSel(ta, before, after = before, placeholder = '') {
+    const s = ta.selectionStart, e = ta.selectionEnd;
+    const sel = ta.value.slice(s, e) || placeholder;
+    ta.value = ta.value.slice(0, s) + before + sel + after + ta.value.slice(e);
+    const c = s + before.length + sel.length;
+    ta.setSelectionRange(c, c);
+    ta.dispatchEvent(new Event('input'));
+    ta.focus();
+  }
+  function insertLn(ta, prefix) {
+    const s = ta.selectionStart;
+    const ls = ta.value.lastIndexOf('\n', s - 1) + 1;
+    const le = ta.value.indexOf('\n', s);
+    const line = ta.value.slice(ls, le === -1 ? undefined : le);
+    const newLine = line.startsWith(prefix) ? line.slice(prefix.length) : prefix + line;
+    ta.value = ta.value.slice(0, ls) + newLine + (le === -1 ? '' : ta.value.slice(le));
+    ta.setSelectionRange(ls + newLine.length, ls + newLine.length);
+    ta.dispatchEvent(new Event('input'));
+    ta.focus();
+  }
+
+  // ── DOM refs ─────────────────────────────────────────────────────────────
+  const listEl      = container.querySelector('#np-list');
+  const searchEl    = container.querySelector('#np-search');
+  const titleInput  = container.querySelector('#np-title');
+  const textarea    = container.querySelector('#np-textarea');
+  const previewEl   = container.querySelector('#np-preview');
+  const statusEl    = container.querySelector('#np-status');
+  const wordCountEl = container.querySelector('#np-word-count');
+  const charCountEl = container.querySelector('#np-char-count');
+  const previewBtn  = container.querySelector('#np-preview-btn');
+
+  let activeId = null, savedContent = '', _saveTimer = null, _previewMode = false, _allNotes = [];
+
+  function setStatus(msg, isError = false) {
+    statusEl.textContent = msg;
+    statusEl.style.color = isError ? '#c96442' : '#7ab389';
+    if (msg && !isError) setTimeout(() => { if (statusEl.textContent === msg) statusEl.textContent = ''; }, 2000);
+  }
+  function updateCounts() {
+    const txt = textarea.value;
+    const w = txt.trim() ? txt.trim().split(/\s+/).length : 0;
+    wordCountEl.textContent = `${w}w`;
+    charCountEl.textContent = `${txt.length}c`;
+  }
+
+  function renderList(notes, q = '') {
+    _allNotes = notes;
+    const filtered = q ? notes.filter(n => n.title.toLowerCase().includes(q.toLowerCase()) || (n.preview||'').toLowerCase().includes(q.toLowerCase())) : notes;
+    if (!filtered.length) { listEl.innerHTML = '<div class="notes-list__empty">No notes yet.</div>'; return; }
+    listEl.innerHTML = filtered.map(n => `
+      <div class="notes-list-item${n.id === activeId ? ' is-active' : ''}" data-note-id="${n.id}">
+        <div class="notes-list-item__title">${escapeHTML(n.title || 'Untitled')}</div>
+        <div class="notes-list-item__preview">${escapeHTML((n.preview||'').slice(0,60))}</div>
+      </div>`).join('');
+    listEl.querySelectorAll('.notes-list-item').forEach(el => {
+      el.addEventListener('click', () => loadNote(el.dataset.noteId));
+    });
+  }
+
+  async function loadAllNotes() {
+    if (!api) { listEl.innerHTML = '<div class="notes-list__empty">Notes API unavailable.</div>'; return; }
+    try {
+      const notes = await api.list();
+      renderList(notes, searchEl.value);
+      if (!activeId && notes.length) loadNote(notes[0].id);
+    } catch (e) { listEl.innerHTML = '<div class="notes-list__empty">Error loading notes.</div>'; }
+  }
+
+  async function loadNote(id) {
+    if (!api) return;
+    await maybeSave();
+    activeId = id;
+    try {
+      const content = await api.read(id);
+      const note = _allNotes.find(n => n.id === id);
+      titleInput.value = note?.title || '';
+      textarea.value = content || '';
+      savedContent = textarea.value;
+      setStatus('');
+      updateCounts();
+      if (_previewMode) previewEl.innerHTML = renderMd(textarea.value);
+      renderList(_allNotes, searchEl.value);
+      textarea.focus();
+    } catch (e) { setStatus('Failed to load', true); }
+  }
+
+  async function maybeSave() {
+    if (!api || !activeId || textarea.value === savedContent) return;
+    try {
+      await api.write(activeId, textarea.value);
+      savedContent = textarea.value;
+    } catch {}
+  }
+
+  function scheduleAutoSave() {
+    clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(async () => {
+      if (!api || !activeId || textarea.value === savedContent) return;
+      try {
+        await api.write(activeId, textarea.value);
+        savedContent = textarea.value;
+        setStatus('Saved');
+        await loadAllNotes();
+      } catch { setStatus('Save failed', true); }
+    }, 800);
+  }
+
+  function togglePreview() {
+    _previewMode = !_previewMode;
+    previewBtn.classList.toggle('is-active', _previewMode);
+    textarea.style.display = _previewMode ? 'none' : '';
+    previewEl.style.display = _previewMode ? '' : 'none';
+    if (_previewMode) previewEl.innerHTML = renderMd(textarea.value);
+    else textarea.focus();
+  }
+
+  // ── Events ───────────────────────────────────────────────────────────────
+  textarea.addEventListener('input', () => { updateCounts(); scheduleAutoSave(); });
+
+  container.querySelector('#np-new-btn').addEventListener('click', async () => {
+    if (!api) return;
+    await maybeSave();
+    try {
+      const note = await api.create('Untitled');
+      await loadAllNotes();
+      loadNote(note.id);
+    } catch { setStatus('Failed to create', true); }
+  });
+
+  previewBtn.addEventListener('click', togglePreview);
+
+  container.querySelector('#np-delete-btn').addEventListener('click', async () => {
+    if (!api || !activeId) return;
+    if (!confirm('Delete this note?')) return;
+    try {
+      await api.delete(activeId);
+      activeId = null; titleInput.value = ''; textarea.value = ''; savedContent = '';
+      await loadAllNotes();
+    } catch { setStatus('Failed to delete', true); }
+  });
+
+  titleInput.addEventListener('input', () => scheduleAutoSave());
+  titleInput.addEventListener('blur',  async () => {
+    if (!api || !activeId) return;
+    const note = _allNotes.find(n => n.id === activeId);
+    if (note && titleInput.value.trim() !== note.title) {
+      note.title = titleInput.value.trim() || 'Untitled';
+      await maybeSave();
+      await loadAllNotes();
+    }
+  });
+
+  searchEl.addEventListener('input', () => renderList(_allNotes, searchEl.value));
+
+  textarea.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); scheduleAutoSave(); clearTimeout(_saveTimer); _saveTimer = null; maybeSave().then(() => setStatus('Saved')); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'p') { e.preventDefault(); togglePreview(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'b') { e.preventDefault(); wrapSel(textarea, '**', '**', 'bold'); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'i') { e.preventDefault(); wrapSel(textarea, '*', '*', 'italic'); }
+  });
+
+  container.querySelector('#np-toolbar').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-tb]');
+    if (!btn) return;
+    const tb = btn.dataset.tb;
+    const ta = textarea;
+    if (tb === 'bold')      wrapSel(ta, '**', '**', 'bold text');
+    if (tb === 'italic')    wrapSel(ta, '*', '*', 'italic text');
+    if (tb === 'code')      wrapSel(ta, '`', '`', 'code');
+    if (tb === 'codeblock') wrapSel(ta, '```\n', '\n```', 'code here');
+    if (tb === 'h1')        insertLn(ta, '# ');
+    if (tb === 'h2')        insertLn(ta, '## ');
+    if (tb === 'h3')        insertLn(ta, '### ');
+    if (tb === 'ul')        insertLn(ta, '- ');
+    if (tb === 'ol')        insertLn(ta, '1. ');
+    if (tb === 'bq')        insertLn(ta, '> ');
+    if (tb === 'hr')        { ta.value += '\n---\n'; ta.dispatchEvent(new Event('input')); }
+    if (tb === 'link')      wrapSel(ta, '[', '](url)', 'link text');
+  });
+
+  // ── Initial load ─────────────────────────────────────────────────────────
+  await loadAllNotes();
 }
 
 // ---------- Plan panel ----------
@@ -5401,6 +6568,144 @@ const SPLIT_TABS = [
   { id: 'fichiers', icon: 'folder-open',     label: 'Files'    },
 ];
 
+// ---------- Skills dock panel ----------
+function renderSkillsDockPanel() {
+  return `
+  <div class="skills-dock-panel" id="skills-dock-panel">
+    <div class="skills-dock__toolbar">
+      <span class="skills-dock__label">Skills</span>
+      <button class="icon-btn icon-btn--sm" id="sdp-new" title="New skill">${iconSVG('plus')}</button>
+    </div>
+    <div class="skills-dock__list" id="sdp-list">
+      <div style="padding:12px;color:#5a5a63;font-size:12px">Loading…</div>
+    </div>
+    <div class="skills-dock__editor" id="sdp-editor" style="display:none">
+      <div class="skills-dock__editor-bar">
+        <span class="skills-dock__filename" id="sdp-filename"></span>
+        <div>
+          <button class="console-btn console-btn--sm" id="sdp-activate" title="Toggle active in CLAUDE.md">Activate</button>
+          <button class="console-btn console-btn--sm console-btn--publish" id="sdp-save" disabled>Save</button>
+        </div>
+      </div>
+      <textarea class="skills-dock__ta" id="sdp-ta" spellcheck="false" autocorrect="off"></textarea>
+      <div class="skills-dock__status" id="sdp-status"></div>
+    </div>
+  </div>`;
+}
+
+async function initSkillsDockPanel() {
+  const container = document.getElementById('skills-dock-panel');
+  if (!container || container.dataset.sdpInited) return;
+  container.dataset.sdpInited = '1';
+
+  const kb      = window.electronAPI?.kb;
+  const listEl  = container.querySelector('#sdp-list');
+  const editorEl= container.querySelector('#sdp-editor');
+  const filenameEl = container.querySelector('#sdp-filename');
+  const ta      = container.querySelector('#sdp-ta');
+  const saveBtn = container.querySelector('#sdp-save');
+  const newBtn  = container.querySelector('#sdp-new');
+  const actBtn  = container.querySelector('#sdp-activate');
+  const statEl  = container.querySelector('#sdp-status');
+
+  if (!kb) { listEl.innerHTML = '<div style="padding:12px;color:#c96442;font-size:11px">KB API unavailable</div>'; return; }
+
+  let files = [];
+  let activeId = null;
+  let diskContent = '';
+  let activeSkills = new Set();
+
+  function setStatus(msg, ok = true) {
+    statEl.textContent = msg;
+    statEl.style.color = ok ? '#7ab389' : '#c96442';
+    setTimeout(() => { statEl.textContent = ''; }, 3000);
+  }
+
+  async function refreshActive() {
+    try {
+      const res = await kb.read('project-claude');
+      if (res.ok) activeSkills = new Set([...res.content.matchAll(/@skills\/([^\s\n]+)/g)].map(m => m[1]));
+    } catch {}
+  }
+
+  function renderList() {
+    const skills = files.filter(f => f.id.startsWith('skill-'));
+    if (!skills.length) { listEl.innerHTML = '<div style="padding:12px;color:#5a5a63;font-size:11px">No skills yet — click + to create one.</div>'; return; }
+    listEl.innerHTML = skills.map(f => {
+      const isActive    = activeSkills.has(f.label);
+      const displayName = f.label.replace(/\.md$/i, '');
+      return `<button class="skills-dock__item${activeId === f.id ? ' is-active' : ''}" data-id="${f.id}">
+        <span class="skills-dock__item-name">${escapeHTML(displayName)}</span>
+        ${isActive ? '<span class="skills-dock__badge">active</span>' : ''}
+      </button>`;
+    }).join('');
+  }
+
+  async function loadFile(id) {
+    activeId = id;
+    const res = await kb.read(id);
+    if (!res.ok) { setStatus(res.error, false); return; }
+    diskContent = res.content;
+    ta.value = res.content;
+    filenameEl.textContent = res.path.split(/[\\/]/).pop();
+    editorEl.style.display = 'flex';
+    saveBtn.disabled = true;
+    const file = files.find(f => f.id === id);
+    actBtn.textContent = file && activeSkills.has(file.label) ? 'Deactivate' : 'Activate';
+    renderList();
+  }
+
+  listEl.addEventListener('click', e => {
+    const btn = e.target.closest('[data-id]');
+    if (btn) loadFile(btn.dataset.id);
+  });
+
+  ta.addEventListener('input', () => { saveBtn.disabled = ta.value === diskContent; });
+
+  saveBtn.addEventListener('click', async () => {
+    if (!activeId) return;
+    const res = await kb.write(activeId, ta.value);
+    if (res.ok) { diskContent = ta.value; saveBtn.disabled = true; setStatus('Saved ✓'); }
+    else setStatus(res.error, false);
+  });
+
+  actBtn.addEventListener('click', async () => {
+    const file = files.find(f => f.id === activeId);
+    if (!file) return;
+    const cr = await kb.read('project-claude');
+    if (!cr.ok) return;
+    const importLine = `@skills/${file.label}`;
+    let content = cr.content;
+    if (activeSkills.has(file.label)) {
+      content = content.split('\n').filter(l => l.trim() !== importLine).join('\n');
+      activeSkills.delete(file.label);
+    } else {
+      const lines = content.split('\n');
+      lines.splice(lines[0]?.startsWith('#') ? 1 : 0, 0, importLine);
+      content = lines.join('\n');
+      activeSkills.add(file.label);
+    }
+    await kb.write('project-claude', content);
+    actBtn.textContent = activeSkills.has(file.label) ? 'Deactivate' : 'Activate';
+    renderList();
+    setStatus(activeSkills.has(file.label) ? 'Activated in CLAUDE.md' : 'Removed from CLAUDE.md');
+  });
+
+  newBtn.addEventListener('click', async () => {
+    const name = prompt('Skill name:');
+    if (!name?.trim()) return;
+    const res = await kb.createSkill(name.trim());
+    if (!res.ok) { setStatus(res.error, false); return; }
+    files.push({ id: res.id, label: res.label, icon: 'sparkle' });
+    renderList();
+    loadFile(res.id);
+  });
+
+  files = await kb.list();
+  await refreshActive();
+  renderList();
+}
+
 function renderPanelContent(id) {
   const tab = rightPanelTabs.find(x => x.id === id) || rightPanelTabs[0];
   const label = t(tab.labelKey);
@@ -5412,6 +6717,8 @@ function renderPanelContent(id) {
   else if (id === 'fichiers')  body = renderFilesPanel();
   else if (id === 'terminal')  body = renderTerminalPanel();
   else if (id === 'plan')      body = renderPlanPanel();
+  else if (id === 'notes')     body = renderNotesPanel();
+  else if (id === 'skills')    body = renderSkillsDockPanel();
   else if (id === 'mcp')       body = renderMcpPanel();
   else if (id === 'git')       body = renderGitPanel();
   else if (id === 'context')   body = renderContextPanel();
@@ -5610,6 +6917,8 @@ function setRightPanelTab(id) {
     wirePlanTabEvents(id, bodyEl);
     if (id === 'apercu')   requestAnimationFrame(() => initApercuScaling(bodyEl));
     if (id === 'terminal') requestAnimationFrame(() => initTerminalPanel());
+    if (id === 'notes')    requestAnimationFrame(() => initNotesPanel());
+    if (id === 'skills')   requestAnimationFrame(() => initSkillsDockPanel());
   }
 
   // Sync context-strip chips
@@ -6042,6 +7351,59 @@ function escapeHTML(s) {
   };
 })();
 
+// ── Demo seed — runs once automatically on first launch ───────────────────
+(function _autoSeed() {
+  const SEED = {
+    'Memory':             ['Persistent context design', 'Long-term knowledge graph', 'Memory indexing strategy', 'Semantic search impl', 'Vector store integration'],
+    'AI Agents Creation': ['Tool use patterns', 'Agent loop architecture', 'Multi-agent coordination', 'Prompt chaining guide', 'Reasoning trace debugger'],
+    'SAAS':               ['Billing flow redesign', 'Onboarding funnel v2', 'Dashboard planning', 'API rate limiting', 'Usage analytics setup'],
+    'Testing New Ideas':  ['Prototype: voice UI', 'Spike: local LLM', 'Canvas collaboration', 'A/B test framework', 'Real-time sync demo'],
+    'Design':             ['Component library audit', 'Dark mode tokens', 'Motion design spec', 'Icon system refresh', 'Typography scale'],
+    'Skills':             ['Tool pattern library', 'Context window tricks'],
+    'Review':             ['Code review checklist', 'PR template design', 'Linting rules audit', 'Test coverage review', 'Security review guide'],
+    'Security':           ['Auth flow hardening', 'CORS policy audit', 'API key rotation', 'Secrets scanning CI', 'Pen-test preparation'],
+    'Vide Coding':        ['Live coding session', 'Stream setup guide'],
+    'Claude Code Mods':   ['Theme customization', 'Hotkeys & shortcuts'],
+  };
+
+  // ── Always clean up sessions that leaked into pinned/recent from a bad seed ──
+  const projSessionIds = new Set(state.projects.flatMap(p => p.sessions.map(s => s.id)));
+  state.pinned = state.pinned.filter(s => !projSessionIds.has(s.id));
+  state.recent = state.recent.filter(s => !projSessionIds.has(s.id));
+
+  if (localStorage.getItem('ccmod.seeded')) return; // seeding already done
+
+  const list = loadSessionList();
+  const now  = Date.now();
+
+  state.projects.forEach(proj => {
+    const names = SEED[proj.name];
+    if (!names) return;
+    names.forEach((title, i) => {
+      if (proj.sessions.some(s => s.title === title)) return;
+      const id      = genId();
+      // projectId is set so the session is never picked up by pinned/recent filters
+      const session = { id, title, ts: now - i * 60_000, pinned: false, projectId: proj.id };
+      list.push(session);
+      proj.sessions.push(session);
+    });
+  });
+
+  // Also back-fill projectId on any existing list entries that belong to a project
+  const fixedList = list.map(s => {
+    if (s.projectId) return s;
+    const owner = state.projects.find(p => p.sessions.some(ps => ps.id === s.id));
+    return owner ? { ...s, projectId: owner.id } : s;
+  });
+
+  saveSessionList(fixedList);
+  saveStateMeta();
+  localStorage.setItem('ccmod.seeded', '1');
+})();
+
+// Reset helper: _demoSeed() clears the flag and reloads
+window._demoSeed = function() { localStorage.removeItem('ccmod.seeded'); location.reload(); };
+
 render();
 updateTitleBar(state.activeId);
 syncWorkspaceIndex();
@@ -6253,12 +7615,20 @@ let _streamInterval = setInterval(() => {
   function mdToHtml(raw) {
     // 1. Fenced code blocks  ```lang\ncode\n```
     const RENDERABLE_LANGS = ['html', 'css', 'javascript', 'js', 'jsx', 'tsx', 'react'];
+    // Extension map for default filenames in the title input
+    const _cbExtMap = { jsx:'jsx', tsx:'tsx', typescript:'ts', javascript:'js',
+                        js:'js', ts:'ts', python:'py', py:'py', html:'html',
+                        css:'css', json:'json', bash:'sh', sh:'sh', go:'go',
+                        rust:'rs', ruby:'rb', php:'php', c:'c', cpp:'cpp', java:'java' };
+
     let out = raw.replace(/```([\w\-+#.]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
       const l    = escapeHTML(lang.trim() || 'code');
       const lRaw = lang.trim().toLowerCase();
       // Use syntax highlighter for JS/TS family; plain escape for everything else
       const c    = (window.highlightCode || escapeHTML)(lRaw, code.trimEnd());
       const canPreview = RENDERABLE_LANGS.includes(lRaw);
+      const ext  = _cbExtMap[lRaw] || lRaw || 'txt';
+      const defaultTitle = `untitled.${ext}`;
       // Preview inline only makes sense for renderable types
       const previewBtn = canPreview
         ? `<button class="code-block__btn" data-action="preview" title="Preview inline"><i data-phosphor="eye"></i></button>`
@@ -6267,15 +7637,26 @@ let _streamInterval = setInterval(() => {
       const panelBtn = canPreview
         ? `<button class="code-block__btn code-block__btn--pin" data-action="pin-canvas" title="Pin to Canvas"><i data-phosphor="push-pin"></i></button>`
         : `<button class="code-block__btn" data-action="open-in-panel" title="Open in panel"><i data-phosphor="browsers"></i></button>`;
-      return `<div class="code-block" data-lang="${lRaw}"><div class="code-block__head">`
+      // Copy-path button — saves raw source to codeblocks/ and copies the full path
+      const copyPathBtn = `<button class="code-block__btn code-block__btn--path" data-action="copy-path" title="Save & copy path">`
+        + `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">`
+        + `<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>`
+        + `<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>`
+        + `</svg></button>`;
+      return `<div class="code-block" data-lang="${lRaw}">`
+           + `<div class="code-block__head">`
            + `<span class="code-block__lang">${l}</span>`
+           + `<input class="code-block__title" value="${defaultTitle}" spellcheck="false" placeholder="filename.${ext}">`
            + `<span class="code-block__actions">`
            + `<button class="code-block__btn code-block__btn--toggle-code" data-action="toggle-code" title="Hide code"><i data-phosphor="minus"></i></button>`
-           + `<button class="code-block__btn" data-action="copy"     title="Copy"><i data-phosphor="copy"></i></button>`
+           + `<button class="code-block__btn" data-action="copy"     title="Copy code"><i data-phosphor="copy"></i></button>`
            + `<button class="code-block__btn" data-action="download" title="Download"><i data-phosphor="download-simple"></i></button>`
            + previewBtn
            + panelBtn
-           + `</span></div><pre class="code-block__body">${c}</pre></div>`;
+           + copyPathBtn
+           + `</span></div>`
+           + `<div class="code-block__path-tip"></div>`
+           + `<pre class="code-block__body">${c}</pre></div>`;
     });
 
     // 2. Protect multi-line code blocks from the bold/italic pass.
@@ -6343,11 +7724,16 @@ let _streamInterval = setInterval(() => {
   function addUserBubble(text, images = []) {
     const div = document.createElement('div');
     div.className = 'msg msg--user';
-    const imgHtml = images.map(img =>
-      `<img class="msg__inline-img" src="${img.dataUrl}" alt="attached image" />`
-    ).join('');
-    const textHtml = text ? `<p>${escapeHTML(text).replace(/\n/g,'<br>')}</p>` : '';
-    div.innerHTML = `<div class="msg__body">${imgHtml}${textHtml}</div>`;
+    // Images render above text in their own right-aligned strip (no dark bubble behind them)
+    const imgHtml = images.length
+      ? `<div class="msg__imgs">${images.map(img =>
+          `<img class="msg__inline-img" src="${img.dataUrl}" alt="attached image">`
+        ).join('')}</div>`
+      : '';
+    const textHtml = text
+      ? `<div class="msg__body"><p>${escapeHTML(text).replace(/\n/g,'<br>')}</p></div>`
+      : '';
+    div.innerHTML = imgHtml + textHtml;
     chatConv.appendChild(div);
     scrollBottom();
   }

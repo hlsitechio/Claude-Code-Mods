@@ -112,9 +112,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Knowledge-base file editor ────────────────────────────────────────────
   kb: {
-    list:  ()           => ipcRenderer.invoke('kb:list'),
-    read:  (id)         => ipcRenderer.invoke('kb:read', id),
-    write: (id, content)=> ipcRenderer.invoke('kb:write', { id, content }),
+    list:        ()              => ipcRenderer.invoke('kb:list'),
+    read:        (id)            => ipcRenderer.invoke('kb:read', id),
+    write:       (id, content)   => ipcRenderer.invoke('kb:write', { id, content }),
+    createSkill: (name)          => ipcRenderer.invoke('kb:create-skill', { name }),
+    deleteSkill: (id)            => ipcRenderer.invoke('kb:delete-skill', id),
   },
 
   // ── Agents persistence ────────────────────────────────────────────────────
@@ -162,10 +164,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Codeblock persistent library ─────────────────────────────────────────
   codeblocks: {
-    save:   (name, html, lang, source) => ipcRenderer.invoke('codeblock:save',   { name, html, lang, source }),
-    load:   (id)                       => ipcRenderer.invoke('codeblock:load',   id),
-    update: (id, html, lang, source)   => ipcRenderer.invoke('codeblock:update', { id, html, lang, source }),
-    list:   ()                         => ipcRenderer.invoke('codeblock:list'),
+    save:    (name, html, lang, source)          => ipcRenderer.invoke('codeblock:save',    { name, html, lang, source }),
+    load:    (id)                                => ipcRenderer.invoke('codeblock:load',    id),
+    update:  (id, html, lang, source)            => ipcRenderer.invoke('codeblock:update',  { id, html, lang, source }),
+    list:    ()                                  => ipcRenderer.invoke('codeblock:list'),
+    saveSrc: (filename, lang, source)            => ipcRenderer.invoke('codeblock:saveSrc', { filename, lang, source }),
+  },
+
+  // ── Notes ─────────────────────────────────────────────────────────────────
+  notes: {
+    list:   ()                  => ipcRenderer.invoke('notes:list'),
+    read:   (id)                => ipcRenderer.invoke('notes:read',   id),
+    write:  (id, content)       => ipcRenderer.invoke('notes:write',  { id, content }),
+    create: (title)             => ipcRenderer.invoke('notes:create', { title }),
+    delete: (id)                => ipcRenderer.invoke('notes:delete', id),
   },
 
   // ── File-system explorer ──────────────────────────────────────────────────
