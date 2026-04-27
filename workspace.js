@@ -39,6 +39,8 @@
     fichiers:  'Files',
     taches:    'Tasks',
     plan:      'Plan',
+    notes:     'Notes',
+    skills:    'Skills',
     shortcuts: 'Shortcuts',
     mcp:       'MCP',
     git:       'Git',
@@ -48,7 +50,7 @@
   // Ordered list of tool panels that appear in the right group
   const TOOL_IDS = [
     'apercu', 'diff', 'terminal', 'fichiers',
-    'taches', 'plan', 'git', 'mcp', 'context', 'shortcuts',
+    'taches', 'plan', 'notes', 'skills', 'git', 'mcp', 'context', 'shortcuts',
   ];
 
   let dv           = null;
@@ -573,12 +575,23 @@
     dockEl.addEventListener('contextmenu', e => {
       e.preventDefault();
       const vw = window.innerWidth, vh = window.innerHeight;
-      const mw = 200, mh = 180;
-      const x = Math.min(e.clientX, vw - mw - 8);
-      const y = Math.min(e.clientY, vh - mh - 8);
-      menu.style.left    = x + 'px';
-      menu.style.top     = y + 'px';
+
+      // Show off-screen first so we can measure actual dimensions
+      menu.style.left    = '-9999px';
+      menu.style.top     = '-9999px';
       menu.style.display = 'block';
+      const mw = menu.offsetWidth  || 200;
+      const mh = menu.offsetHeight || 200;
+
+      // Horizontal: clamp so menu doesn't go off right edge
+      const x = Math.min(e.clientX, vw - mw - 8);
+      // Vertical: flip upward if near bottom
+      const fitsBelow = e.clientY + mh + 8 <= vh;
+      const y = fitsBelow
+        ? e.clientY
+        : Math.max(8, e.clientY - mh);
+      menu.style.left = x + 'px';
+      menu.style.top  = y + 'px';
 
       // Sync lock checkbox
       menu.querySelector('[data-action="lock"] .ctx-check')
@@ -630,7 +643,14 @@
       btn.addEventListener('click', e => {
         e.stopPropagation();
         const id = btn.dataset.add;
-        if (id) activatePanel(id);
+        if (id) {
+          activatePanel(id);
+          // activatePanel sets _suppressTabChange=true so the dockview event
+          // is swallowed and panel content never gets injected. Force it here.
+          if (id !== 'chat' && typeof window._dvTabChange === 'function') {
+            window._dvTabChange(id);
+          }
+        }
         hideMenu();
       });
     });
@@ -642,12 +662,17 @@
       subTrigger.addEventListener('mouseenter', () => {
         subMenu.classList.add('is-open');
         _openSub = subMenu;
-        // Position submenu: try right, flip left if off-screen
-        const tr = subTrigger.getBoundingClientRect();
-        const sw = subMenu.offsetWidth || 160;
-        const flip = tr.right + sw > window.innerWidth - 8;
-        subMenu.style.left = flip ? 'auto' : '100%';
-        subMenu.style.right = flip ? '100%' : 'auto';
+        // Horizontal: try right, flip left if off-screen
+        const tr  = subTrigger.getBoundingClientRect();
+        const sw  = subMenu.offsetWidth  || 160;
+        const sh  = subMenu.offsetHeight || 120;
+        const flipH = tr.right + sw > window.innerWidth - 8;
+        subMenu.style.left  = flipH ? 'auto' : '100%';
+        subMenu.style.right = flipH ? '100%' : 'auto';
+        // Vertical: flip upward if submenu would overflow the bottom
+        const flipV = tr.top + sh > window.innerHeight - 8;
+        subMenu.style.top    = flipV ? 'auto' : '0';
+        subMenu.style.bottom = flipV ? '0'    : 'auto';
       });
       menu.querySelector('.ctx-menu-body')?.addEventListener('mouseleave', e => {
         if (!subMenu.contains(e.relatedTarget)) {

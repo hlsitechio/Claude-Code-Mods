@@ -422,6 +422,41 @@ ipcMain.handle('kb:write', async (_, { id, content }) => {
   }
 });
 
+ipcMain.handle('kb:create-skill', async (_, { name }) => {
+  // Sanitise: lowercase, replace spaces with dashes, strip non-alnum/-
+  const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\-]/g, '');
+  if (!slug) return { ok: false, error: 'Invalid skill name' };
+  const filename = slug.endsWith('.md') ? slug : slug + '.md';
+  const filePath = path.join(APP_ROOT, 'skills', filename);
+  if (fs.existsSync(filePath)) return { ok: false, error: 'Skill already exists' };
+  const template = `# ${name}\n\n<!-- Describe what this skill does -->\n\n## Instructions\n\n`;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, template, 'utf8');
+    const id = 'skill-' + slug.replace('.md', '');
+    KB_FILES.push({ id, label: filename, icon: 'sparkle', path: () => filePath });
+    return { ok: true, id, label: filename, path: filePath };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('kb:delete-skill', async (_, id) => {
+  const idx = KB_FILES.findIndex(f => f.id === id);
+  if (idx === -1) return { ok: false, error: 'Unknown file id' };
+  const entry = KB_FILES[idx];
+  // Only allow deleting skill-* entries (protect CLAUDE.md, MEMORY.md etc.)
+  if (!entry.id.startsWith('skill-')) return { ok: false, error: 'Cannot delete system files' };
+  const filePath = entry.path();
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    KB_FILES.splice(idx, 1);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 // ── IPC: codeblock library ───────────────────────────────────────────────────
 // Persistent artifact store: codeblocks/{name}/codeblock_XXXXXX.html
 // Each block gets a globally unique 6-digit zero-padded ID.
@@ -504,6 +539,21 @@ ipcMain.handle('codeblock:update', async (_, { id, html, lang, source }) => {
   }
 });
 
+ipcMain.handle('codeblock:saveSrc', async (_, { filename, lang, source }) => {
+  cbEnsureRoot();
+  // Sanitise the filename the user typed (e.g. "MyWidget.tsx")
+  const safeFile = (filename || `untitled.${lang || 'txt'}`)
+    .replace(/[/\\:*?"<>|]+/g, '_')   // strip illegal chars
+    .slice(0, 80);
+  // Use the base name (without extension) as the folder slug
+  const slug = safeFile.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_\-]+/g, '_') || 'untitled';
+  const dir  = path.join(CB_ROOT, slug);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, safeFile);
+  fs.writeFileSync(filePath, source || '', 'utf8');
+  return { ok: true, filePath };
+});
+
 ipcMain.handle('codeblock:list', async () => {
   cbEnsureRoot();
   const results = [];
@@ -520,6 +570,66 @@ ipcMain.handle('codeblock:list', async () => {
   }
   results.sort((a, b) => Number(a.id) - Number(b.id));
   return results;
+});
+
+// ── IPC: Notes ───────────────────────────────────────────────────────────────
+const NOTES_ROOT = path.join(__dirname, '..', 'notes');
+function notesEnsure() { fs.mkdirSync(NOTES_ROOT, { recursive: true }); }
+
+function noteTitleFromContent(content) {
+  const first = (content || '').split('\n')[0];
+  return first.startsWith('# ') ? first.slice(2).trim() : null;
+}
+
+ipcMain.handle('notes:list', async () => {
+  notesEnsure();
+  const files = fs.readdirSync(NOTES_ROOT).filter(f => f.endsWith('.md') && !f.startsWith('.'));
+  return files.map(f => {
+    const filePath = path.join(NOTES_ROOT, f);
+    const stat = fs.statSync(filePath);
+    let title = f.replace(/\.md$/, '');
+    let preview = '';
+    try {
+      const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+      if (lines[0].startsWith('# ')) { title = lines[0].slice(2).trim(); }
+      preview = lines.filter(l => l.trim() && !l.startsWith('#')).slice(0, 2).join(' ').slice(0, 80);
+    } catch {}
+    return { id: f, title, preview, mtime: stat.mtimeMs };
+  }).sort((a, b) => b.mtime - a.mtime);
+});
+
+ipcMain.handle('notes:read', async (_, id) => {
+  notesEnsure();
+  const filePath = path.resolve(path.join(NOTES_ROOT, path.basename(id)));
+  if (!filePath.startsWith(NOTES_ROOT)) return { ok: false, error: 'Invalid path' };
+  try { return { ok: true, content: fs.readFileSync(filePath, 'utf8') }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('notes:write', async (_, { id, content }) => {
+  notesEnsure();
+  const filePath = path.resolve(path.join(NOTES_ROOT, path.basename(id)));
+  if (!filePath.startsWith(NOTES_ROOT)) return { ok: false };
+  try { fs.writeFileSync(filePath, content, 'utf8'); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('notes:create', async (_, { title }) => {
+  notesEnsure();
+  const safe = (title || 'untitled').replace(/[/\\:*?"<>|]+/g, '-').slice(0, 60);
+  let filename = safe + '.md';
+  let n = 1;
+  while (fs.existsSync(path.join(NOTES_ROOT, filename))) filename = `${safe}-${n++}.md`;
+  const content = `# ${title || 'Untitled'}\n\n`;
+  fs.writeFileSync(path.join(NOTES_ROOT, filename), content, 'utf8');
+  return { ok: true, id: filename };
+});
+
+ipcMain.handle('notes:delete', async (_, id) => {
+  const filePath = path.resolve(path.join(NOTES_ROOT, path.basename(id)));
+  if (!filePath.startsWith(NOTES_ROOT)) return { ok: false };
+  try { fs.unlinkSync(filePath); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
 });
 
 // ── IPC: file-system explorer ────────────────────────────────────────────────
