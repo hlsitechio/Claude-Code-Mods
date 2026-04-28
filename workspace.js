@@ -470,6 +470,33 @@
     try { dv.getPanel(TOOL_IDS[0])?.api.setActive(); } catch (_) {}
   }
 
+  /* ── Pre-render all panels after layout restore ─────────────────── */
+  // Called once after dv.fromJSON() so every visible panel has content,
+  // not just the globally-active one. Skips panels already rendered.
+  function _renderAllPanelBodies() {
+    if (typeof window.renderPanelContent !== 'function') return;
+    for (const pid of TOOL_IDS) {
+      const bodyDiv = panelBodies[pid];
+      if (!bodyDiv || bodyDiv.children.length > 0) continue; // skip if already rendered
+      try {
+        bodyDiv.innerHTML = window.renderPanelContent(pid);
+        window.renderIcons?.(bodyDiv);
+        window.wirePlanTabEvents?.(pid, bodyDiv);
+        // Fire async init for data-driven panels so they load in the background
+        requestAnimationFrame(() => {
+          try {
+            if (pid === 'fichiers') window.initFilesPanel?.();
+            if (pid === 'notes')    window.initNotesPanel?.();
+            if (pid === 'skills')   window.initSkillsDockPanel?.();
+            if (pid === 'mcp')      window.initMcpPanel?.(bodyDiv);
+            if (pid === 'git')      window.initGitPanel?.(bodyDiv);
+            // terminal: skip auto-init — xterm creates a PTY; let user trigger it
+          } catch (e) { console.warn('[workspace] panel init error', pid, e); }
+        });
+      } catch (e) { console.warn('[workspace] renderPanelContent error', pid, e); }
+    }
+  }
+
   /* ── Init ────────────────────────────────────────────────────────── */
   function init() {
     _wsLoadStore(); // bootstrap workspace state before anything else
@@ -509,6 +536,9 @@
     if (_savedLayout) {
       try {
         dv.fromJSON(_savedLayout);
+        // After layout restore, non-active panels have empty bodies — pre-render them
+        // so every panel shows content immediately, not just the globally active one.
+        setTimeout(_renderAllPanelBodies, 0);
       } catch (e) {
         console.warn('[workspace] fromJSON failed, falling back to default layout:', e);
         _buildDefaultLayout();
