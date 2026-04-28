@@ -4502,17 +4502,65 @@ html[data-theme="light"] .workspace-dock {
   padding: 0;
   overflow: hidden;
 }
-.term-claude-btn {
+/* ── Multi-tab terminal bar ── */
+.terminal-tabbar {
+  display: flex; align-items: center;
+  background: #0e0e10; border-bottom: 1px solid #1e1e24;
+  flex-shrink: 0; min-height: 34px; overflow: hidden;
+}
+.term-tabs {
+  display: flex; align-items: center; flex: 1; overflow-x: auto;
+  scrollbar-width: none; gap: 1px; padding: 4px 4px 0;
+}
+.term-tabs::-webkit-scrollbar { display: none; }
+.term-tab {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 11px; font-weight: 600;
+  padding: 4px 10px 4px 8px; border-radius: 6px 6px 0 0;
+  border: 1px solid transparent; border-bottom: none;
+  background: transparent; color: #5a5a63; font-size: 11px;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  transition: background .12s, color .12s;
+}
+.term-tab:hover { background: rgba(255,255,255,.04); color: #9a9aa4; }
+.term-tab--active {
+  background: #141416; color: #d4d4dc;
+  border-color: #1e1e24;
+}
+.term-tab-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #3a3a44; flex-shrink: 0;
+}
+.term-tab-dot--claude { background: #d97757; box-shadow: 0 0 4px rgba(217,119,87,.5); }
+.term-tab--active .term-tab-dot { background: #7ab389; }
+.term-tab--active.term-tab--claude .term-tab-dot { background: #d97757; }
+.term-tab-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+.term-tab-close {
+  font-size: 13px; line-height: 1; color: #3a3a44;
+  border-radius: 3px; padding: 0 2px; margin-left: 2px;
+  transition: color .1s, background .1s;
+}
+.term-tab:hover .term-tab-close { color: #6a6a72; }
+.term-tab-close:hover { color: #e06c75 !important; background: rgba(224,108,117,.1); }
+.term-tabbar-actions {
+  display: flex; align-items: center; gap: 5px;
+  padding: 0 8px; flex-shrink: 0; border-left: 1px solid #1e1e24;
+}
+.term-claude-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; font-weight: 600;
   background: rgba(217,119,87,0.12); border: 1px solid rgba(217,119,87,0.3);
-  color: #d97757; border-radius: 6px; padding: 3px 9px;
-  cursor: pointer; transition: background .15s, border-color .15s;
-  flex-shrink: 0;
+  color: #d97757; border-radius: 5px; padding: 3px 8px;
+  cursor: pointer; transition: background .15s, border-color .15s; white-space: nowrap;
 }
-.term-claude-btn:hover {
-  background: rgba(217,119,87,0.22); border-color: rgba(217,119,87,0.55);
+.term-claude-btn:hover { background: rgba(217,119,87,.22); border-color: rgba(217,119,87,.55); }
+.term-shell-btn {
+  display: inline-flex; align-items: center;
+  font-size: 10.5px; background: rgba(255,255,255,.04);
+  border: 1px solid #2a2a32; color: #6a6a72;
+  border-radius: 5px; padding: 3px 8px; cursor: pointer;
+  transition: background .12s, color .12s; white-space: nowrap;
 }
+.term-shell-btn:hover { background: rgba(255,255,255,.08); color: #a0a0aa; }
 .terminal-toolbar {
   display: flex; align-items: center; gap: 8px;
   padding: 7px 12px; background: #141416;
