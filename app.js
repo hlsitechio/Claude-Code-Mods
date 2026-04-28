@@ -5733,191 +5733,42 @@ async function ftLoadDir(dirPath, container) {
 }
 
 // ---------- Terminal panel ----------
-// ── Multi-tab terminal ────────────────────────────────────────────────────────
-// Each tab is an independent PTY + xterm instance.
-// Tabs can be plain shells or Claude Code sessions (agent swarm).
-
-let _termInstances  = [];   // [{ termId, term, fitAddon, container, name, isClaude, cleanup }]
-let _activeTermIdx  = -1;
-let _termShellSeq   = 0;
-let _termClaudeSeq  = 0;
-
-const XTERM_THEME = {
-  background:    '#0e0e10', foreground:    '#d4d4da',
-  cursor:        '#d97757', cursorAccent:  '#0e0e10',
-  black:         '#141416', red:           '#e06c75',
-  green:         '#7ab389', yellow:        '#c9a96e',
-  blue:          '#6a86c3', magenta:       '#c678dd',
-  cyan:          '#56b6c2', white:         '#abb2bf',
-  brightBlack:   '#5a5a63', brightRed:     '#e06c75',
-  brightGreen:   '#98c379', brightYellow:  '#e5c07b',
-  brightBlue:    '#61afef', brightMagenta: '#c678dd',
-  brightCyan:    '#56b6c2', brightWhite:   '#ffffff',
-};
+// ── Terminal launcher panel ───────────────────────────────────────────────────
+// The "Terminal" tab in the tool panel is now a launcher.
+// Actual sessions live as independent dockview panels (terminal-instance component).
 
 function renderTerminalPanel() {
-  return `<div class="terminal-view" id="terminal-view">
-    <div class="terminal-tabbar" id="terminal-tabbar">
-      <div class="term-tabs" id="term-tabs"></div>
-      <div class="term-tabbar-actions">
-        <button class="term-claude-btn" id="terminal-claude-btn" title="New Claude Code session">
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-            <circle cx="12" cy="12" r="10" opacity=".2"/><path d="M12 2a10 10 0 1 1 0 20A10 10 0 0 1 12 2zm0 4a1 1 0 0 0-1 1v4H7a1 1 0 1 0 0 2h4v4a1 1 0 1 0 2 0v-4h4a1 1 0 1 0 0-2h-4V7a1 1 0 0 0-1-1z" opacity=".3"/><path d="M12 8.5c1.93 0 3.5 1.57 3.5 3.5S13.93 15.5 12 15.5 8.5 13.93 8.5 12 10.07 8.5 12 8.5z"/>
-          </svg>
-          + Claude
+  return `
+    <div class="term-launcher">
+      <div class="term-launcher__title">Terminal sessions</div>
+      <p class="term-launcher__hint">Each session opens as its own dockview panel — drag, dock, and resize freely.</p>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px">
+        <button class="term-launch-big term-launch-big--claude" id="terminal-claude-btn">
+          <span class="tlb-icon">⬡</span>
+          <span class="tlb-text">
+            <span class="tlb-label">New Claude session</span>
+            <span class="tlb-sub">Opens a shell + runs <code>claude</code></span>
+          </span>
         </button>
-        <button class="term-shell-btn" id="terminal-new-btn" title="New shell">
-          + Shell
+        <button class="term-launch-big" id="terminal-new-btn">
+          <span class="tlb-icon" style="font-size:11px;font-family:monospace;letter-spacing:-.03em">$_</span>
+          <span class="tlb-text">
+            <span class="tlb-label">New shell</span>
+            <span class="tlb-sub">Bare PowerShell / bash</span>
+          </span>
         </button>
       </div>
-    </div>
-    <div class="terminal-xterm" id="terminal-xterm-mount"></div>
-  </div>`;
+      <p class="term-launcher__hint" style="margin-top:16px;opacity:.45">
+        Tip: open multiple Claude sessions in parallel for agent swarm workflows.
+      </p>
+    </div>`;
 }
 
-// Create a new terminal instance (shell or claude)
-async function _termCreate(isClaude) {
-  const api = window.electronAPI;
-  if (!api?.terminal) return;
-  const Terminal = window.Terminal;
-  const FitAddon = window.FitAddon?.FitAddon;
-  if (!Terminal || !FitAddon) return;
-
-  const mount = document.getElementById('terminal-xterm-mount');
-  if (!mount) return;
-
-  // Each instance gets its own container div — show/hide on tab switch
-  const container = document.createElement('div');
-  container.style.cssText = 'width:100%;height:100%;display:none;position:absolute;top:0;left:0;';
-  mount.appendChild(container);
-
-  const term = new Terminal({
-    theme: XTERM_THEME,
-    fontFamily: '"Cascadia Code","Fira Code","JetBrains Mono",Consolas,monospace',
-    fontSize: 13, lineHeight: 1.4, cursorBlink: true,
-    scrollback: 5000, allowProposedApi: true,
-  });
-  const fitAddon = new FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-
-  const result = await api.terminal.create({});
-  if (!result.ok) {
-    term.write(`\x1b[31mFailed to start shell: ${result.error}\x1b[0m\r\n`);
-    return;
-  }
-  const { termId } = result;
-
-  const offData  = api.terminal.onData(termId, text => term.write(text));
-  const offExit  = api.terminal.onExit(termId, code => {
-    term.write(`\r\n\x1b[2m[exited ${code}]\x1b[0m\r\n`);
-  });
-  const offInput = term.onData(data => api.terminal.input(termId, data));
-  const ro = new ResizeObserver(() => { try { fitAddon.fit(); } catch { /**/ } });
-  ro.observe(container);
-
-  // Name the tab
-  let name;
-  if (isClaude) { _termClaudeSeq++; name = `Claude ${_termClaudeSeq}`; }
-  else          { _termShellSeq++;  name = `Shell ${_termShellSeq}`; }
-
-  const inst = {
-    termId, term, fitAddon, container, name, isClaude,
-    cleanup() {
-      offData(); offExit(); offInput.dispose(); ro.disconnect();
-      try { api.terminal.close(termId); } catch { /**/ }
-      try { term.dispose(); } catch { /**/ }
-      container.remove();
-    },
-  };
-  _termInstances.push(inst);
-  _termSwitchTo(_termInstances.length - 1);
-
-  // Auto-launch claude after shell is ready
-  if (isClaude) setTimeout(() => api.terminal.input(termId, 'claude\r'), 300);
-
-  return inst;
-}
-
-function _termSwitchTo(idx) {
-  _termInstances.forEach((inst, i) => {
-    inst.container.style.display = i === idx ? 'block' : 'none';
-  });
-  _activeTermIdx = idx;
-  _termRenderTabs();
-  // Refit after show (xterm needs to recalc dimensions)
-  setTimeout(() => { try { _termInstances[idx]?.fitAddon.fit(); } catch { /**/ } }, 30);
-}
-
-function _termRenderTabs() {
-  const tabsEl = document.getElementById('term-tabs');
-  if (!tabsEl) return;
-  tabsEl.innerHTML = _termInstances.map((inst, i) => `
-    <button class="term-tab${i === _activeTermIdx ? ' term-tab--active' : ''}${inst.isClaude ? ' term-tab--claude' : ''}"
-      data-term-idx="${i}">
-      ${inst.isClaude
-        ? `<span class="term-tab-dot term-tab-dot--claude"></span>`
-        : `<span class="term-tab-dot"></span>`}
-      <span class="term-tab-name">${escapeHTML(inst.name)}</span>
-      <span class="term-tab-close" data-close-idx="${i}" title="Close">×</span>
-    </button>`).join('');
-
-  tabsEl.querySelectorAll('.term-tab').forEach(btn => {
-    btn.addEventListener('click', e => {
-      if (e.target.closest('.term-tab-close')) return;
-      _termSwitchTo(+btn.dataset.termIdx);
-    });
-  });
-  tabsEl.querySelectorAll('.term-tab-close').forEach(x => {
-    x.addEventListener('click', e => {
-      e.stopPropagation();
-      _termCloseTab(+x.dataset.closeIdx);
-    });
-  });
-}
-
-function _termCloseTab(idx) {
-  const inst = _termInstances[idx];
-  if (!inst) return;
-  inst.cleanup();
-  _termInstances.splice(idx, 1);
-  if (!_termInstances.length) {
-    // No tabs left — re-render the whole panel
-    const body = document.getElementById('right-panel-body')
-      || _termInstances[0]?.container?.closest('.right-panel__body');
-    if (body) { body.innerHTML = renderTerminalPanel(); initTerminalPanel(); }
-    return;
-  }
-  const newIdx = Math.min(idx, _termInstances.length - 1);
-  _termSwitchTo(newIdx);
-}
-
-async function initTerminalPanel() {
-  const api = window.electronAPI;
-  if (!api?.terminal) return;
-  if (!window.Terminal || !window.FitAddon?.FitAddon) return;
-
-  const mount = document.getElementById('terminal-xterm-mount');
-  if (!mount) return;
-
-  // Tear down all previous instances (panel re-render)
-  _termInstances.forEach(i => i.cleanup());
-  _termInstances = [];
-  _activeTermIdx = -1;
-  _termShellSeq  = 0;
-  _termClaudeSeq = 0;
-
-  // Make mount relative so absolute child containers stack correctly
-  mount.style.position = 'relative';
-
-  // Wire toolbar buttons
+function initTerminalPanel() {
   document.getElementById('terminal-claude-btn')
-    ?.addEventListener('click', () => _termCreate(true));
+    ?.addEventListener('click', () => window.Workspace?.openTerminal(true));
   document.getElementById('terminal-new-btn')
-    ?.addEventListener('click', () => _termCreate(false));
-
-  // Open the first shell
-  await _termCreate(false);
+    ?.addEventListener('click', () => window.Workspace?.openTerminal(false));
 }
 
 // ---------- Notes panel (dockview version) ----------

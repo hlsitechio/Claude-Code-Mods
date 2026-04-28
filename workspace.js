@@ -470,6 +470,113 @@
     try { dv.getPanel(TOOL_IDS[0])?.api.setActive(); } catch (_) {}
   }
 
+  /* ── Terminal instance component ────────────────────────────────── */
+  // Each call to openTerminal() creates one of these as its own dockview panel.
+  let _termShellSeq  = 0;
+  let _termClaudeSeq = 0;
+
+  const _XTERM_THEME = {
+    background:'#0e0e10', foreground:'#d4d4da', cursor:'#d97757', cursorAccent:'#0e0e10',
+    black:'#141416', red:'#e06c75', green:'#7ab389', yellow:'#c9a96e',
+    blue:'#6a86c3', magenta:'#c678dd', cyan:'#56b6c2', white:'#abb2bf',
+    brightBlack:'#5a5a63', brightRed:'#e06c75', brightGreen:'#98c379',
+    brightYellow:'#e5c07b', brightBlue:'#61afef', brightMagenta:'#c678dd',
+    brightCyan:'#56b6c2', brightWhite:'#ffffff',
+  };
+
+  function makeTerminalInstanceComponent(options) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'width:100%;height:100%;background:#0e0e10;overflow:hidden;';
+    let _inst = null;
+
+    return {
+      element: wrap,
+      async init(panelApi) {
+        const p = panelApi.params || {};
+        const isClaude = !!p.isClaude;
+        const api = window.electronAPI;
+        if (!api?.terminal) { wrap.textContent = 'No terminal API'; return; }
+        const Terminal = window.Terminal;
+        const FitAddon = window.FitAddon?.FitAddon;
+        if (!Terminal || !FitAddon) { wrap.textContent = 'xterm.js not loaded'; return; }
+
+        const term = new Terminal({
+          theme: _XTERM_THEME,
+          fontFamily: '"Cascadia Code","Fira Code","JetBrains Mono",Consolas,monospace',
+          fontSize: 13, lineHeight: 1.4, cursorBlink: true,
+          scrollback: 5000, allowProposedApi: true,
+        });
+        const fitAddon = new FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(wrap);
+
+        const result = await api.terminal.create({});
+        if (!result.ok) {
+          term.write(`\x1b[31mFailed: ${result.error}\x1b[0m\r\n`);
+          return;
+        }
+        const { termId } = result;
+
+        const offData  = api.terminal.onData(termId, t => term.write(t));
+        const offExit  = api.terminal.onExit(termId, code =>
+          term.write(`\r\n\x1b[2m[process exited ${code}]\x1b[0m\r\n`));
+        const offInput = term.onData(d => api.terminal.input(termId, d));
+        const ro = new ResizeObserver(() => { try { fitAddon.fit(); } catch { /**/ } });
+        ro.observe(wrap);
+        fitAddon.fit();
+
+        // Refit when this panel becomes active (tab switch, resize, etc.)
+        try {
+          panelApi.onDidActiveChange?.(ev => {
+            if (ev.isActive) setTimeout(() => { try { fitAddon.fit(); } catch { /**/ } }, 40);
+          });
+        } catch { /**/ }
+
+        if (isClaude) setTimeout(() => api.terminal.input(termId, 'claude\r'), 350);
+
+        _inst = {
+          termId, term, fitAddon,
+          cleanup() {
+            offData(); offExit(); offInput.dispose(); ro.disconnect();
+            try { api.terminal.close(termId); } catch { /**/ }
+            try { term.dispose(); } catch { /**/ }
+          },
+        };
+      },
+      dispose() { _inst?.cleanup(); },
+    };
+  }
+
+  function openTerminal(isClaude = false) {
+    if (!dv) return;
+    if (isClaude) _termClaudeSeq++; else _termShellSeq++;
+    const label = isClaude ? `Claude ${_termClaudeSeq}` : `Shell ${_termShellSeq}`;
+    const id    = `term-${Date.now()}`;
+
+    // Find a reference panel to dock beside (prefer existing terminal panels)
+    let refId = null;
+    for (const p of dv.panels) {
+      if (p.id.startsWith('term-') || p.id === 'terminal') { refId = p.id; break; }
+    }
+    if (!refId) {
+      // Fall back to right-side tool group (use first TOOL_ID panel that exists)
+      for (const tid of TOOL_IDS) {
+        if (dv.getPanel(tid)) { refId = tid; break; }
+      }
+    }
+
+    dv.addPanel({
+      id,
+      component: 'terminal-instance',
+      title: label,
+      params: { isClaude, label },
+      position: refId
+        ? { direction: 'within', referencePanel: refId }
+        : { direction: 'right',  referencePanel: 'chat' },
+    });
+    try { dv.getPanel(id)?.api.setActive(); } catch { /**/ }
+  }
+
   /* ── Pre-render all panels after layout restore ─────────────────── */
   // Called once after dv.fromJSON() so every visible panel has content,
   // not just the globally-active one. Skips panels already rendered.
@@ -510,9 +617,10 @@
       className: 'dockview-theme-ccmod',
 
       createComponent(options) {
-        if (options.name === 'chat')        return makeChatComponent(options);
-        if (options.name === 'artifact')    return makeArtifactComponent(options);
-        if (options.name === 'split-chat')  return makeSplitChatComponent(options);
+        if (options.name === 'chat')               return makeChatComponent(options);
+        if (options.name === 'artifact')           return makeArtifactComponent(options);
+        if (options.name === 'split-chat')         return makeSplitChatComponent(options);
+        if (options.name === 'terminal-instance')  return makeTerminalInstanceComponent(options);
 
         // Standard tool panel — owns its own .right-panel__body
         const panelEl = document.createElement('div');
@@ -910,6 +1018,7 @@
   /* ── Export ───────────────────────────────────────────────────────── */
   window.Workspace = {
     init, activatePanel, isVisible, pinArtifact, resetLayout, setViewLocked, toggleToolsHidden, openSplitChat,
+    openTerminal,
     // Workspace management
     saveCurrentLayout,
     wsGetList, wsGetActiveId, wsCreate, wsSwitch, wsRename, wsDelete,
