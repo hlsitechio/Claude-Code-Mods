@@ -723,6 +723,18 @@ ipcMain.handle('shell:open', async (_, filePath) => {
   }
 });
 
+// Native folder picker — returns the selected path or null if cancelled
+ipcMain.handle('fs:pick-folder', async () => {
+  const { dialog, BrowserWindow } = require('electron');
+  const win = BrowserWindow.getFocusedWindow();
+  const result = await dialog.showOpenDialog(win || undefined, {
+    title:      'Select project folder',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
 // ── IPC: agents persistence ────────────────────────────────────────────────
 const AGENTS_FILE = path.join(APP_ROOT, 'agents.json');
 const AGENTS_DIR  = path.join(APP_ROOT, 'agents');
