@@ -5739,6 +5739,12 @@ function renderTerminalPanel() {
     <div class="terminal-toolbar">
       <span class="terminal-toolbar__title" id="terminal-title">Terminal</span>
       <span class="terminal-toolbar__actions">
+        <button class="term-claude-btn" id="terminal-claude-btn" title="Launch Claude Code in this terminal">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="flex-shrink:0">
+            <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm0 18c-4.411 0-8-3.589-8-8s3.589-8 8-8 8 3.589 8 8-3.589 8-8 8zm-1-5h2v2h-2zm0-8h2v6h-2z"/>
+          </svg>
+          claude
+        </button>
         <button class="icon-btn icon-btn--sm" id="terminal-new-btn" title="New terminal">
           <i data-phosphor="plus"></i>
         </button>
@@ -5836,6 +5842,14 @@ async function initTerminalPanel() {
   ro.observe(mount);
 
   // Toolbar buttons
+  // Launch Claude button — types `claude\r` into the shell
+  const claudeBtn = document.getElementById('terminal-claude-btn');
+  if (claudeBtn) {
+    claudeBtn.addEventListener('click', () => {
+      api.terminal.input(termId, 'claude\r');
+    });
+  }
+
   const newBtn   = document.getElementById('terminal-new-btn');
   const clearBtn = document.getElementById('terminal-clear-btn');
   const onNew = async () => {
