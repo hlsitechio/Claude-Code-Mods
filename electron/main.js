@@ -935,6 +935,61 @@ function getShellConfig() {
   return { cmd: process.env.SHELL || '/bin/bash', args: [] };
 }
 
+// ── IPC: MCP server config ────────────────────────────────────────────────────
+// Reads/writes ~/.claude/settings.json (global) and optionally
+// <project>/.claude/settings.json (project-level).
+
+const GLOBAL_SETTINGS_PATH  = path.join(CLAUDE_DIR, 'settings.json');
+const PROJECT_SETTINGS_PATH = path.join(APP_ROOT, '.claude', 'settings.json');
+
+function _readSettings(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return {};
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch { return {}; }
+}
+
+function _writeSettings(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+ipcMain.handle('mcp:list', () => {
+  const global  = _readSettings(GLOBAL_SETTINGS_PATH);
+  const project = _readSettings(PROJECT_SETTINGS_PATH);
+  const merge = (obj, scope) =>
+    Object.entries(obj?.mcpServers || {}).map(([name, cfg]) => ({ name, scope, ...cfg }));
+  return [...merge(global, 'global'), ...merge(project, 'project')];
+});
+
+ipcMain.handle('mcp:add', async (_, { name, config, scope = 'global' }) => {
+  const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
+  const settings = _readSettings(filePath);
+  settings.mcpServers = settings.mcpServers || {};
+  settings.mcpServers[name] = config;
+  _writeSettings(filePath, settings);
+  return { ok: true };
+});
+
+ipcMain.handle('mcp:remove', async (_, { name, scope = 'global' }) => {
+  const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
+  const settings = _readSettings(filePath);
+  if (settings.mcpServers) {
+    delete settings.mcpServers[name];
+    _writeSettings(filePath, settings);
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('mcp:update', async (_, { name, config, scope = 'global' }) => {
+  const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
+  const settings = _readSettings(filePath);
+  settings.mcpServers = settings.mcpServers || {};
+  settings.mcpServers[name] = config;
+  _writeSettings(filePath, settings);
+  return { ok: true };
+});
+
 ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
   const termId  = _nextTermId++;
   const workDir = cwd || APP_ROOT;

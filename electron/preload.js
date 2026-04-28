@@ -180,6 +180,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id)                => ipcRenderer.invoke('notes:delete', id),
   },
 
+  // ── MCP servers ───────────────────────────────────────────────────────────
+  mcp: {
+    list:   ()                          => ipcRenderer.invoke('mcp:list'),
+    add:    (name, config, scope)       => ipcRenderer.invoke('mcp:add',    { name, config, scope }),
+    remove: (name, scope)               => ipcRenderer.invoke('mcp:remove', { name, scope }),
+    update: (name, config, scope)       => ipcRenderer.invoke('mcp:update', { name, config, scope }),
+  },
+
   // ── File-system explorer ──────────────────────────────────────────────────
   files: {
     root: ()                    => ipcRenderer.invoke('fs:root'),
