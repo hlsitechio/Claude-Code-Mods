@@ -180,6 +180,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id)                => ipcRenderer.invoke('notes:delete', id),
   },
 
+  // ── Git integration ───────────────────────────────────────────────────────
+  git: {
+    status:   (cwd)                    => ipcRenderer.invoke('git:status',    cwd),
+    log:      (opts)                   => ipcRenderer.invoke('git:log',       opts),
+    diffStat: (opts)                   => ipcRenderer.invoke('git:diff-stat', opts),
+    remote:   (cwd)                    => ipcRenderer.invoke('git:remote',    cwd),
+    action:   (action, cwd, args)      => ipcRenderer.invoke('git:action',    { action, cwd, args }),
+  },
+
   // ── MCP servers ───────────────────────────────────────────────────────────
   mcp: {
     list:   ()                          => ipcRenderer.invoke('mcp:list'),

@@ -6788,6 +6788,17 @@ html[data-theme="light"] .split-divider::after { background: #c4c4ca; }
 html[data-theme="light"] .find-bar { background: #fff; border-color: #d4d4d8; box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
 html[data-theme="light"] .find-bar input { color: #141416; }
 
+/* ===== Git panel ===== */
+.git-tab { transition: background .12s, color .12s; }
+.git-tab:hover { background: rgba(255,255,255,.05) !important; color: #b4b4bc !important; }
+.git-file-row:hover { border-color: #38383e !important; }
+.git-stage-btn:hover { border-color: #5a5aff !important; color: #c4c4ff !important; }
+#git-commit-msg:focus { border-color: #5a5aff !important; box-shadow: 0 0 0 2px rgba(90,90,255,.15); }
+#git-stage-all-btn:hover { border-color: #5a5aff !important; color: #c4c4ff !important; background: rgba(90,90,255,.07) !important; }
+#git-commit-btn:hover { background: #4a4aef !important; }
+#git-refresh-btn:hover { background: rgba(255,255,255,.06) !important; color: #c4c4c4 !important; }
+#git-remote-link:hover { background: rgba(106,134,195,.18) !important; }
+
 /* ===== MCP panel ===== */
 .mcp-srv-card { transition: border-color .15s, box-shadow .15s; }
 .mcp-srv-card:hover { border-color: #38383e !important; box-shadow: 0 2px 8px rgba(0,0,0,.25); }

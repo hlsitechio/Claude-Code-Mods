@@ -990,6 +990,74 @@ ipcMain.handle('mcp:update', async (_, { name, config, scope = 'global' }) => {
   return { ok: true };
 });
 
+// ── Git IPC handlers ─────────────────────────────────────────────────────────
+// Runs a git command in APP_ROOT and returns stdout as a string.
+function _gitExec(args, cwd) {
+  try {
+    return require('child_process').execFileSync('git', args, {
+      cwd: cwd || APP_ROOT,
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+    }).trim();
+  } catch (e) {
+    // Return the stderr so callers can surface it
+    return e.stderr ? e.stderr.trim() : '';
+  }
+}
+
+ipcMain.handle('git:status', (_, cwd) => {
+  // --porcelain=v1: "XY filename" one line per changed file
+  const raw = _gitExec(['status', '--porcelain=v1'], cwd);
+  if (!raw) return { files: [], branch: _gitExec(['branch', '--show-current'], cwd) };
+  const files = raw.split('\n').filter(Boolean).map(line => ({
+    xy:   line.slice(0, 2),
+    path: line.slice(3).trim(),
+  }));
+  const branch = _gitExec(['branch', '--show-current'], cwd);
+  return { files, branch };
+});
+
+ipcMain.handle('git:log', (_, { cwd, n = 20 } = {}) => {
+  // format: <hash>|<author>|<date relative>|<subject>
+  const raw = _gitExec([
+    'log', `--max-count=${n}`,
+    '--pretty=format:%h|%an|%ar|%s',
+  ], cwd);
+  if (!raw) return [];
+  return raw.split('\n').filter(Boolean).map(line => {
+    const [hash, author, time, ...rest] = line.split('|');
+    return { hash, author, time, subject: rest.join('|') };
+  });
+});
+
+ipcMain.handle('git:diff-stat', (_, { cwd, file } = {}) => {
+  // Returns +/- line counts for a single file
+  const args = ['diff', '--numstat', '--', file].filter(Boolean);
+  const raw = _gitExec(args, cwd);
+  if (!raw) return { add: 0, del: 0 };
+  const parts = raw.split('\t');
+  return { add: parseInt(parts[0], 10) || 0, del: parseInt(parts[1], 10) || 0 };
+});
+
+ipcMain.handle('git:remote', (_, cwd) => {
+  // Return the first remote URL (usually origin)
+  const raw = _gitExec(['remote', 'get-url', 'origin'], cwd);
+  return raw || null;
+});
+
+ipcMain.handle('git:action', async (_, { action, cwd, args = [] }) => {
+  // action: 'stage' | 'unstage' | 'commit' | 'stash'
+  const allowed = ['add', 'restore', 'commit', 'stash'];
+  if (!allowed.includes(action)) return { ok: false, error: 'not allowed' };
+  try {
+    const out = _gitExec([action, ...args], cwd);
+    return { ok: true, out };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
   const termId  = _nextTermId++;
   const workDir = cwd || APP_ROOT;
