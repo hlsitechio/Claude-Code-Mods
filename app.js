@@ -5515,6 +5515,8 @@ function ftFileIcon(name) {
   return FT_FILE_ICONS[ext] || 'file';
 }
 
+const FT_ROOT_KEY = 'ccmod.filesRoot';
+
 function renderFilesPanel() {
   // Render shell immediately; async-populate after DOM settles
   setTimeout(() => initFilesPanel(), 0);
@@ -5522,7 +5524,12 @@ function renderFilesPanel() {
     <div class="file-tree" id="ft-root">
       <div class="ft-path-bar" id="ft-path-bar">
         <i data-phosphor="folder-open" class="ft-path-bar__icon"></i>
-        <span class="ft-path-bar__text" id="ft-path-text">Loading…</span>
+        <span class="ft-path-bar__text" id="ft-path-text" title="">Loading…</span>
+        <button class="ft-pick-btn" id="ft-pick-btn" title="Open different folder…">
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 256 256" fill="currentColor">
+            <path d="M245,110.64A16,16,0,0,0,232,104H216V88a16,16,0,0,0-16-16H130.67L102.93,51.2A16.14,16.14,0,0,0,93,48H40A16,16,0,0,0,24,64V208h0a8,8,0,0,0,8,8H211a8,8,0,0,0,7.69-5.83l28.33-96A16,16,0,0,0,245,110.64ZM93,64l27.74,20.8A16.14,16.14,0,0,0,130.67,88H200v16H72a16,16,0,0,0-15.39,11.61L40,164.38V64Z"/>
+          </svg>
+        </button>
         <button class="ft-refresh-btn" id="ft-refresh-btn" title="Refresh">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 256 256" fill="currentColor">
             <path d="M224,48V96a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h30.7L184.24,73.56a80,80,0,1,0,4.9,114,8,8,0,1,1,11.44,11.18A96,96,0,1,1,207,60.14L220,72V48a8,8,0,0,1,16,0Z"/>
@@ -5549,10 +5556,35 @@ async function initFilesPanel() {
     if (body) body.innerHTML = `<div class="ft-empty">File API unavailable —<br>restart the app.</div>`;
     return;
   }
-  const rootPath = await api.files.root();
-  window._ftRootPath = rootPath;
-  if (pathText) pathText.textContent = rootPath;
-  await ftLoadDir(rootPath, body);
+
+  // Use saved root if available, else fall back to app root
+  const defaultRoot = await api.files.root();
+  const savedRoot   = localStorage.getItem(FT_ROOT_KEY);
+  let rootPath = (savedRoot && savedRoot.trim()) ? savedRoot : defaultRoot;
+
+  // Helper: switch to a new root (persists + re-renders)
+  async function setRoot(newPath) {
+    rootPath = newPath;
+    localStorage.setItem(FT_ROOT_KEY, newPath);
+    // Show only the last segment + one parent for space
+    const parts = newPath.replace(/\\/g, '/').split('/').filter(Boolean);
+    const short  = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : parts.join('/');
+    if (pathText) {
+      pathText.textContent = short;
+      pathText.title = newPath;
+    }
+    window._ftRootPath = newPath;
+    await ftLoadDir(newPath, body);
+  }
+
+  await setRoot(rootPath);
+
+  // ── Pick folder button ────────────────────────────────────────────────────
+  document.getElementById('ft-pick-btn')?.addEventListener('click', async () => {
+    if (!api.files.pickFolder) return;
+    const picked = await api.files.pickFolder();
+    if (picked) await setRoot(picked);
+  });
 
   // Filter input
   document.getElementById('ft-filter')?.addEventListener('input', function() {

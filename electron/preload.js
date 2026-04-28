@@ -206,6 +206,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     mkdir: (dirPath)            => ipcRenderer.invoke('fs:mkdir', dirPath),
     exists: (filePath)          => ipcRenderer.invoke('fs:exists', filePath),
     openInExplorer: (filePath)  => ipcRenderer.invoke('shell:open', filePath),
+    pickFolder:     ()          => ipcRenderer.invoke('fs:pick-folder'),
     onChanged: (cb) => {
       const handler = (_, dirPath) => cb(dirPath);
       ipcRenderer.on('fs:changed', handler);
