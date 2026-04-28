@@ -30,6 +30,90 @@
     return;
   }
 
+  /* ── Workspace persistence ───────────────────────────────────────── */
+  const WS_STORE_KEY  = 'ccmod.workspaces';
+  const WS_ACTIVE_KEY = 'ccmod.activeWorkspace';
+  let _wsList      = [];
+  let _wsActiveId  = null;
+  let _wsSaveTimer = null;
+
+  function _wsLoadStore() {
+    try { _wsList = JSON.parse(localStorage.getItem(WS_STORE_KEY) || '[]'); } catch { _wsList = []; }
+    _wsActiveId = localStorage.getItem(WS_ACTIVE_KEY) || null;
+    // Bootstrap: ensure at least one workspace exists
+    if (!_wsList.length) {
+      const id = 'ws-' + Date.now();
+      _wsList = [{ id, name: 'Workspace 1', layout: null, updatedAt: null }];
+      _wsActiveId = id;
+      _wsWriteStore();
+    }
+    if (!_wsActiveId || !_wsList.find(w => w.id === _wsActiveId)) {
+      _wsActiveId = _wsList[0].id;
+      localStorage.setItem(WS_ACTIVE_KEY, _wsActiveId);
+    }
+  }
+
+  function _wsWriteStore() {
+    localStorage.setItem(WS_STORE_KEY, JSON.stringify(_wsList));
+    localStorage.setItem(WS_ACTIVE_KEY, _wsActiveId);
+  }
+
+  function _wsGetActive() {
+    return _wsList.find(w => w.id === _wsActiveId) || null;
+  }
+
+  function saveCurrentLayout() {
+    if (!dv) return;
+    try {
+      const layout = dv.toJSON();
+      const ws = _wsGetActive();
+      if (ws) { ws.layout = layout; ws.updatedAt = Date.now(); _wsWriteStore(); }
+    } catch (e) { console.warn('[workspace] saveCurrentLayout failed:', e); }
+  }
+
+  function _wsScheduleSave() {
+    if (_wsSaveTimer) clearTimeout(_wsSaveTimer);
+    _wsSaveTimer = setTimeout(saveCurrentLayout, 600);
+  }
+
+  function wsCreate(name) {
+    saveCurrentLayout();
+    const id = 'ws-' + Date.now();
+    _wsList.push({ id, name, layout: null, updatedAt: null });
+    _wsActiveId = id;
+    _wsWriteStore();
+    window.location.reload();
+  }
+
+  function wsSwitch(id) {
+    if (id === _wsActiveId) return;
+    saveCurrentLayout();
+    _wsActiveId = id;
+    _wsWriteStore();
+    window.location.reload();
+  }
+
+  function wsRename(id, name) {
+    const ws = _wsList.find(w => w.id === id);
+    if (ws) { ws.name = name.trim() || ws.name; _wsWriteStore(); }
+  }
+
+  function wsDelete(id) {
+    if (_wsList.length <= 1) return; // can't delete last
+    const wasActive = id === _wsActiveId;
+    _wsList = _wsList.filter(w => w.id !== id);
+    if (wasActive) {
+      _wsActiveId = _wsList[0].id;
+      _wsWriteStore();
+      window.location.reload();
+    } else {
+      _wsWriteStore();
+    }
+  }
+
+  function wsGetList()     { return _wsList.slice(); }
+  function wsGetActiveId() { return _wsActiveId; }
+
   /* ── Panel catalogue ─────────────────────────────────────────────── */
   const PANEL_TITLES = {
     chat:      'Chat',
@@ -358,8 +442,38 @@
     };
   }
 
+  /* ── Default layout builder ──────────────────────────────────────── */
+  function _buildDefaultLayout() {
+    dv.addPanel({
+      id:        'chat',
+      component: 'chat',
+      title:     'Chat',
+      params:    { id: 'chat' },
+    });
+    dv.addPanel({
+      id:        TOOL_IDS[0],
+      component: 'panel',
+      title:     PANEL_TITLES[TOOL_IDS[0]],
+      params:    { id: TOOL_IDS[0] },
+      position:  { direction: 'right', referencePanel: 'chat' },
+      size:      440,
+    });
+    for (const id of TOOL_IDS.slice(1)) {
+      dv.addPanel({
+        id,
+        component: 'panel',
+        title:     PANEL_TITLES[id],
+        params:    { id },
+        position:  { direction: 'within', referencePanel: TOOL_IDS[0] },
+      });
+    }
+    try { dv.getPanel(TOOL_IDS[0])?.api.setActive(); } catch (_) {}
+  }
+
   /* ── Init ────────────────────────────────────────────────────────── */
   function init() {
+    _wsLoadStore(); // bootstrap workspace state before anything else
+
     const el = document.getElementById('main-dock');
     if (!el) return;
 
@@ -389,39 +503,24 @@
       },
     });
 
-    /* ── Default layout ──────────────────────────────────────────── */
+    /* ── Layout — restore saved or build default ─────────────────── */
 
-    // 1. Chat — fills all space (sidebar lives outside dockview as a plain <aside>)
-    dv.addPanel({
-      id:        'chat',
-      component: 'chat',
-      title:     'Chat',
-      params:    { id: 'chat' },
-    });
-
-    // 2. First tool panel — splits right (440 px) from chat
-    dv.addPanel({
-      id:        TOOL_IDS[0],
-      component: 'panel',
-      title:     PANEL_TITLES[TOOL_IDS[0]],
-      params:    { id: TOOL_IDS[0] },
-      position:  { direction: 'right', referencePanel: 'chat' },
-      size:      440,
-    });
-
-    // 3. Remaining tool panels — tab into the same right group
-    for (const id of TOOL_IDS.slice(1)) {
-      dv.addPanel({
-        id,
-        component: 'panel',
-        title:     PANEL_TITLES[id],
-        params:    { id },
-        position:  { direction: 'within', referencePanel: TOOL_IDS[0] },
-      });
+    const _savedLayout = _wsGetActive()?.layout;
+    if (_savedLayout) {
+      try {
+        dv.fromJSON(_savedLayout);
+      } catch (e) {
+        console.warn('[workspace] fromJSON failed, falling back to default layout:', e);
+        _buildDefaultLayout();
+      }
+    } else {
+      _buildDefaultLayout();
     }
 
-    // Start with Preview active
-    try { dv.getPanel(TOOL_IDS[0])?.api.setActive(); } catch (_) {}
+    // Auto-save layout on any panel or size change (debounced 600 ms)
+    dv.onDidLayoutChange(() => _wsScheduleSave());
+    dv.onDidAddPanel(()    => _wsScheduleSave());
+    dv.onDidRemovePanel(() => _wsScheduleSave());
 
     /* ── Drag — suppress browser "Move" badge ────────────────────── */
     el.addEventListener('dragstart', e => {
@@ -465,11 +564,9 @@
 
   /* ── Reset layout ────────────────────────────────────────────────── */
   function resetLayout() {
-    // The most reliable reset is a full page reload.
-    // - #chat-slot is recreated fresh so the chat component can re-adopt it.
-    // - All dockview panels are re-initialized from scratch.
-    // - Sessions are disk-backed so no conversation history is lost.
-    // Clear persistent state first so the reload comes up in the default layout.
+    // Wipe the active workspace's saved layout so the reload uses the default.
+    const ws = _wsGetActive();
+    if (ws) { ws.layout = null; _wsWriteStore(); }
     _toolsHidden = false;
     _hiddenPanelIds = [];
     localStorage.setItem('ccmod.toolsHidden', '0');
@@ -781,7 +878,12 @@
   function isVisible() { return true; }
 
   /* ── Export ───────────────────────────────────────────────────────── */
-  window.Workspace = { init, activatePanel, isVisible, pinArtifact, resetLayout, setViewLocked, toggleToolsHidden, openSplitChat };
+  window.Workspace = {
+    init, activatePanel, isVisible, pinArtifact, resetLayout, setViewLocked, toggleToolsHidden, openSplitChat,
+    // Workspace management
+    saveCurrentLayout,
+    wsGetList, wsGetActiveId, wsCreate, wsSwitch, wsRename, wsDelete,
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
