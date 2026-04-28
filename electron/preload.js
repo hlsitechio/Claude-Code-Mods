@@ -180,6 +180,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     delete: (id)                => ipcRenderer.invoke('notes:delete', id),
   },
 
+  // ── Active project (cwd passed to CLI) ───────────────────────────────────
+  project: {
+    setCwd: (projectPath) => ipcRenderer.invoke('project:set-cwd', projectPath),
+    getCwd: ()            => ipcRenderer.invoke('project:get-cwd'),
+  },
+
   // ── Git integration ───────────────────────────────────────────────────────
   git: {
     status:   (cwd)                    => ipcRenderer.invoke('git:status',    cwd),

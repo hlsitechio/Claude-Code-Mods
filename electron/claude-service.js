@@ -469,9 +469,11 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
   console.log(`[claude-cli] spawn ${isCmd ? '(shell)' : '(exe)'}  model=${model}  resume=${cliSessionId || 'new'}  stdin=${useStdinJson}`);
 
   return new Promise((resolve, reject) => {
-    const appRoot = path.resolve(__dirname, '..');
+    const appRoot    = path.resolve(__dirname, '..');
+    // Use the user-selected project folder if set; fall back to app root.
+    const projectCwd = global._projectCwd || appRoot;
     const proc = spawn(binary, args, {
-      cwd:         appRoot,
+      cwd:         projectCwd,
       env:         { ...process.env },
       windowsHide: true,
       shell:       isCmd,

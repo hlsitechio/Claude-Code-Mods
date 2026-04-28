@@ -5569,12 +5569,46 @@ async function initFilesPanel() {
     // Show only the last segment + one parent for space
     const parts = newPath.replace(/\\/g, '/').split('/').filter(Boolean);
     const short  = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : parts.join('/');
+    const projName = parts[parts.length - 1] || newPath;
     if (pathText) {
       pathText.textContent = short;
       pathText.title = newPath;
     }
     window._ftRootPath = newPath;
+    // Tell the main process — CLI will now spawn inside this directory
+    await api.project?.setCwd?.(newPath);
+    // Update the project badge shown in the chat UI
+    window._activeProjectPath = newPath;
+    window._activeProjectName = projName;
+    _updateProjectBadge(newPath, projName);
     await ftLoadDir(newPath, body);
+  }
+
+  function _updateProjectBadge(projPath, projName) {
+    let badge = document.getElementById('active-project-badge');
+    if (!projPath) { badge?.remove(); return; }
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = 'active-project-badge';
+      badge.className = 'proj-badge';
+      // Insert between scroll area and composer wrapper (px-6 pb-1 div)
+      const scroll   = document.getElementById('chat-scroll');
+      const composer = scroll?.nextElementSibling;
+      if (composer) scroll.parentElement.insertBefore(badge, composer);
+      else document.getElementById('chat-slot')?.appendChild(badge);
+    }
+    badge.innerHTML = `
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <path d="M3 7v13h18V7"/><path d="M1 7h22"/><path d="M9 7V3h6v4"/>
+      </svg>
+      <span class="proj-badge__name">${escapeHTML(projName)}</span>
+      <span class="proj-badge__path">${escapeHTML(projPath)}</span>
+      <button class="proj-badge__clear" title="Clear project" onclick="
+        localStorage.removeItem('ccmod.filesRoot');
+        window._activeProjectPath=null;
+        window.electronAPI?.project?.setCwd?.(null);
+        document.getElementById('active-project-badge')?.remove();
+      ">×</button>`;
   }
 
   await setRoot(rootPath);
@@ -9522,4 +9556,42 @@ let _streamInterval = setInterval(() => {
   } else {
     render();
   }
+})();
+
+// ── Restore active project context on page load ──────────────────────────────
+(function restoreProjectContext() {
+  const saved = localStorage.getItem('ccmod.filesRoot');
+  if (!saved) return;
+  const parts    = saved.replace(/\\/g, '/').split('/').filter(Boolean);
+  const projName = parts[parts.length - 1] || saved;
+  window._activeProjectPath = saved;
+  window._activeProjectName = projName;
+  // Sync to main process so CLI uses the saved path from the first message
+  window.electronAPI?.project?.setCwd?.(saved);
+  // Show the badge — DOM must be ready; use rAF to let dockview mount first
+  const tryBadge = () => {
+    const scroll = document.getElementById('chat-scroll');
+    if (!scroll) { requestAnimationFrame(tryBadge); return; }
+    let badge = document.getElementById('active-project-badge');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = 'active-project-badge';
+      badge.className = 'proj-badge';
+      const composer = scroll.nextElementSibling;
+      if (composer) scroll.parentElement.insertBefore(badge, composer);
+    }
+    badge.innerHTML = `
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <path d="M3 7v13h18V7"/><path d="M1 7h22"/><path d="M9 7V3h6v4"/>
+      </svg>
+      <span class="proj-badge__name">${escapeHTML(projName)}</span>
+      <span class="proj-badge__path">${escapeHTML(saved)}</span>
+      <button class="proj-badge__clear" title="Clear project" onclick="
+        localStorage.removeItem('ccmod.filesRoot');
+        window._activeProjectPath=null;
+        window.electronAPI?.project?.setCwd?.(null);
+        document.getElementById('active-project-badge')?.remove();
+      ">×</button>`;
+  };
+  requestAnimationFrame(tryBadge);
 })();
