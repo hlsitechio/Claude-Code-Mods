@@ -5733,155 +5733,191 @@ async function ftLoadDir(dirPath, container) {
 }
 
 // ---------- Terminal panel ----------
-// Renders a mount point; initTerminalPanel() boots xterm.js + live shell.
+// ── Multi-tab terminal ────────────────────────────────────────────────────────
+// Each tab is an independent PTY + xterm instance.
+// Tabs can be plain shells or Claude Code sessions (agent swarm).
+
+let _termInstances  = [];   // [{ termId, term, fitAddon, container, name, isClaude, cleanup }]
+let _activeTermIdx  = -1;
+let _termShellSeq   = 0;
+let _termClaudeSeq  = 0;
+
+const XTERM_THEME = {
+  background:    '#0e0e10', foreground:    '#d4d4da',
+  cursor:        '#d97757', cursorAccent:  '#0e0e10',
+  black:         '#141416', red:           '#e06c75',
+  green:         '#7ab389', yellow:        '#c9a96e',
+  blue:          '#6a86c3', magenta:       '#c678dd',
+  cyan:          '#56b6c2', white:         '#abb2bf',
+  brightBlack:   '#5a5a63', brightRed:     '#e06c75',
+  brightGreen:   '#98c379', brightYellow:  '#e5c07b',
+  brightBlue:    '#61afef', brightMagenta: '#c678dd',
+  brightCyan:    '#56b6c2', brightWhite:   '#ffffff',
+};
+
 function renderTerminalPanel() {
   return `<div class="terminal-view" id="terminal-view">
-    <div class="terminal-toolbar">
-      <span class="terminal-toolbar__title" id="terminal-title">Terminal</span>
-      <span class="terminal-toolbar__actions">
-        <button class="term-claude-btn" id="terminal-claude-btn" title="Launch Claude Code in this terminal">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="flex-shrink:0">
-            <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm0 18c-4.411 0-8-3.589-8-8s3.589-8 8-8 8 3.589 8 8-3.589 8-8 8zm-1-5h2v2h-2zm0-8h2v6h-2z"/>
+    <div class="terminal-tabbar" id="terminal-tabbar">
+      <div class="term-tabs" id="term-tabs"></div>
+      <div class="term-tabbar-actions">
+        <button class="term-claude-btn" id="terminal-claude-btn" title="New Claude Code session">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="12" cy="12" r="10" opacity=".2"/><path d="M12 2a10 10 0 1 1 0 20A10 10 0 0 1 12 2zm0 4a1 1 0 0 0-1 1v4H7a1 1 0 1 0 0 2h4v4a1 1 0 1 0 2 0v-4h4a1 1 0 1 0 0-2h-4V7a1 1 0 0 0-1-1z" opacity=".3"/><path d="M12 8.5c1.93 0 3.5 1.57 3.5 3.5S13.93 15.5 12 15.5 8.5 13.93 8.5 12 10.07 8.5 12 8.5z"/>
           </svg>
-          claude
+          + Claude
         </button>
-        <button class="icon-btn icon-btn--sm" id="terminal-new-btn" title="New terminal">
-          <i data-phosphor="plus"></i>
+        <button class="term-shell-btn" id="terminal-new-btn" title="New shell">
+          + Shell
         </button>
-        <button class="icon-btn icon-btn--sm" id="terminal-clear-btn" title="Clear">
-          <i data-phosphor="trash"></i>
-        </button>
-      </span>
+      </div>
     </div>
     <div class="terminal-xterm" id="terminal-xterm-mount"></div>
   </div>`;
 }
 
-let _termInstance = null; // { termId, term, fitAddon, cleanup }
-
-async function initTerminalPanel() {
+// Create a new terminal instance (shell or claude)
+async function _termCreate(isClaude) {
   const api = window.electronAPI;
-  if (!api?.terminal) return; // not in Electron
-
-  const Terminal   = window.Terminal;
-  const FitAddon   = window.FitAddon?.FitAddon;
-  if (!Terminal || !FitAddon) return; // xterm not loaded
+  if (!api?.terminal) return;
+  const Terminal = window.Terminal;
+  const FitAddon = window.FitAddon?.FitAddon;
+  if (!Terminal || !FitAddon) return;
 
   const mount = document.getElementById('terminal-xterm-mount');
   if (!mount) return;
 
-  // Tear down previous instance if panel was re-rendered
-  if (_termInstance) {
-    _termInstance.cleanup();
-    _termInstance = null;
-  }
+  // Each instance gets its own container div — show/hide on tab switch
+  const container = document.createElement('div');
+  container.style.cssText = 'width:100%;height:100%;display:none;position:absolute;top:0;left:0;';
+  mount.appendChild(container);
 
-  // Detect platform label
-  const platform = api.platform || 'unknown';
-  const shellLabel = platform === 'win32' ? 'PowerShell' : (platform === 'darwin' ? 'zsh' : 'bash');
-  const titleEl = document.getElementById('terminal-title');
-
-  // Create xterm instance
   const term = new Terminal({
-    theme: {
-      background:    '#0e0e10',
-      foreground:    '#d4d4da',
-      cursor:        '#d97757',
-      cursorAccent:  '#0e0e10',
-      black:         '#141416',
-      red:           '#e06c75',
-      green:         '#7ab389',
-      yellow:        '#c9a96e',
-      blue:          '#6a86c3',
-      magenta:       '#c678dd',
-      cyan:          '#56b6c2',
-      white:         '#abb2bf',
-      brightBlack:   '#5a5a63',
-      brightRed:     '#e06c75',
-      brightGreen:   '#98c379',
-      brightYellow:  '#e5c07b',
-      brightBlue:    '#61afef',
-      brightMagenta: '#c678dd',
-      brightCyan:    '#56b6c2',
-      brightWhite:   '#ffffff',
-    },
-    fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace',
-    fontSize:    13,
-    lineHeight:  1.4,
-    cursorBlink: true,
-    scrollback:  5000,
-    allowProposedApi: true,
+    theme: XTERM_THEME,
+    fontFamily: '"Cascadia Code","Fira Code","JetBrains Mono",Consolas,monospace',
+    fontSize: 13, lineHeight: 1.4, cursorBlink: true,
+    scrollback: 5000, allowProposedApi: true,
   });
-
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  term.open(mount);
-  fitAddon.fit();
+  term.open(container);
 
-  // Spawn the shell
   const result = await api.terminal.create({});
   if (!result.ok) {
     term.write(`\x1b[31mFailed to start shell: ${result.error}\x1b[0m\r\n`);
     return;
   }
-  const { termId, cwd } = result;
-  if (titleEl) titleEl.textContent = `${shellLabel} — ${cwd}`;
+  const { termId } = result;
 
-  // Wire output
-  const offData = api.terminal.onData(termId, (text) => term.write(text));
-  const offExit = api.terminal.onExit(termId, (code) => {
-    term.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`);
-    term.write(`\x1b[2m[click New Terminal to restart]\x1b[0m\r\n`);
+  const offData  = api.terminal.onData(termId, text => term.write(text));
+  const offExit  = api.terminal.onExit(termId, code => {
+    term.write(`\r\n\x1b[2m[exited ${code}]\x1b[0m\r\n`);
   });
+  const offInput = term.onData(data => api.terminal.input(termId, data));
+  const ro = new ResizeObserver(() => { try { fitAddon.fit(); } catch { /**/ } });
+  ro.observe(container);
 
-  // Wire input (xterm keystrokes → shell stdin)
-  const offInput = term.onData((data) => api.terminal.input(termId, data));
+  // Name the tab
+  let name;
+  if (isClaude) { _termClaudeSeq++; name = `Claude ${_termClaudeSeq}`; }
+  else          { _termShellSeq++;  name = `Shell ${_termShellSeq}`; }
 
-  // Resize observer — refit xterm when panel resizes
-  const ro = new ResizeObserver(() => { try { fitAddon.fit(); } catch { /* ignore */ } });
-  ro.observe(mount);
-
-  // Toolbar buttons
-  // Launch Claude button — types `claude\r` into the shell
-  const claudeBtn = document.getElementById('terminal-claude-btn');
-  if (claudeBtn) {
-    claudeBtn.addEventListener('click', () => {
-      api.terminal.input(termId, 'claude\r');
-    });
-  }
-
-  const newBtn   = document.getElementById('terminal-new-btn');
-  const clearBtn = document.getElementById('terminal-clear-btn');
-  const onNew = async () => {
-    _termInstance?.cleanup();
-    _termInstance = null;
-    // Re-render panel and reinitialize
-    const body = document.getElementById('right-panel-body');
-    if (body) {
-      body.innerHTML = renderTerminalPanel();
-      if (window.renderIcons) window.renderIcons(body);
-      setTimeout(initTerminalPanel, 0);
-    }
-  };
-  const onClear = () => term.clear();
-  newBtn?.addEventListener('click', onNew);
-  clearBtn?.addEventListener('click', onClear);
-
-  _termInstance = {
-    termId,
-    term,
-    fitAddon,
+  const inst = {
+    termId, term, fitAddon, container, name, isClaude,
     cleanup() {
-      offData();
-      offExit();
-      offInput.dispose();
-      ro.disconnect();
-      newBtn?.removeEventListener('click', onNew);
-      clearBtn?.removeEventListener('click', onClear);
-      try { api.terminal.close(termId); } catch { /* ignore */ }
-      try { term.dispose(); } catch { /* ignore */ }
+      offData(); offExit(); offInput.dispose(); ro.disconnect();
+      try { api.terminal.close(termId); } catch { /**/ }
+      try { term.dispose(); } catch { /**/ }
+      container.remove();
     },
   };
+  _termInstances.push(inst);
+  _termSwitchTo(_termInstances.length - 1);
+
+  // Auto-launch claude after shell is ready
+  if (isClaude) setTimeout(() => api.terminal.input(termId, 'claude\r'), 300);
+
+  return inst;
+}
+
+function _termSwitchTo(idx) {
+  _termInstances.forEach((inst, i) => {
+    inst.container.style.display = i === idx ? 'block' : 'none';
+  });
+  _activeTermIdx = idx;
+  _termRenderTabs();
+  // Refit after show (xterm needs to recalc dimensions)
+  setTimeout(() => { try { _termInstances[idx]?.fitAddon.fit(); } catch { /**/ } }, 30);
+}
+
+function _termRenderTabs() {
+  const tabsEl = document.getElementById('term-tabs');
+  if (!tabsEl) return;
+  tabsEl.innerHTML = _termInstances.map((inst, i) => `
+    <button class="term-tab${i === _activeTermIdx ? ' term-tab--active' : ''}${inst.isClaude ? ' term-tab--claude' : ''}"
+      data-term-idx="${i}">
+      ${inst.isClaude
+        ? `<span class="term-tab-dot term-tab-dot--claude"></span>`
+        : `<span class="term-tab-dot"></span>`}
+      <span class="term-tab-name">${escapeHTML(inst.name)}</span>
+      <span class="term-tab-close" data-close-idx="${i}" title="Close">×</span>
+    </button>`).join('');
+
+  tabsEl.querySelectorAll('.term-tab').forEach(btn => {
+    btn.addEventListener('click', e => {
+      if (e.target.closest('.term-tab-close')) return;
+      _termSwitchTo(+btn.dataset.termIdx);
+    });
+  });
+  tabsEl.querySelectorAll('.term-tab-close').forEach(x => {
+    x.addEventListener('click', e => {
+      e.stopPropagation();
+      _termCloseTab(+x.dataset.closeIdx);
+    });
+  });
+}
+
+function _termCloseTab(idx) {
+  const inst = _termInstances[idx];
+  if (!inst) return;
+  inst.cleanup();
+  _termInstances.splice(idx, 1);
+  if (!_termInstances.length) {
+    // No tabs left — re-render the whole panel
+    const body = document.getElementById('right-panel-body')
+      || _termInstances[0]?.container?.closest('.right-panel__body');
+    if (body) { body.innerHTML = renderTerminalPanel(); initTerminalPanel(); }
+    return;
+  }
+  const newIdx = Math.min(idx, _termInstances.length - 1);
+  _termSwitchTo(newIdx);
+}
+
+async function initTerminalPanel() {
+  const api = window.electronAPI;
+  if (!api?.terminal) return;
+  if (!window.Terminal || !window.FitAddon?.FitAddon) return;
+
+  const mount = document.getElementById('terminal-xterm-mount');
+  if (!mount) return;
+
+  // Tear down all previous instances (panel re-render)
+  _termInstances.forEach(i => i.cleanup());
+  _termInstances = [];
+  _activeTermIdx = -1;
+  _termShellSeq  = 0;
+  _termClaudeSeq = 0;
+
+  // Make mount relative so absolute child containers stack correctly
+  mount.style.position = 'relative';
+
+  // Wire toolbar buttons
+  document.getElementById('terminal-claude-btn')
+    ?.addEventListener('click', () => _termCreate(true));
+  document.getElementById('terminal-new-btn')
+    ?.addEventListener('click', () => _termCreate(false));
+
+  // Open the first shell
+  await _termCreate(false);
 }
 
 // ---------- Notes panel (dockview version) ----------
