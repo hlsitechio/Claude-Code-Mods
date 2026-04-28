@@ -5591,10 +5591,9 @@ async function initFilesPanel() {
       badge = document.createElement('div');
       badge.id = 'active-project-badge';
       badge.className = 'proj-badge';
-      // Insert between scroll area and composer wrapper (px-6 pb-1 div)
-      const scroll   = document.getElementById('chat-scroll');
-      const composer = scroll?.nextElementSibling;
-      if (composer) scroll.parentElement.insertBefore(badge, composer);
+      // Insert at the top of the chat — before the scroll area
+      const scroll = document.getElementById('chat-scroll');
+      if (scroll) scroll.parentElement.insertBefore(badge, scroll);
       else document.getElementById('chat-slot')?.appendChild(badge);
     }
     badge.innerHTML = `
@@ -7523,7 +7522,9 @@ function setRightPanelTab(id) {
 // (not triggered by programmatic setRightPanelTab calls)
 window._dvTabChange = function(id) {
   if (!document.body.classList.contains('right-panel-open')) return;
-  if (currentRightPanel === id) return; // already current — skip re-render
+  // Skip only if panel is current AND body already has content (handles layout restore)
+  const bodyEl = document.getElementById('right-panel-body');
+  if (currentRightPanel === id && bodyEl && bodyEl.children.length > 0) return;
   setRightPanelTab(id);
 };
 
@@ -9577,8 +9578,7 @@ let _streamInterval = setInterval(() => {
       badge = document.createElement('div');
       badge.id = 'active-project-badge';
       badge.className = 'proj-badge';
-      const composer = scroll.nextElementSibling;
-      if (composer) scroll.parentElement.insertBefore(badge, composer);
+      scroll.parentElement.insertBefore(badge, scroll);
     }
     badge.innerHTML = `
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
