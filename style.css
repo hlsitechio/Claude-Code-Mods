@@ -99,10 +99,115 @@ body:not(.is-electron) .titlebar { display: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 60vw;
-  /* shift right to visually center inside chat column (not full window) */
   transform: translateX(var(--title-offset, 0px));
   transition: transform 0.2s ease;
 }
+
+/* ── Workspace switcher ───────────────────────────────────────────── */
+.ws-switcher {
+  grid-column: 1;
+  justify-self: start;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 12px;
+  -webkit-app-region: no-drag;
+  overflow: hidden;
+  max-width: 40vw;
+}
+
+.ws-tab {
+  height: 19px;
+  padding: 0 9px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #4a4a54;
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+}
+.ws-tab:hover {
+  background: #18181b;
+  color: #9a9aa4;
+  border-color: #2a2a30;
+}
+.ws-tab--active {
+  background: #1c1c20;
+  color: #d4d4dc;
+  border-color: #35353e;
+}
+.ws-tab--editing {
+  outline: none;
+  background: #1c1c20;
+  color: #e7e7ea;
+  border-color: #5a5aff;
+  min-width: 80px;
+  max-width: 150px;
+  cursor: text;
+}
+
+.ws-add {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  border: 1px solid #2a2a30;
+  background: transparent;
+  color: #4a4a54;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  font-family: inherit;
+}
+.ws-add:hover {
+  background: #18181b;
+  color: #9a9aa4;
+  border-color: #3a3a44;
+}
+
+/* Workspace right-click context menu */
+.ws-ctx-menu {
+  position: fixed;
+  z-index: 99999;
+  background: #18181b;
+  border: 1px solid #2e2e38;
+  border-radius: 7px;
+  padding: 4px;
+  min-width: 130px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.ws-ctx-item {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  color: #b4b4bc;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+  font-family: inherit;
+  transition: background 0.1s, color 0.1s;
+}
+.ws-ctx-item:hover { background: #25252c; color: #e7e7ea; }
+.ws-ctx-item--danger { color: #e06c75; }
+.ws-ctx-item--danger:hover { background: #2a1a1c; color: #ff7b7b; }
 
 /* Font toggle — 'system' overrides the Tailwind default */
 html[data-font="system"], html[data-font="system"] body { font-family: ui-sans-serif, system-ui, sans-serif !important; }

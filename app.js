@@ -8849,3 +8849,118 @@ let _streamInterval = setInterval(() => {
   // Listen for subsequent changes
   api?.onMaximizeChange?.(setMaxState);
 })();
+
+// ── Workspace switcher ────────────────────────────────────────────────────────
+
+(function initWorkspaceSwitcher() {
+  const container = document.getElementById('ws-switcher');
+  if (!container) return;
+
+  let _wsCtxMenu = null;
+
+  function _closeCtxMenu() {
+    if (_wsCtxMenu) { _wsCtxMenu.remove(); _wsCtxMenu = null; }
+  }
+
+  function _showCtxMenu(e, ws) {
+    _closeCtxMenu();
+    const menu = document.createElement('div');
+    menu.className = 'ws-ctx-menu';
+    _wsCtxMenu = menu;
+
+    const rename = document.createElement('button');
+    rename.className = 'ws-ctx-item';
+    rename.textContent = 'Rename';
+    rename.onclick = () => { _closeCtxMenu(); _startRename(ws.id); };
+
+    const del = document.createElement('button');
+    del.className = 'ws-ctx-item ws-ctx-item--danger';
+    del.textContent = 'Delete';
+    del.onclick = () => {
+      _closeCtxMenu();
+      if ((window.Workspace?.wsGetList().length || 0) <= 1) return;
+      window.Workspace?.wsDelete(ws.id);
+      render();
+    };
+
+    menu.appendChild(rename);
+    menu.appendChild(del);
+    document.body.appendChild(menu);
+
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let x = e.clientX, y = e.clientY + 6;
+    if (x + 140 > vw) x = vw - 144;
+    if (y + 80  > vh) y = e.clientY - 86;
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+
+    setTimeout(() => document.addEventListener('mousedown', _closeCtxMenu, { once: true }), 0);
+  }
+
+  function _startRename(id) {
+    const tab = container.querySelector(`[data-wsid="${id}"]`);
+    if (!tab) return;
+    tab.contentEditable = 'true';
+    tab.classList.add('ws-tab--editing');
+    tab.focus();
+    const range = document.createRange();
+    range.selectNodeContents(tab);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    function commit() {
+      tab.contentEditable = 'false';
+      tab.classList.remove('ws-tab--editing');
+      const newName = tab.textContent.trim();
+      if (newName) window.Workspace?.wsRename(id, newName);
+      else render();
+    }
+    tab.addEventListener('blur', commit, { once: true });
+    tab.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter')  { ev.preventDefault(); tab.blur(); }
+      if (ev.key === 'Escape') {
+        tab.textContent = window.Workspace?.wsGetList().find(w => w.id === id)?.name || '';
+        tab.blur();
+      }
+    });
+  }
+
+  function render() {
+    container.innerHTML = '';
+    const ws  = window.Workspace?.wsGetList() || [];
+    const aid = window.Workspace?.wsGetActiveId() || '';
+
+    for (const w of ws) {
+      const tab = document.createElement('span');
+      tab.className    = 'ws-tab' + (w.id === aid ? ' ws-tab--active' : '');
+      tab.textContent  = w.name;
+      tab.title        = w.name;
+      tab.dataset.wsid = w.id;
+
+      tab.addEventListener('click', () => {
+        if (w.id !== aid) window.Workspace?.wsSwitch(w.id);
+      });
+      tab.addEventListener('contextmenu', e => { e.preventDefault(); _showCtxMenu(e, w); });
+      tab.addEventListener('dblclick',    e => { e.preventDefault(); _startRename(w.id); });
+
+      container.appendChild(tab);
+    }
+
+    const addBtn = document.createElement('button');
+    addBtn.className   = 'ws-add';
+    addBtn.textContent = '+';
+    addBtn.title       = 'New workspace';
+    addBtn.addEventListener('click', () => {
+      const name = `Workspace ${(window.Workspace?.wsGetList().length || 0) + 1}`;
+      window.Workspace?.wsCreate(name);
+    });
+    container.appendChild(addBtn);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', render);
+  } else {
+    render();
+  }
+})();
