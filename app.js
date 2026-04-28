@@ -6108,44 +6108,329 @@ async function initNotesPanel() {
 // ---------- Plan panel ----------
 // ---------- MCP panel ----------
 function renderMcpPanel() {
-  const servers = [
-    { name: 'd3bugr',            tools: 12, status: 'connected', color: '#7ab389',
-      toolList: ['subfinder','amass','httpx','nuclei','nmap','sqlmap','ffuf','gobuster','nikto','whatweb','wappalyzer','dirsearch'] },
-    { name: 'supabase',          tools: 8,  status: 'connected', color: '#6a86c3',
-      toolList: ['execute_sql','list_tables','apply_migration','create_branch','list_projects','get_project','deploy_edge_function','get_logs'] },
-    { name: 'Desktop Commander', tools: 5,  status: 'connected', color: '#c9a96e',
-      toolList: ['start_process','read_file','write_file','list_directory','kill_process'] },
-    { name: 'filesystem',        tools: 7,  status: 'connected', color: '#7ab389',
-      toolList: ['read_file','write_file','create_directory','list_directory','move_file','delete_file','search_files'] },
-  ];
-  const total = servers.reduce((s, x) => s + x.tools, 0);
-  const statusDot = s => s === 'connected'
-    ? `<span style="width:6px;height:6px;border-radius:50%;background:#7ab389;display:inline-block;flex-shrink:0"></span>`
-    : `<span style="width:6px;height:6px;border-radius:50%;background:#3a3a44;display:inline-block;flex-shrink:0"></span>`;
+  // Skeleton shown immediately — initMcpPanel() fills it in async
   return `
-    <div class="plan-view">
-      <div class="plan-header">
+    <div class="plan-view" id="mcp-panel-root">
+      <div class="plan-header" id="mcp-panel-header">
         <span class="plan-header__title">MCP Servers</span>
-        <span class="plan-header__meta">${total} tools · ${servers.filter(s=>s.status==='connected').length} active</span>
+        <span class="plan-header__meta" id="mcp-panel-meta">loading…</span>
       </div>
-      <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
-        ${servers.map(srv => `
-          <div style="background:#1a1a1d;border:1px solid #27272c;border-radius:9px;padding:10px 12px;">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:${srv.status==='connected'?'8':'0'}px">
-              ${statusDot(srv.status)}
-              <span style="font-size:12.5px;font-weight:500;color:#d4d4da;flex:1">${escapeHTML(srv.name)}</span>
-              <span style="font-size:10.5px;color:#5a5a63;background:#0e0e10;border:1px solid #27272c;padding:1px 7px;border-radius:5px">${srv.tools} tools</span>
-            </div>
-            ${srv.status==='connected' ? `
-            <div style="display:flex;flex-wrap:wrap;gap:4px">
-              ${srv.toolList.map(tool => `
-                <span style="font-size:10px;color:#6a6a72;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:4px;padding:1px 6px;font-family:monospace">${escapeHTML(tool)}</span>
-              `).join('')}
-            </div>` : ''}
+
+      <!-- server list -->
+      <div id="mcp-server-list" style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
+        <div style="display:flex;align-items:center;justify-content:center;height:60px;color:#3a3a44;font-size:12px">
+          Loading servers…
+        </div>
+      </div>
+
+      <!-- add / quick-add section -->
+      <div style="margin-top:14px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:10.5px;font-weight:600;color:#4a4a55;text-transform:uppercase;letter-spacing:0.06em;flex:1">Quick add</span>
+          <button id="mcp-btn-add-custom" style="
+            font-size:11px;background:#1e1e24;border:1px solid #2e2e38;color:#a0a0aa;
+            border-radius:6px;padding:3px 10px;cursor:pointer;
+          " title="Add custom server">+ Custom</button>
+        </div>
+
+        <!-- preset chips -->
+        <div id="mcp-presets" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px"></div>
+
+        <!-- inline add form (hidden by default) -->
+        <div id="mcp-add-form" style="display:none;background:#141418;border:1px solid #2a2a34;border-radius:10px;padding:12px;margin-top:8px">
+          <div style="font-size:11.5px;font-weight:600;color:#c4c4cc;margin-bottom:10px" id="mcp-form-title">Add MCP server</div>
+
+          <label style="font-size:10.5px;color:#5a5a65;display:block;margin-bottom:3px">Name</label>
+          <input id="mcp-f-name" placeholder="e.g. filesystem" style="
+            width:100%;box-sizing:border-box;background:#0e0e12;border:1px solid #2e2e38;
+            border-radius:6px;padding:5px 9px;color:#d4d4dc;font-size:12px;margin-bottom:8px;outline:none;
+          ">
+
+          <label style="font-size:10.5px;color:#5a5a65;display:block;margin-bottom:3px">Command</label>
+          <input id="mcp-f-cmd" placeholder="e.g. npx or /usr/bin/python3" style="
+            width:100%;box-sizing:border-box;background:#0e0e12;border:1px solid #2e2e38;
+            border-radius:6px;padding:5px 9px;color:#d4d4dc;font-size:12px;font-family:monospace;margin-bottom:8px;outline:none;
+          ">
+
+          <label style="font-size:10.5px;color:#5a5a65;display:block;margin-bottom:3px">Args <span style="opacity:.5">(space-separated)</span></label>
+          <input id="mcp-f-args" placeholder="e.g. -y @modelcontextprotocol/server-filesystem /home/user" style="
+            width:100%;box-sizing:border-box;background:#0e0e12;border:1px solid #2e2e38;
+            border-radius:6px;padding:5px 9px;color:#d4d4dc;font-size:12px;font-family:monospace;margin-bottom:8px;outline:none;
+          ">
+
+          <label style="font-size:10.5px;color:#5a5a65;display:block;margin-bottom:3px">
+            Env vars <span style="opacity:.5">(KEY=VALUE, one per line)</span>
+          </label>
+          <textarea id="mcp-f-env" rows="3" placeholder="GITHUB_TOKEN=ghp_xxx&#10;DEBUG=1" style="
+            width:100%;box-sizing:border-box;background:#0e0e12;border:1px solid #2e2e38;
+            border-radius:6px;padding:5px 9px;color:#d4d4dc;font-size:11.5px;font-family:monospace;
+            margin-bottom:8px;outline:none;resize:vertical;
+          "></textarea>
+
+          <label style="font-size:10.5px;color:#5a5a65;display:block;margin-bottom:5px">Scope</label>
+          <div style="display:flex;gap:6px;margin-bottom:12px">
+            <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#9a9aa4;cursor:pointer">
+              <input type="radio" name="mcp-f-scope" value="global" checked> Global (~/.claude)
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#9a9aa4;cursor:pointer">
+              <input type="radio" name="mcp-f-scope" value="project"> Project
+            </label>
           </div>
-        `).join('')}
+
+          <input type="hidden" id="mcp-f-editing-name">
+          <div style="display:flex;gap:6px;justify-content:flex-end">
+            <button id="mcp-form-cancel" style="
+              font-size:11.5px;background:transparent;border:1px solid #2e2e38;
+              color:#6a6a72;border-radius:6px;padding:5px 14px;cursor:pointer;
+            ">Cancel</button>
+            <button id="mcp-form-save" style="
+              font-size:11.5px;background:#5a5aff;border:none;
+              color:#fff;border-radius:6px;padding:5px 18px;cursor:pointer;font-weight:600;
+            ">Save</button>
+          </div>
+        </div>
       </div>
     </div>`;
+}
+
+// Initialised every time the MCP panel is mounted into the DOM
+async function initMcpPanel(container) {
+  const api = window.electronAPI?.mcp;
+  if (!api) return; // no Electron — nothing to do
+
+  // ── Known presets ──────────────────────────────────────────────────────────
+  const PRESETS = [
+    { label: 'filesystem',   name: 'filesystem',   cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', process?.env?.HOME || '~'], env: {} },
+    { label: 'GitHub',       name: 'github',        cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: '' } },
+    { label: 'memory',       name: 'memory',        cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'], env: {} },
+    { label: 'fetch',        name: 'fetch',         cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-fetch'], env: {} },
+    { label: 'Brave search', name: 'brave-search',  cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-brave-search'], env: { BRAVE_API_KEY: '' } },
+    { label: 'Playwright',   name: 'playwright',    cmd: 'npx', args: ['-y', '@playwright/mcp@latest'], env: {} },
+    { label: 'Puppeteer',    name: 'puppeteer',     cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-puppeteer'], env: {} },
+    { label: 'Slack',        name: 'slack',         cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-slack'], env: { SLACK_BOT_TOKEN: '', SLACK_TEAM_ID: '' } },
+    { label: 'Postgres',     name: 'postgres',      cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-postgres', 'postgresql://localhost/mydb'], env: {} },
+    { label: 'SQLite',       name: 'sqlite',        cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-sqlite', '--db-path', '~/data.db'], env: {} },
+    { label: 'Sequential',   name: 'sequentialthinking', cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-sequential-thinking'], env: {} },
+    { label: 'Git',          name: 'git',           cmd: 'uvx', args: ['mcp-server-git', '--repository', '.'], env: {} },
+  ];
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const $ = id => container.querySelector('#' + id);
+
+  function envToObj(text) {
+    const obj = {};
+    (text || '').split('\n').forEach(line => {
+      const eq = line.indexOf('=');
+      if (eq > 0) {
+        const k = line.slice(0, eq).trim();
+        const v = line.slice(eq + 1).trim();
+        if (k) obj[k] = v;
+      }
+    });
+    return obj;
+  }
+  function objToEnv(obj) {
+    if (!obj || typeof obj !== 'object') return '';
+    return Object.entries(obj).map(([k,v]) => `${k}=${v}`).join('\n');
+  }
+  function argsToString(args) {
+    if (!args) return '';
+    return Array.isArray(args) ? args.join(' ') : String(args);
+  }
+
+  // ── Render server list ─────────────────────────────────────────────────────
+  async function reload() {
+    let servers = [];
+    try { servers = await api.list(); } catch(e) { servers = []; }
+
+    // update header meta
+    const metaEl = $('mcp-panel-meta');
+    if (metaEl) metaEl.textContent = servers.length
+      ? `${servers.length} server${servers.length !== 1 ? 's' : ''}`
+      : 'no servers';
+
+    const listEl = $('mcp-server-list');
+    if (!listEl) return;
+
+    if (!servers.length) {
+      listEl.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:24px 0;color:#3a3a44">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3">
+            <rect x="2" y="3" width="20" height="5" rx="2"/>
+            <rect x="2" y="10" width="20" height="5" rx="2"/>
+            <rect x="2" y="17" width="20" height="5" rx="2"/>
+            <circle cx="19" cy="5.5" r="1" fill="currentColor"/>
+            <circle cx="19" cy="12.5" r="1" fill="currentColor"/>
+            <circle cx="19" cy="19.5" r="1" fill="currentColor"/>
+          </svg>
+          <span style="font-size:11.5px">No MCP servers configured</span>
+          <span style="font-size:10.5px;opacity:.6">Add one below or use a quick-add preset</span>
+        </div>`;
+      return;
+    }
+
+    listEl.innerHTML = servers.map((srv, i) => {
+      const hasEnv = srv.env && Object.keys(srv.env).length > 0;
+      const scopeBadge = srv.scope === 'project'
+        ? `<span style="font-size:9.5px;background:rgba(106,134,195,0.15);color:#6a86c3;border:1px solid rgba(106,134,195,0.3);border-radius:4px;padding:1px 6px">project</span>`
+        : `<span style="font-size:9.5px;background:rgba(90,90,90,0.15);color:#6a6a72;border:1px solid rgba(90,90,90,0.25);border-radius:4px;padding:1px 6px">global</span>`;
+      const cmdFull = [srv.command, ...((srv.args || []))].join(' ');
+      return `
+        <div class="mcp-srv-card" data-srv-idx="${i}" style="
+          background:#1a1a1d;border:1px solid #27272c;border-radius:9px;
+          padding:10px 12px;transition:border-color .15s;
+        ">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span style="width:7px;height:7px;border-radius:50%;background:#7ab389;flex-shrink:0;box-shadow:0 0 5px rgba(122,179,137,.4)"></span>
+            <span style="font-size:12.5px;font-weight:600;color:#d4d4da;flex:1">${escapeHTML(srv.name)}</span>
+            ${scopeBadge}
+            <button class="mcp-btn-edit" data-idx="${i}" title="Edit" style="
+              background:none;border:none;color:#4a4a55;cursor:pointer;
+              padding:2px 5px;border-radius:4px;font-size:13px;line-height:1;
+            ">✎</button>
+            <button class="mcp-btn-del" data-idx="${i}" title="Remove" style="
+              background:none;border:none;color:#4a4a55;cursor:pointer;
+              padding:2px 5px;border-radius:4px;font-size:14px;line-height:1;
+            ">×</button>
+          </div>
+          <div style="font-size:10.5px;color:#5a5a63;font-family:monospace;background:#0e0e12;
+            border:1px solid #1e1e24;border-radius:5px;padding:4px 8px;
+            overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:${hasEnv?'6':'0'}px"
+            title="${escapeHTML(cmdFull)}"
+          >${escapeHTML(cmdFull)}</div>
+          ${hasEnv ? `
+          <div style="display:flex;flex-wrap:wrap;gap:4px">
+            ${Object.keys(srv.env).map(k => `
+              <span style="font-size:9.5px;color:#9a9a44;background:rgba(154,154,68,0.1);
+                border:1px solid rgba(154,154,68,0.2);border-radius:4px;padding:1px 6px;font-family:monospace"
+              >${escapeHTML(k)}</span>
+            `).join('')}
+          </div>` : ''}
+        </div>`;
+    }).join('');
+
+    // wire up edit / delete buttons
+    listEl.querySelectorAll('.mcp-btn-edit').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const srv = servers[+btn.dataset.idx];
+        if (!srv) return;
+        openForm('edit', srv);
+      });
+    });
+    listEl.querySelectorAll('.mcp-btn-del').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const srv = servers[+btn.dataset.idx];
+        if (!srv) return;
+        if (!confirm(`Remove MCP server "${srv.name}"?`)) return;
+        await api.remove(srv.name, srv.scope || 'global');
+        await reload();
+      });
+    });
+  }
+
+  // ── Form open/close ────────────────────────────────────────────────────────
+  function openForm(mode, prefill) {
+    const formEl    = $('mcp-add-form');
+    const titleEl   = $('mcp-form-title');
+    const nameEl    = $('mcp-f-name');
+    const cmdEl     = $('mcp-f-cmd');
+    const argsEl    = $('mcp-f-args');
+    const envEl     = $('mcp-f-env');
+    const editingEl = $('mcp-f-editing-name');
+    const scopeEls  = container.querySelectorAll('[name="mcp-f-scope"]');
+
+    if (mode === 'edit' && prefill) {
+      titleEl.textContent   = `Edit — ${prefill.name}`;
+      nameEl.value          = prefill.name;
+      nameEl.readOnly       = true;
+      nameEl.style.opacity  = '.5';
+      cmdEl.value           = prefill.command || '';
+      argsEl.value          = argsToString(prefill.args);
+      envEl.value           = objToEnv(prefill.env);
+      editingEl.value       = prefill.name;
+      // set scope radio
+      const scope = prefill.scope || 'global';
+      scopeEls.forEach(r => r.checked = (r.value === scope));
+    } else {
+      titleEl.textContent  = 'Add MCP server';
+      nameEl.value         = prefill?.name  || '';
+      nameEl.readOnly      = false;
+      nameEl.style.opacity = '1';
+      cmdEl.value          = prefill?.cmd   || 'npx';
+      argsEl.value         = argsToString(prefill?.args);
+      envEl.value          = prefill?.env   ? objToEnv(prefill.env) : '';
+      editingEl.value      = '';
+      scopeEls.forEach(r => r.checked = (r.value === 'global'));
+    }
+    formEl.style.display = 'block';
+    nameEl.focus();
+  }
+
+  function closeForm() {
+    $('mcp-add-form').style.display = 'none';
+  }
+
+  // ── Form save ──────────────────────────────────────────────────────────────
+  async function saveForm() {
+    const name     = $('mcp-f-name').value.trim();
+    const cmd      = $('mcp-f-cmd').value.trim();
+    const argsRaw  = $('mcp-f-args').value.trim();
+    const envRaw   = $('mcp-f-env').value.trim();
+    const editing  = $('mcp-f-editing-name').value;
+    const scope    = (container.querySelector('[name="mcp-f-scope"]:checked') || {}).value || 'global';
+
+    if (!name)  { $('mcp-f-name').focus(); return; }
+    if (!cmd)   { $('mcp-f-cmd').focus();  return; }
+
+    const config = {
+      command: cmd,
+      args: argsRaw ? argsRaw.split(/\s+/).filter(Boolean) : [],
+      env:  envRaw  ? envToObj(envRaw) : {},
+    };
+
+    try {
+      if (editing) {
+        await api.update(editing, config, scope);
+      } else {
+        await api.add(name, config, scope);
+      }
+      closeForm();
+      await reload();
+    } catch(e) {
+      alert('Failed to save: ' + (e?.message || e));
+    }
+  }
+
+  // ── Preset chips ──────────────────────────────────────────────────────────
+  const presetsEl = $('mcp-presets');
+  if (presetsEl) {
+    presetsEl.innerHTML = PRESETS.map((p, i) => `
+      <button class="mcp-preset-btn" data-idx="${i}" style="
+        font-size:10.5px;background:#1a1a1d;border:1px solid #27272c;color:#8a8a92;
+        border-radius:6px;padding:3px 9px;cursor:pointer;
+        transition:border-color .15s,color .15s;
+      " title="Quick-add ${p.label}">${escapeHTML(p.label)}</button>
+    `).join('');
+
+    presetsEl.querySelectorAll('.mcp-preset-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        openForm('add', PRESETS[+btn.dataset.idx]);
+      });
+    });
+  }
+
+  // ── Button wiring ──────────────────────────────────────────────────────────
+  const addCustomBtn = $('mcp-btn-add-custom');
+  if (addCustomBtn) addCustomBtn.addEventListener('click', () => openForm('add', null));
+
+  const cancelBtn = $('mcp-form-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeForm);
+
+  const saveBtn = $('mcp-form-save');
+  if (saveBtn) saveBtn.addEventListener('click', saveForm);
+
+  // ── Initial load ───────────────────────────────────────────────────────────
+  await reload();
 }
 
 // ---------- Git panel ----------
@@ -6770,6 +7055,10 @@ function setSplitPaneContent(pane, tabId) {
   content.innerHTML = renderPanelContent(tabId);
   if (window.renderIcons) window.renderIcons(content);
   wirePlanTabEvents(tabId, content);
+  if (tabId === 'notes') requestAnimationFrame(() => initNotesPanel());
+  if (tabId === 'skills') requestAnimationFrame(() => initSkillsDockPanel());
+  if (tabId === 'mcp') requestAnimationFrame(() => initMcpPanel(content));
+  if (tabId === 'terminal') requestAnimationFrame(() => initTerminalPanel());
 }
 
 function wireSplitPaneTabs(bodyEl) {
@@ -6919,6 +7208,7 @@ function setRightPanelTab(id) {
     if (id === 'terminal') requestAnimationFrame(() => initTerminalPanel());
     if (id === 'notes')    requestAnimationFrame(() => initNotesPanel());
     if (id === 'skills')   requestAnimationFrame(() => initSkillsDockPanel());
+    if (id === 'mcp')      requestAnimationFrame(() => initMcpPanel(bodyEl));
   }
 
   // Sync context-strip chips

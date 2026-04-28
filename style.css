@@ -6787,3 +6787,17 @@ html[data-theme="light"] .split-divider::after { background: #c4c4ca; }
 .find-bar button:hover { background: #2e2e34; color: #e7e7ea; }
 html[data-theme="light"] .find-bar { background: #fff; border-color: #d4d4d8; box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
 html[data-theme="light"] .find-bar input { color: #141416; }
+
+/* ===== MCP panel ===== */
+.mcp-srv-card { transition: border-color .15s, box-shadow .15s; }
+.mcp-srv-card:hover { border-color: #38383e !important; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+.mcp-btn-edit:hover  { background: rgba(255,255,255,.07) !important; color: #a0a0aa !important; }
+.mcp-btn-del:hover   { background: rgba(201,100,66,.1) !important;   color: #e06c75 !important; }
+.mcp-preset-btn:hover { border-color: #5a5aff !important; color: #c4c4ff !important; background: rgba(90,90,255,.07) !important; }
+#mcp-f-name:focus,
+#mcp-f-cmd:focus,
+#mcp-f-args:focus,
+#mcp-f-env:focus    { border-color: #5a5aff !important; box-shadow: 0 0 0 2px rgba(90,90,255,.15); }
+#mcp-form-save:hover { background: #4a4aef !important; }
+#mcp-form-cancel:hover { background: rgba(255,255,255,.04) !important; color: #a0a0aa !important; }
+#mcp-btn-add-custom:hover { border-color: #5a5aff !important; color: #c4c4ff !important; }
