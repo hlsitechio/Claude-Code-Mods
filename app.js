@@ -6434,53 +6434,288 @@ async function initMcpPanel(container) {
 }
 
 // ---------- Git panel ----------
+const GIT_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="#F05133"><path d="M23.546 10.93 13.067.452c-.604-.603-1.582-.603-2.188 0L8.708 2.627l2.76 2.76c.645-.215 1.379-.07 1.889.441.516.515.658 1.258.438 1.9l2.658 2.66c.645-.223 1.387-.078 1.9.435.721.72.721 1.884 0 2.604-.719.719-1.881.719-2.6 0-.539-.541-.674-1.337-.404-1.996L12.86 8.955v6.525c.176.086.342.203.488.348.713.721.713 1.883 0 2.6-.719.721-1.889.721-2.609 0-.719-.719-.719-1.879 0-2.598.182-.18.387-.316.605-.406V8.835c-.217-.091-.424-.222-.6-.401-.545-.545-.676-1.342-.396-2.009L7.636 3.7.45 10.881c-.6.605-.6 1.584 0 2.189l10.48 10.477c.604.604 1.582.604 2.186 0l10.43-10.43c.605-.603.605-1.582 0-2.187"/></svg>`;
+
 function renderGitPanel() {
-  const branch = 'main';
-  const commits = [
-    { hash: 'a3f2c1',  msg: 'feat: sub-task tree for plan panel',        time: 'just now',  add: 87,  del: 3  },
-    { hash: 'b7d9e4',  msg: 'feat: streaming shimmer on active task',     time: '2h ago',    add: 24,  del: 2  },
-    { hash: 'c1a8f3',  msg: 'feat: right panel resize handle',            time: '3h ago',    add: 56,  del: 8  },
-    { hash: 'e5b2a0',  msg: 'feat: plan panel with progress & states',    time: '5h ago',    add: 140, del: 0  },
-    { hash: 'f9c3d7',  msg: 'fix: pre whitespace causing blank lines',    time: '6h ago',    add: 4,   del: 4  },
-  ];
-  const modified = [
-    { file: 'app.js',       status: 'M', add: 87, del: 3 },
-    { file: 'style.css',    status: 'M', add: 62, del: 1 },
-    { file: 'index.html',   status: 'M', add: 45, del: 0 },
-  ];
-  const statusColor = { M: '#c9a96e', A: '#7ab389', D: '#c96442' };
   return `
-    <div class="plan-view">
-      <div class="plan-header" style="margin-bottom:2px">
+    <div class="plan-view" id="git-panel-root" style="gap:0">
+
+      <!-- Header row -->
+      <div class="plan-header" id="git-panel-header" style="margin-bottom:10px">
         <span class="plan-header__title" style="display:flex;align-items:center;gap:7px">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="#F05133"><path d="M23.546 10.93 13.067.452c-.604-.603-1.582-.603-2.188 0L8.708 2.627l2.76 2.76c.645-.215 1.379-.07 1.889.441.516.515.658 1.258.438 1.9l2.658 2.66c.645-.223 1.387-.078 1.9.435.721.72.721 1.884 0 2.604-.719.719-1.881.719-2.6 0-.539-.541-.674-1.337-.404-1.996L12.86 8.955v6.525c.176.086.342.203.488.348.713.721.713 1.883 0 2.6-.719.721-1.889.721-2.609 0-.719-.719-.719-1.879 0-2.598.182-.18.387-.316.605-.406V8.835c-.217-.091-.424-.222-.6-.401-.545-.545-.676-1.342-.396-2.009L7.636 3.7.45 10.881c-.6.605-.6 1.584 0 2.189l10.48 10.477c.604.604 1.582.604 2.186 0l10.43-10.43c.605-.603.605-1.582 0-2.187"/></svg>
-          ${escapeHTML(branch)}
+          ${GIT_SVG}
+          <span id="git-branch-name">…</span>
         </span>
-        <span class="plan-header__meta">${modified.length} modified</span>
+        <span style="display:flex;align-items:center;gap:6px">
+          <span class="plan-header__meta" id="git-panel-meta">loading</span>
+          <button id="git-refresh-btn" title="Refresh" style="
+            background:none;border:none;color:#4a4a55;cursor:pointer;
+            padding:2px 4px;border-radius:4px;font-size:14px;line-height:1;
+          ">↻</button>
+        </span>
       </div>
 
-      <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:14px">
-        ${modified.map(f => `
-          <div style="display:flex;align-items:center;gap:8px;padding:5px 9px;background:#1a1a1d;border:1px solid #27272c;border-radius:7px">
-            <span style="font-size:10.5px;font-weight:700;color:${statusColor[f.status]||'#8a8a92'};min-width:10px">${f.status}</span>
-            <span style="font-size:11.5px;color:#b4b4bc;flex:1;font-family:monospace">${escapeHTML(f.file)}</span>
-            <span style="font-size:10px;color:#7ab389">+${f.add}</span>
-            <span style="font-size:10px;color:#c96442">-${f.del}</span>
-          </div>
-        `).join('')}
+      <!-- GitHub remote link -->
+      <div id="git-remote-row" style="display:none;margin-bottom:10px">
+        <a id="git-remote-link" href="#" target="_blank" style="
+          display:inline-flex;align-items:center;gap:5px;font-size:11px;
+          color:#6a86c3;text-decoration:none;background:rgba(106,134,195,.1);
+          border:1px solid rgba(106,134,195,.25);border-radius:6px;padding:3px 9px;
+        ">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+          <span id="git-remote-label">Open on GitHub</span>
+        </a>
+        <button id="git-compare-btn" style="
+          display:none;margin-left:6px;font-size:11px;background:#1a1a1d;
+          border:1px solid #2a2a34;color:#8a8a92;border-radius:6px;
+          padding:3px 9px;cursor:pointer;
+        " title="Compare branch on GitHub">Compare branch ↗</button>
       </div>
 
-      <div style="font-size:10.5px;font-weight:600;color:#4a4a55;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">Recent commits</div>
-      <div style="display:flex;flex-direction:column;gap:3px">
-        ${commits.map((c, i) => `
-          <div style="display:flex;align-items:flex-start;gap:8px;padding:6px 9px;background:${i===0?'rgba(201,100,66,0.05)':'#1a1a1d'};border:1px solid ${i===0?'rgba(201,100,66,0.2)':'#27272c'};border-radius:7px">
-            <span style="font-size:10px;color:#3a3a44;font-family:monospace;padding-top:1px;flex-shrink:0">${c.hash}</span>
-            <span style="font-size:11.5px;color:#9a9aa4;flex:1;line-height:1.35">${escapeHTML(c.msg)}</span>
-            <span style="font-size:10px;color:#4a4a55;white-space:nowrap;padding-top:1px">${c.time}</span>
-          </div>
-        `).join('')}
+      <!-- Tabs: Changed / Log -->
+      <div style="display:flex;gap:1px;margin-bottom:10px;background:#1a1a1d;border-radius:7px;padding:3px">
+        <button class="git-tab git-tab--active" data-git-tab="changed" style="
+          flex:1;font-size:11px;padding:4px 0;border-radius:5px;border:none;
+          background:#2e2e38;color:#d4d4dc;cursor:pointer;
+        ">Changed</button>
+        <button class="git-tab" data-git-tab="log" style="
+          flex:1;font-size:11px;padding:4px 0;border-radius:5px;border:none;
+          background:transparent;color:#6a6a72;cursor:pointer;
+        ">Log</button>
       </div>
+
+      <!-- Changed files view -->
+      <div id="git-view-changed">
+        <div id="git-changed-list" style="display:flex;flex-direction:column;gap:3px">
+          <div style="text-align:center;padding:20px;color:#3a3a44;font-size:11.5px">Checking working tree…</div>
+        </div>
+
+        <!-- Stage / commit area -->
+        <div id="git-commit-area" style="display:none;margin-top:12px">
+          <textarea id="git-commit-msg" rows="2" placeholder="Commit message…" style="
+            width:100%;box-sizing:border-box;background:#0e0e12;border:1px solid #2e2e38;
+            border-radius:7px;padding:7px 10px;color:#d4d4dc;font-size:12px;
+            outline:none;resize:vertical;margin-bottom:6px;font-family:inherit;
+          "></textarea>
+          <div style="display:flex;gap:6px">
+            <button id="git-stage-all-btn" style="
+              flex:1;font-size:11.5px;background:#1e1e24;border:1px solid #2e2e38;
+              color:#a0a0aa;border-radius:6px;padding:5px 0;cursor:pointer;
+            ">Stage all</button>
+            <button id="git-commit-btn" style="
+              flex:1;font-size:11.5px;background:#5a5aff;border:none;
+              color:#fff;border-radius:6px;padding:5px 0;cursor:pointer;font-weight:600;
+            ">Commit</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Log view (hidden by default) -->
+      <div id="git-view-log" style="display:none">
+        <div id="git-log-list" style="display:flex;flex-direction:column;gap:3px">
+          <div style="text-align:center;padding:20px;color:#3a3a44;font-size:11.5px">Loading log…</div>
+        </div>
+      </div>
+
     </div>`;
+}
+
+async function initGitPanel(container) {
+  const api = window.electronAPI?.git;
+  if (!api) return;
+
+  const $ = id => container.querySelector('#' + id);
+  let _status   = null;
+  let _log      = null;
+  let _remoteUrl = null;
+  let _activeTab = 'changed';
+
+  // ── Status → XY letter meanings ──────────────────────────────────────────
+  const XY_LABEL = {
+    '??': { label: '?', color: '#6a6a72', title: 'Untracked' },
+    ' M': { label: 'M', color: '#c9a96e', title: 'Modified (unstaged)' },
+    'M ': { label: 'M', color: '#7ab389', title: 'Modified (staged)' },
+    'MM': { label: 'M', color: '#c9a96e', title: 'Modified (staged+unstaged)' },
+    'A ': { label: 'A', color: '#7ab389', title: 'Added (staged)' },
+    'D ': { label: 'D', color: '#c96442', title: 'Deleted (staged)' },
+    ' D': { label: 'D', color: '#c96442', title: 'Deleted (unstaged)' },
+    'R ': { label: 'R', color: '#6a86c3', title: 'Renamed' },
+    'C ': { label: 'C', color: '#6a86c3', title: 'Copied' },
+    'U ': { label: 'U', color: '#e06c75', title: 'Unmerged' },
+    ' U': { label: 'U', color: '#e06c75', title: 'Unmerged' },
+    'UU': { label: 'U', color: '#e06c75', title: 'Both unmerged' },
+  };
+  function xyInfo(xy) {
+    return XY_LABEL[xy] || { label: xy?.trim() || '?', color: '#8a8a92', title: xy };
+  }
+
+  // ── Render changed files ──────────────────────────────────────────────────
+  function renderChanged() {
+    const listEl = $('git-changed-list');
+    const commitArea = $('git-commit-area');
+    if (!listEl) return;
+
+    if (!_status) {
+      listEl.innerHTML = `<div style="text-align:center;padding:20px;color:#3a3a44;font-size:11.5px">No repo found in this directory</div>`;
+      return;
+    }
+
+    const { files, branch } = _status;
+    const branchEl = $('git-branch-name');
+    if (branchEl) branchEl.textContent = branch || 'detached';
+
+    const meta = $('git-panel-meta');
+    if (meta) meta.textContent = files.length ? `${files.length} changed` : 'clean';
+
+    if (!files.length) {
+      listEl.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;gap:5px;padding:20px 0;color:#3a3a44">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          <span style="font-size:11.5px">Working tree clean</span>
+        </div>`;
+      if (commitArea) commitArea.style.display = 'none';
+      return;
+    }
+
+    listEl.innerHTML = files.map((f, i) => {
+      const info = xyInfo(f.xy);
+      const staged = f.xy[0] !== ' ' && f.xy[0] !== '?';
+      return `
+        <div class="git-file-row" data-file-idx="${i}" style="
+          display:flex;align-items:center;gap:7px;padding:5px 9px;
+          background:#1a1a1d;border:1px solid ${staged ? 'rgba(122,179,137,.2)' : '#27272c'};
+          border-radius:7px;cursor:default;
+        " title="${escapeHTML(info.title)}">
+          <span style="font-size:10.5px;font-weight:700;color:${info.color};min-width:12px;text-align:center">${info.label}</span>
+          <span style="font-size:11.5px;color:#b4b4bc;flex:1;font-family:monospace;
+            overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          >${escapeHTML(f.path)}</span>
+          <button class="git-stage-btn" data-idx="${i}" title="${staged ? 'Unstage' : 'Stage'}" style="
+            font-size:10px;background:none;border:1px solid #2a2a34;color:#5a5a65;
+            border-radius:4px;padding:1px 6px;cursor:pointer;
+          ">${staged ? '−' : '+'}</button>
+        </div>`;
+    }).join('');
+
+    if (commitArea) commitArea.style.display = 'block';
+
+    // Wire stage/unstage buttons
+    listEl.querySelectorAll('.git-stage-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const f = files[+btn.dataset.idx];
+        if (!f) return;
+        const staged = f.xy[0] !== ' ' && f.xy[0] !== '?';
+        if (staged) {
+          await api.action('restore', null, ['--staged', '--', f.path]);
+        } else {
+          await api.action('add', null, ['--', f.path]);
+        }
+        await loadAll();
+      });
+    });
+  }
+
+  // ── Render commit log ─────────────────────────────────────────────────────
+  function renderLog() {
+    const listEl = $('git-log-list');
+    if (!listEl) return;
+    if (!_log || !_log.length) {
+      listEl.innerHTML = `<div style="text-align:center;padding:20px;color:#3a3a44;font-size:11.5px">No commits yet</div>`;
+      return;
+    }
+    listEl.innerHTML = _log.map((c, i) => `
+      <div style="
+        display:flex;align-items:flex-start;gap:7px;padding:6px 9px;
+        background:${i===0?'rgba(201,100,66,0.05)':'#1a1a1d'};
+        border:1px solid ${i===0?'rgba(201,100,66,0.18)':'#27272c'};border-radius:7px;
+      ">
+        <span style="font-size:10px;color:#3a3a44;font-family:monospace;padding-top:2px;flex-shrink:0">${escapeHTML(c.hash)}</span>
+        <span style="font-size:11.5px;color:#9a9aa4;flex:1;line-height:1.4">${escapeHTML(c.subject)}</span>
+        <span style="font-size:10px;color:#4a4a55;white-space:nowrap;padding-top:2px">${escapeHTML(c.time)}</span>
+      </div>`).join('');
+  }
+
+  // ── Load all data ─────────────────────────────────────────────────────────
+  async function loadAll() {
+    const [statusRes, logRes, remoteRes] = await Promise.all([
+      api.status().catch(() => null),
+      api.log({ n: 25 }).catch(() => []),
+      api.remote().catch(() => null),
+    ]);
+    _status    = statusRes;
+    _log       = logRes;
+    _remoteUrl = remoteRes;
+
+    // Remote link
+    const remoteRow = $('git-remote-row');
+    const remoteLink = $('git-remote-link');
+    const remoteLabel = $('git-remote-label');
+    const compareBtn  = $('git-compare-btn');
+    if (_remoteUrl && remoteRow && remoteLink) {
+      // normalise SSH → HTTPS: git@github.com:user/repo.git → https://github.com/user/repo
+      let url = _remoteUrl.trim();
+      url = url.replace(/^git@([^:]+):(.+?)(?:\.git)?$/, 'https://$1/$2');
+      url = url.replace(/\.git$/, '');
+      remoteLink.href = url;
+      if (remoteLabel) remoteLabel.textContent = url.replace(/^https?:\/\//, '');
+      remoteRow.style.display = 'block';
+      // Show compare button if on a non-main branch
+      if (compareBtn && _status?.branch && !['main','master'].includes(_status.branch)) {
+        compareBtn.style.display = 'inline-block';
+        compareBtn.onclick = () => {
+          const base = url.includes('github.com') ? url + `/compare/${_status.branch}` : url;
+          window.electronAPI?.files?.openInExplorer?.(base) || window.open(base, '_blank');
+        };
+      }
+    } else if (remoteRow) {
+      remoteRow.style.display = 'none';
+    }
+
+    renderChanged();
+    renderLog();
+  }
+
+  // ── Tabs ─────────────────────────────────────────────────────────────────
+  container.querySelectorAll('.git-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _activeTab = btn.dataset.gitTab;
+      container.querySelectorAll('.git-tab').forEach(b => {
+        const active = b.dataset.gitTab === _activeTab;
+        b.style.background  = active ? '#2e2e38' : 'transparent';
+        b.style.color       = active ? '#d4d4dc' : '#6a6a72';
+      });
+      $('git-view-changed').style.display = _activeTab === 'changed' ? 'block' : 'none';
+      $('git-view-log').style.display     = _activeTab === 'log'     ? 'block' : 'none';
+    });
+  });
+
+  // ── Stage all + commit ────────────────────────────────────────────────────
+  const stageAllBtn = $('git-stage-all-btn');
+  const commitBtn   = $('git-commit-btn');
+  const commitMsg   = $('git-commit-msg');
+  const refreshBtn  = $('git-refresh-btn');
+
+  if (stageAllBtn) stageAllBtn.addEventListener('click', async () => {
+    await api.action('add', null, ['.']);
+    await loadAll();
+  });
+
+  if (commitBtn) commitBtn.addEventListener('click', async () => {
+    const msg = (commitMsg?.value || '').trim();
+    if (!msg) { commitMsg?.focus(); return; }
+    const res = await api.action('commit', null, ['-m', msg]);
+    if (res.ok) { commitMsg.value = ''; await loadAll(); }
+    else alert('Commit failed: ' + res.error);
+  });
+
+  if (refreshBtn) refreshBtn.addEventListener('click', () => loadAll());
+
+  // ── Initial load ─────────────────────────────────────────────────────────
+  await loadAll();
 }
 
 // ---------- Path linkifier (code blocks) ----------
@@ -7055,9 +7290,10 @@ function setSplitPaneContent(pane, tabId) {
   content.innerHTML = renderPanelContent(tabId);
   if (window.renderIcons) window.renderIcons(content);
   wirePlanTabEvents(tabId, content);
-  if (tabId === 'notes') requestAnimationFrame(() => initNotesPanel());
-  if (tabId === 'skills') requestAnimationFrame(() => initSkillsDockPanel());
-  if (tabId === 'mcp') requestAnimationFrame(() => initMcpPanel(content));
+  if (tabId === 'notes')    requestAnimationFrame(() => initNotesPanel());
+  if (tabId === 'skills')   requestAnimationFrame(() => initSkillsDockPanel());
+  if (tabId === 'mcp')      requestAnimationFrame(() => initMcpPanel(content));
+  if (tabId === 'git')      requestAnimationFrame(() => initGitPanel(content));
   if (tabId === 'terminal') requestAnimationFrame(() => initTerminalPanel());
 }
 
@@ -7209,6 +7445,7 @@ function setRightPanelTab(id) {
     if (id === 'notes')    requestAnimationFrame(() => initNotesPanel());
     if (id === 'skills')   requestAnimationFrame(() => initSkillsDockPanel());
     if (id === 'mcp')      requestAnimationFrame(() => initMcpPanel(bodyEl));
+    if (id === 'git')      requestAnimationFrame(() => initGitPanel(bodyEl));
   }
 
   // Sync context-strip chips
