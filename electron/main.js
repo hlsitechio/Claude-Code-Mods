@@ -375,6 +375,20 @@ ipcMain.handle('claude:send', async (event, { messages, model, system, cliSessio
   return getClaudeService().streamMessage(event, messages, model, system, cliSessionId, permMode, requestId);
 });
 
+// ── Active project cwd ────────────────────────────────────────────────────────
+// Set by the Files panel when the user loads a project folder.
+// Persists for the lifetime of the app process; the CLI spawns inside this dir.
+global._projectCwd = null;
+
+ipcMain.handle('project:set-cwd', (_, projectPath) => {
+  global._projectCwd = projectPath || null;
+  return { ok: true, cwd: global._projectCwd };
+});
+
+ipcMain.handle('project:get-cwd', () => {
+  return global._projectCwd;
+});
+
 ipcMain.handle('claude:abort', (_, requestId) => {
   return getClaudeService().abortCurrentStream(requestId);
 });

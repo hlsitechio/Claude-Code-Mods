@@ -4026,15 +4026,15 @@ html[data-theme="light"] .sc-agent-header__model { background: #ebebee; border-c
 
   /* Active group tabs */
   --dv-activegroup-visiblepanel-tab-background-color:  #141416;
-  --dv-activegroup-visiblepanel-tab-color:             #e7e7ea;
+  --dv-activegroup-visiblepanel-tab-color:             #f0f0f2;
   --dv-activegroup-hiddenpanel-tab-background-color:   #0f0f11;
-  --dv-activegroup-hiddenpanel-tab-color:              #5a5a63;
+  --dv-activegroup-hiddenpanel-tab-color:              #b0b0ba;
 
   /* Inactive group tabs */
   --dv-inactivegroup-visiblepanel-tab-background-color: #141416;
-  --dv-inactivegroup-visiblepanel-tab-color:            #a1a1aa;
+  --dv-inactivegroup-visiblepanel-tab-color:            #c8c8d0;
   --dv-inactivegroup-hiddenpanel-tab-background-color:  #0f0f11;
-  --dv-inactivegroup-hiddenpanel-tab-color:             #3a3a44;
+  --dv-inactivegroup-hiddenpanel-tab-color:             #b0b0ba;
 
   /* Dividers */
   --dv-tab-divider-color: transparent;
@@ -6802,6 +6802,33 @@ html[data-theme="light"] .split-divider::after { background: #c4c4ca; }
 .find-bar button:hover { background: #2e2e34; color: #e7e7ea; }
 html[data-theme="light"] .find-bar { background: #fff; border-color: #d4d4d8; box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
 html[data-theme="light"] .find-bar input { color: #141416; }
+
+/* ===== Active project badge (above composer) ===== */
+.proj-badge {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px 5px 10px;
+  background: rgba(106,134,195,0.08);
+  border-top: 1px solid rgba(106,134,195,0.18);
+  border-bottom: 1px solid rgba(106,134,195,0.12);
+  font-size: 11px; color: #6a86c3;
+  flex-shrink: 0;
+}
+.proj-badge svg { flex-shrink: 0; opacity: .8; }
+.proj-badge__name {
+  font-weight: 600; color: #8aabdf;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px;
+}
+.proj-badge__path {
+  color: #4a6080; font-size: 10px; font-family: ui-monospace, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1; min-width: 0;
+}
+.proj-badge__clear {
+  background: none; border: none; color: #4a5870; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0 2px; flex-shrink: 0;
+  border-radius: 3px; transition: color .12s;
+}
+.proj-badge__clear:hover { color: #e06c75; }
 
 /* ===== Git panel ===== */
 .git-tab { transition: background .12s, color .12s; }
