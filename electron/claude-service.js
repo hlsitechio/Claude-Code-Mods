@@ -485,6 +485,7 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
     }
 
     let buffer       = '';
+    let stderrTail   = '';  // ring-buffered stderr (~4 KB) for error reporting
     let fullText     = '';
     let lastTextLen  = 0;   // assistant events are cumulative — diff to get incremental chunks
     let newSessionId = cliSessionId || null;
@@ -600,11 +601,25 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
           if (ev.total_cost_usd != null) costUSD   = ev.total_cost_usd;
           if (ev.num_turns      != null) numTurns  = ev.num_turns;
           if (ev.is_error || ev.subtype === 'error_during_execution') {
-            const msg = ev.result || ev.error || 'CLI reported an error';
-            const errStr = typeof msg === 'string' ? msg : JSON.stringify(msg);
-            // Match an explicit 429 status or the phrase "rate limit" /
-            // "rate-limit" / "rate limited" — but not unrelated mentions of
-            // the word "limit".
+            const msgRaw = ev.result || ev.error;
+            // The CLI sometimes emits is_error without a useful body — fall
+            // back to whatever it printed on stderr so the user actually sees
+            // what went wrong instead of "CLI reported an error".
+            const errStr = (typeof msgRaw === 'string' && msgRaw.trim())
+              ? msgRaw
+              : (msgRaw ? JSON.stringify(msgRaw) : (stderrTail.trim() || 'CLI reported an error'));
+
+            // Stale --resume target: the CLI no longer has the conversation
+            // we're trying to continue. Tag it so the outer wrapper can retry
+            // without --resume on the same user message.
+            const haystack = errStr + ' ' + stderrTail;
+            if (/No conversation found with session ID/i.test(haystack)) {
+              const e = new Error('Conversation not found in CLI history — starting a fresh session.');
+              e.code = 'STALE_SESSION';
+              settle(false, e);
+              break;
+            }
+
             const isRateLimit =
                  /\b429\b/.test(errStr)
               || /\brate[\s_-]?limit(?:ed|ing)?\b/i.test(errStr);
@@ -627,8 +642,20 @@ async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSe
     });
 
     proc.stderr.on('data', data => {
-      const msg = data.toString().trim();
-      if (msg) console.error('[claude-cli] stderr:', msg);
+      const chunk = data.toString();
+      const trimmed = chunk.trim();
+      if (trimmed) console.error('[claude-cli] stderr:', trimmed);
+      // Keep the last ~4 KB so the result-event handler can surface real
+      // diagnostic text when the CLI exits with an empty error body.
+      stderrTail = (stderrTail + chunk).slice(-4096);
+      // The CLI may print this and exit cleanly with no JSON result event
+      // (no `is_error: true` ever surfaces). Catch it eagerly so the close
+      // handler doesn't fall through to a "success with empty text" settle.
+      if (/No conversation found with session ID/i.test(stderrTail)) {
+        const e = new Error('Conversation not found in CLI history — starting a fresh session.');
+        e.code = 'STALE_SESSION';
+        settle(false, e);
+      }
     });
 
     const cleanupTmpImages = () => {
@@ -678,7 +705,19 @@ async function streamMessage(event, messages, modelId, systemPrompt, cliSessionI
   const binary = getCliBinary();
 
   if (binary) {
-    return streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode, requestId);
+    try {
+      return await streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode, requestId);
+    } catch (e) {
+      // If --resume failed because the CLI no longer has that conversation,
+      // transparently retry once with a fresh session so the user's message
+      // still goes through. The new session id is returned in the result so
+      // the renderer can replace its stale cliSessionId on the next turn.
+      if (e?.code === 'STALE_SESSION' && cliSessionId) {
+        console.warn('[claude-cli] stale --resume target; retrying without it');
+        return streamMessageViaCLI(event, messages, modelId, systemPrompt, null, binary, permMode, requestId);
+      }
+      throw e;
+    }
   }
 
   console.warn('[claude] CLI unavailable — using SDK fallback');
