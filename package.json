@@ -82,8 +82,18 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Development",
       "artifactName": "ClaudeCode-${version}.${ext}"
@@ -102,7 +112,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
     "dockview-core": "^5.2.0",
+    "node-pty": "^1.1.0",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0"
   }

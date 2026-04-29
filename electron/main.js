@@ -943,10 +943,24 @@ ipcMain.handle('memory:load-all', () => {
 
 // ── IPC: embedded terminal ─────────────────────────────────────────────────
 // Spawns a real shell (PowerShell on Windows, bash/zsh on macOS/Linux) and
-// wires its stdin/stdout/stderr to the renderer via IPC events.
+// wires its stdin/stdout to the renderer via IPC events using node-pty.
+// node-pty allocates a real pseudo-terminal so interactive CLIs (claude, etc.)
+// see a proper TTY and enter interactive mode correctly.
 // Multiple terminal instances are supported via a termId integer.
 
-const terminals = new Map(); // termId → { proc, sender }
+let _pty = null;
+function getPty() {
+  if (_pty) return _pty;
+  try {
+    _pty = require('node-pty');
+  } catch {
+    // node-pty not available (e.g. first run before rebuild) — fall back to pipes
+    _pty = null;
+  }
+  return _pty;
+}
+
+const terminals = new Map(); // termId → { ptyProc, sender }
 let _nextTermId  = 1;
 
 function getShellConfig() {
@@ -1084,11 +1098,50 @@ ipcMain.handle('git:action', async (_, { action, cwd, args = [] }) => {
   }
 });
 
-ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
+ipcMain.handle('terminal:create', (event, { cwd, cols, rows } = {}) => {
   const termId  = _nextTermId++;
-  const workDir = cwd || APP_ROOT;
+  const workDir = cwd || global._projectCwd || APP_ROOT;
   const { cmd, args, fallback } = getShellConfig();
+  const pty = getPty();
+  const sender = event.sender;
 
+  const send = (channel, payload) => {
+    if (!sender.isDestroyed()) sender.send(channel, payload);
+  };
+
+  // ── node-pty path (proper PTY — interactive programs work correctly) ──────
+  if (pty) {
+    const spawnPty = (exe) => pty.spawn(exe, args || [], {
+      name: 'xterm-256color',
+      cols: cols || 120,
+      rows: rows || 30,
+      cwd:  workDir,
+      env:  { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+    });
+
+    let ptyProc;
+    try {
+      ptyProc = spawnPty(cmd);
+    } catch {
+      if (fallback) {
+        try { ptyProc = spawnPty(fallback); }
+        catch (e2) { return { ok: false, error: e2.message }; }
+      } else {
+        return { ok: false, error: `Could not spawn PTY: ${cmd}` };
+      }
+    }
+
+    ptyProc.onData(data => send(`terminal:data:${termId}`, data));
+    ptyProc.onExit(({ exitCode }) => {
+      send(`terminal:exit:${termId}`, exitCode ?? 0);
+      terminals.delete(termId);
+    });
+
+    terminals.set(termId, { ptyProc, sender, isPty: true });
+    return { ok: true, termId, cwd: workDir };
+  }
+
+  // ── Fallback: plain child_process.spawn (no PTY — interactive CLIs limited) ─
   const spawnShell = (exe) => spawn(exe, args || [], {
     cwd:   workDir,
     env:   { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
@@ -1107,13 +1160,6 @@ ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
     }
   }
 
-  const sender = event.sender;
-  terminals.set(termId, { proc, sender });
-
-  const send = (channel, payload) => {
-    if (!sender.isDestroyed()) sender.send(channel, payload);
-  };
-
   proc.stdout.on('data', (d) => send(`terminal:data:${termId}`, d.toString('utf8')));
   proc.stderr.on('data', (d) => send(`terminal:data:${termId}`, d.toString('utf8')));
   proc.on('exit', (code) => {
@@ -1124,20 +1170,34 @@ ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
     send(`terminal:data:${termId}`, `\r\n\x1b[31m[shell error: ${err.message}]\x1b[0m\r\n`);
   });
 
+  terminals.set(termId, { proc, sender, isPty: false });
   return { ok: true, termId, cwd: workDir };
 });
 
 ipcMain.on('terminal:input', (_, { termId, data }) => {
   const t = terminals.get(termId);
-  if (t && !t.proc.killed) {
-    try { t.proc.stdin.write(data); } catch { /* stdin may be closed */ }
+  if (!t) return;
+  try {
+    if (t.isPty) {
+      t.ptyProc.write(data);
+    } else {
+      t.proc.stdin.write(data);
+    }
+  } catch { /* process may be closing */ }
+});
+
+// Handle PTY resize from renderer (xterm ResizeObserver → fitAddon)
+ipcMain.on('terminal:resize', (_, { termId, cols, rows }) => {
+  const t = terminals.get(termId);
+  if (t?.isPty) {
+    try { t.ptyProc.resize(Math.max(2, cols), Math.max(2, rows)); } catch { /**/ }
   }
 });
 
 ipcMain.on('terminal:close', (_, termId) => {
   const t = terminals.get(termId);
   if (t) {
-    try { t.proc.kill(); } catch { /* already dead */ }
+    try { t.isPty ? t.ptyProc.kill() : t.proc.kill(); } catch { /* already dead */ }
     terminals.delete(termId);
   }
 });
