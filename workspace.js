@@ -552,9 +552,19 @@
         const offExit  = api.terminal.onExit(termId, code =>
           term.write(`\r\n\x1b[2m[process exited ${code}]\x1b[0m\r\n`));
         const offInput = term.onData(d => api.terminal.input(termId, d));
-        const ro = new ResizeObserver(() => { try { fitAddon.fit(); } catch { /**/ } });
+
+        // Wire resize: when xterm reflows, tell the PTY so line-wrapping matches
+        const ro = new ResizeObserver(() => {
+          try {
+            fitAddon.fit();
+            if (term.cols && term.rows) {
+              api.terminal.resize?.(termId, term.cols, term.rows);
+            }
+          } catch { /**/ }
+        });
         ro.observe(wrap);
         fitAddon.fit();
+        if (term.cols && term.rows) api.terminal.resize?.(termId, term.cols, term.rows);
 
         // Refit when this panel becomes active (tab switch, resize, etc.)
         try {
