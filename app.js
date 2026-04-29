@@ -6488,9 +6488,15 @@ function renderGitPanel() {
     </div>`;
 }
 
+// Auto-refresh timer for Git panel — cleared when switching away from git tab
+let _gitRefreshTimer = null;
+
 async function initGitPanel(container) {
   const api = window.electronAPI?.git;
   if (!api) return;
+
+  // Clear any stale timer from a previous initGitPanel call
+  if (_gitRefreshTimer) { clearInterval(_gitRefreshTimer); _gitRefreshTimer = null; }
 
   const $ = id => container.querySelector('#' + id);
   let _status   = null;
@@ -6679,6 +6685,9 @@ async function initGitPanel(container) {
   });
 
   if (refreshBtn) refreshBtn.addEventListener('click', () => loadAll());
+
+  // ── Auto-refresh every 5 s while the Git tab is active (Bug D fix) ───────
+  _gitRefreshTimer = setInterval(() => loadAll(), 5000);
 
   // ── Initial load ─────────────────────────────────────────────────────────
   await loadAll();
@@ -7403,6 +7412,29 @@ function setRightPanelTab(id) {
     // Edge-to-edge modes
     bodyEl.classList.toggle('rp-body--terminal', id === 'terminal');
     bodyEl.classList.toggle('rp-body--apercu',   id === 'apercu');
+
+    // ── Bug A fix: Plan tab — re-scan chat history if __planTodos is null ──
+    // parsePlanBlock runs at stream end. If the user opens the Plan tab later
+    // (e.g. after a reload) __planTodos is null. Scan history for the last
+    // assistant message containing a plan/tasks/todo block.
+    if (id === 'plan' && !window.__planTodos) {
+      const history = window.__chatHistory || [];
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].role === 'assistant') {
+          const found = typeof parsePlanBlock === 'function'
+            ? parsePlanBlock(history[i].content)
+            : null;
+          if (found?.length) { window.__planTodos = found; break; }
+        }
+      }
+    }
+
+    // ── Bug D fix: clear git auto-refresh when leaving Git tab ────────────
+    if (id !== 'git' && _gitRefreshTimer) {
+      clearInterval(_gitRefreshTimer);
+      _gitRefreshTimer = null;
+    }
+
     bodyEl.innerHTML = renderPanelContent(id);
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(id, bodyEl);
