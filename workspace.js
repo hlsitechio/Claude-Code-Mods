@@ -62,10 +62,22 @@
     return _wsList.find(w => w.id === _wsActiveId) || null;
   }
 
+  // ── Bug B fix: strip terminal-instance panels before saving ──────────────
+  // PTYs cannot be serialized — panels with ids starting "term-" would restore
+  // as blank dead panels. Remove them from the layout JSON before persisting.
+  function _stripTerminalPanels(node) {
+    if (!node) return;
+    if (node.data?.panels) {
+      node.data.panels = node.data.panels.filter(p => !String(p.id || '').startsWith('term-'));
+    }
+    if (Array.isArray(node.children)) node.children.forEach(_stripTerminalPanels);
+  }
+
   function saveCurrentLayout() {
     if (!dv) return;
     try {
       const layout = dv.toJSON();
+      _stripTerminalPanels(layout.grid);
       const ws = _wsGetActive();
       if (ws) { ws.layout = layout; ws.updatedAt = Date.now(); _wsWriteStore(); }
     } catch (e) { console.warn('[workspace] saveCurrentLayout failed:', e); }
@@ -139,6 +151,9 @@
 
   let dv           = null;
   let _artifactSeq = 0;
+
+  // ── Bug C fix: queue openTerminal calls that arrive before dv is ready ───
+  const _pendingTerminals = [];
 
   // id → panel's own .right-panel__body div  (for app.js compatibility)
   const panelBodies = {};
@@ -548,7 +563,7 @@
   }
 
   function openTerminal(isClaude = false) {
-    if (!dv) return;
+    if (!dv) { _pendingTerminals.push(isClaude); return; }
     if (isClaude) _termClaudeSeq++; else _termShellSeq++;
     const label = isClaude ? `Claude ${_termClaudeSeq}` : `Shell ${_termShellSeq}`;
     const id    = `term-${Date.now()}`;
@@ -615,6 +630,7 @@
 
     dv = DV.createDockview(el, {
       className: 'dockview-theme-ccmod',
+      // (dv assigned above — _pendingTerminals drained after layout restore below)
 
       createComponent(options) {
         if (options.name === 'chat')               return makeChatComponent(options);
@@ -659,6 +675,11 @@
     dv.onDidLayoutChange(() => _wsScheduleSave());
     dv.onDidAddPanel(()    => _wsScheduleSave());
     dv.onDidRemovePanel(() => _wsScheduleSave());
+
+    // ── Bug C fix: drain any openTerminal calls queued before dv was ready ──
+    if (_pendingTerminals.length) {
+      setTimeout(() => { _pendingTerminals.splice(0).forEach(openTerminal); }, 100);
+    }
 
     /* ── Drag — suppress browser "Move" badge ────────────────────── */
     el.addEventListener('dragstart', e => {
