@@ -532,7 +532,23 @@
         }
         const { termId } = result;
 
-        const offData  = api.terminal.onData(termId, t => term.write(t));
+        // For Claude sessions: detect when the shell prompt first appears, then
+        // send `claude\r`. This is more reliable than a fixed timeout because
+        // PowerShell 7 can take 0.5–2s to fully initialize.
+        let _claudeLaunched = false;
+        function _maybeAutoLaunch(chunk) {
+          if (!isClaude || _claudeLaunched) return;
+          // Shell prompt patterns: ends with "> " or "$ " (PowerShell / bash)
+          // Strip ANSI codes before checking
+          const plain = chunk.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+          if (/[>$]\s*$/.test(plain)) {
+            _claudeLaunched = true;
+            // Small extra delay so the prompt line is fully rendered
+            setTimeout(() => api.terminal.input(termId, 'claude\r\n'), 120);
+          }
+        }
+
+        const offData  = api.terminal.onData(termId, t => { term.write(t); _maybeAutoLaunch(t); });
         const offExit  = api.terminal.onExit(termId, code =>
           term.write(`\r\n\x1b[2m[process exited ${code}]\x1b[0m\r\n`));
         const offInput = term.onData(d => api.terminal.input(termId, d));
@@ -547,7 +563,10 @@
           });
         } catch { /**/ }
 
-        if (isClaude) setTimeout(() => api.terminal.input(termId, 'claude\r'), 350);
+        // Fallback: if no prompt detected within 3s, send claude anyway
+        if (isClaude) setTimeout(() => {
+          if (!_claudeLaunched) { _claudeLaunched = true; api.terminal.input(termId, 'claude\r\n'); }
+        }, 3000);
 
         _inst = {
           termId, term, fitAddon,
