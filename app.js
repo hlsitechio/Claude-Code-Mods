@@ -471,7 +471,9 @@ function saveSessionMessages(id, msgs) {
   try { localStorage.setItem('ccmod.msgs.' + id, JSON.stringify(msgs)); }
   catch (e) { console.warn('[sessions] localStorage msgs save failed', e); }
   // Write-through backup to disk
-  window.electronAPI?.sessions?.saveMsgs(id, msgs).catch(() => {});
+  window.electronAPI?.sessions?.saveMsgs(id, msgs).catch(e => {
+    window.showToast?.('Session save failed: ' + e.message, 'error');
+  });
 }
 function deleteSessionMessages(id) {
   try { localStorage.removeItem('ccmod.msgs.' + id); } catch {}
@@ -3730,7 +3732,7 @@ function showConsole(initialPage = 'overview') {
         }
       } catch (err) {
         console.error('[agents] save failed:', err);
-        alert('Save failed: ' + err.message);
+        window.showToast?.('Agent save failed: ' + err.message, 'error');
       }
     });
 
@@ -5978,7 +5980,9 @@ async function initNotesPanel() {
     try {
       await api.write(activeId, textarea.value);
       savedContent = textarea.value;
-    } catch {}
+    } catch (e) {
+      window.showToast?.('Note save failed: ' + e.message, 'error');
+    }
   }
 
   function scheduleAutoSave() {
@@ -6363,7 +6367,7 @@ async function initMcpPanel(container) {
       closeForm();
       await reload();
     } catch(e) {
-      alert('Failed to save: ' + (e?.message || e));
+      window.showToast?.('MCP save failed: ' + (e?.message || e), 'error');
     }
   }
 
@@ -6680,8 +6684,13 @@ async function initGitPanel(container) {
     const msg = (commitMsg?.value || '').trim();
     if (!msg) { commitMsg?.focus(); return; }
     const res = await api.action('commit', null, ['-m', msg]);
-    if (res.ok) { commitMsg.value = ''; await loadAll(); }
-    else alert('Commit failed: ' + res.error);
+    if (res.ok) {
+      commitMsg.value = '';
+      window.showToast?.('Committed: ' + msg.slice(0, 48), 'success');
+      await loadAll();
+    } else {
+      window.showToast?.('Commit failed: ' + res.error, 'error');
+    }
   });
 
   if (refreshBtn) refreshBtn.addEventListener('click', () => loadAll());

@@ -6867,3 +6867,72 @@ html[data-theme="light"] .find-bar input { color: #141416; }
 #mcp-form-save:hover { background: #4a4aef !important; }
 #mcp-form-cancel:hover { background: rgba(255,255,255,.04) !important; color: #a0a0aa !important; }
 #mcp-btn-add-custom:hover { border-color: #5a5aff !important; color: #c4c4ff !important; }
+
+/* ── Toast notification system ──────────────────────────────────────────── */
+.toast-stack {
+  position: fixed;
+  bottom: 24px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 99999;
+  pointer-events: none;
+  max-width: 340px;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px 9px 13px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.4;
+  background: #1e1e24;
+  border: 1px solid #2e2e38;
+  color: #c8c8d0;
+  box-shadow: 0 4px 18px rgba(0,0,0,.5);
+  pointer-events: all;
+  cursor: pointer;
+  /* enter — slide in from right */
+  opacity: 0;
+  transform: translateX(16px);
+  transition: opacity .22s ease, transform .22s ease;
+}
+.toast--visible {
+  opacity: 1;
+  transform: translateX(0);
+}
+.toast--leaving {
+  opacity: 0;
+  transform: translateX(16px);
+  transition: opacity .25s ease, transform .25s ease;
+}
+.toast__icon {
+  font-size: 13px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.toast__msg  { flex: 1; word-break: break-word; }
+.toast__close {
+  background: none;
+  border: none;
+  color: #4a4a55;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color .1s;
+}
+.toast__close:hover { color: #9a9aa4; }
+
+/* Type variants */
+.toast--success { border-color: rgba(122,179,137,.35); }
+.toast--success .toast__icon { color: #7ab389; }
+.toast--error   { border-color: rgba(201,100,66,.35); background: #1e1616; }
+.toast--error   .toast__icon { color: #c96442; }
+.toast--warning { border-color: rgba(217,163,87,.35); }
+.toast--warning .toast__icon { color: #d9a357; }
+.toast--info    .toast__icon { color: #6a86c3; }
