@@ -145,9 +145,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Embedded terminal ─────────────────────────────────────────────────────
   terminal: {
-    create: (opts)          => ipcRenderer.invoke('terminal:create', opts || {}),
-    input:  (termId, data)  => ipcRenderer.send('terminal:input', { termId, data }),
-    close:  (termId)        => ipcRenderer.send('terminal:close', termId),
+    create:     (opts)              => ipcRenderer.invoke('terminal:create', opts || {}),
+    spawnAgent: (opts)              => ipcRenderer.invoke('terminal:spawn-agent', opts || {}),
+    input:      (termId, data)      => ipcRenderer.send('terminal:input', { termId, data }),
+    sendText:   (termId, text)      => ipcRenderer.invoke('terminal:send-text', { termId, text }),
+    readTail:   (termId, bytes)     => ipcRenderer.invoke('terminal:read-tail', { termId, bytes }),
+    listActive: (opts)              => ipcRenderer.invoke('terminal:list-active', opts || {}),
+    close:      (termId)            => ipcRenderer.send('terminal:close', termId),
     onData: (termId, cb) => {
       const ch = `terminal:data:${termId}`;
       const handler = (_, text) => cb(text);

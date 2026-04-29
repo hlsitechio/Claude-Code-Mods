@@ -819,4 +819,6 @@ module.exports = {
   getAuthStatus, startOAuthSignIn, getCredential,
   // Chat
   streamMessage, abortCurrentStream,
+  // CLI binary discovery (used by main for terminal:spawn-agent)
+  getCliBinary,
 };

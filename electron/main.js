@@ -908,10 +908,40 @@ ipcMain.handle('memory:load-all', () => {
 // ── IPC: embedded terminal ─────────────────────────────────────────────────
 // Spawns a real shell (PowerShell on Windows, bash/zsh on macOS/Linux) and
 // wires its stdin/stdout/stderr to the renderer via IPC events.
-// Multiple terminal instances are supported via a termId integer.
+// Also supports spawning Claude CLI sub-agents via terminal:spawn-agent —
+// the chat-side Claude can dispatch sub-agents into terminal panes and read
+// their output via the per-terminal ring buffer.
+//
+// Each terminal record:
+//   { proc, sender, kind, label, agent, cwd, tail }
+//   kind  'shell' | 'agent'
+//   label human-readable name (e.g. "Terminal 3" or the agent's --name)
+//   agent agent identifier (only set when kind === 'agent')
+//   tail  rolling buffer of last ~12 KB of output, ANSI-stripped, used to
+//         feed workspace context into the chat Claude's system prompt.
 
-const terminals = new Map(); // termId → { proc, sender }
+const terminals = new Map();
 let _nextTermId  = 1;
+const MAX_AGENT_TERMINALS = 6;
+const TAIL_CAP_BYTES      = 12 * 1024;
+
+// Strip terminal control sequences so the buffered text is readable when
+// dropped into the chat Claude's system prompt. We keep printable text plus
+// newlines/tabs.
+const _ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][\s\S]*?(?:\x07|\x1b\\)|\x1b[PX^_][\s\S]*?(?:\x07|\x1b\\)|[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+function _pushTail(term, chunk) {
+  if (!term) return;
+  const clean = String(chunk).replace(_ANSI_RE, '');
+  term.tail = (term.tail + clean).slice(-TAIL_CAP_BYTES);
+}
+
+function _activeAgentCount() {
+  let n = 0;
+  for (const t of terminals.values()) {
+    if (t.kind === 'agent' && t.proc && !t.proc.killed) n++;
+  }
+  return n;
+}
 
 function getShellConfig() {
   const platform = process.platform;
@@ -949,14 +979,30 @@ ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
   }
 
   const sender = event.sender;
-  terminals.set(termId, { proc, sender });
+  const term = {
+    proc, sender,
+    kind:  'shell',
+    label: `Terminal ${termId}`,
+    agent: null,
+    cwd:   workDir,
+    tail:  '',
+  };
+  terminals.set(termId, term);
 
   const send = (channel, payload) => {
     if (!sender.isDestroyed()) sender.send(channel, payload);
   };
 
-  proc.stdout.on('data', (d) => send(`terminal:data:${termId}`, d.toString('utf8')));
-  proc.stderr.on('data', (d) => send(`terminal:data:${termId}`, d.toString('utf8')));
+  proc.stdout.on('data', (d) => {
+    const s = d.toString('utf8');
+    _pushTail(term, s);
+    send(`terminal:data:${termId}`, s);
+  });
+  proc.stderr.on('data', (d) => {
+    const s = d.toString('utf8');
+    _pushTail(term, s);
+    send(`terminal:data:${termId}`, s);
+  });
   proc.on('exit', (code) => {
     send(`terminal:exit:${termId}`, code ?? 0);
     terminals.delete(termId);
@@ -965,7 +1011,147 @@ ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
     send(`terminal:data:${termId}`, `\r\n\x1b[31m[shell error: ${err.message}]\x1b[0m\r\n`);
   });
 
-  return { ok: true, termId, cwd: workDir };
+  return { ok: true, termId, pid: proc.pid, cwd: workDir, label: term.label, kind: 'shell' };
+});
+
+// Spawn a Claude CLI sub-agent into a terminal pane. The chat-side Claude
+// uses this (via the renderer's tag parser) to dispatch sub-agents.
+//
+// MCP + filesystem access:
+//   Sub-agents inherit the user's full Claude Code environment by default —
+//   we never pass --strict-mcp-config, so MCP servers configured globally
+//   (~/.claude/settings.json, project .claude/, plugins) are loaded
+//   automatically. We never pass --tools, so all built-in tools (Read,
+//   Write, Edit, Bash, Grep, Glob, WebFetch, etc.) are available. We
+//   explicitly pass --add-dir FS_ROOT so tool calls under the whole
+//   workspace are allowed even before --dangerously-skip-permissions takes
+//   effect. Effectively: a sub-agent has the same powers as a freshly
+//   launched `claude` CLI in the same workspace.
+//
+// Inputs:
+//   agent       string  — name from agents/*.json (passed via --agent)
+//   agentInline object  — { id, prompt, description? } when defining a one-off
+//                         agent on the fly (passed via --agents JSON + --agent id)
+//   name        string  — display name (--name); falls back to the agent id
+//   cwd         string  — working dir (must be inside FS_ROOT)
+//   perm        string  — 'bypass' | 'accept' | 'default'
+//   mcpConfig   string  — optional path/JSON for --mcp-config override
+//   addDirs     string[] — optional extra dirs (each constrained to FS_ROOT)
+//
+// Returns: { ok, termId, pid, label, kind: 'agent' } or { ok:false, error }.
+ipcMain.handle('terminal:spawn-agent', (event, opts = {}) => {
+  if (_activeAgentCount() >= MAX_AGENT_TERMINALS) {
+    return { ok: false, error: `Max ${MAX_AGENT_TERMINALS} agent terminals reached.` };
+  }
+
+  const binary = getClaudeService().getCliBinary?.();
+  if (!binary) return { ok: false, error: 'Claude CLI binary not found on this system.' };
+
+  // cwd must stay inside the workspace
+  let workDir = APP_ROOT;
+  if (typeof opts.cwd === 'string' && opts.cwd) {
+    const resolved = safeResolveUnder(FS_ROOT, opts.cwd);
+    if (resolved) workDir = resolved;
+  }
+
+  const agentId = (opts.agentInline?.id) || (typeof opts.agent === 'string' ? opts.agent : '');
+  if (!agentId) return { ok: false, error: 'Missing agent name.' };
+
+  const displayName = (typeof opts.name === 'string' && opts.name.trim()) ? opts.name.trim() : agentId;
+
+  // Always-on access: workspace dir, then any caller-supplied extras —
+  // every extra dir is resolved through the FS_ROOT boundary check so a
+  // misbehaving chat Claude can't grant the sub-agent paths outside.
+  const allowedDirs = [FS_ROOT];
+  if (Array.isArray(opts.addDirs)) {
+    for (const d of opts.addDirs) {
+      const r = safeResolveUnder(FS_ROOT, d);
+      if (r && !allowedDirs.includes(r)) allowedDirs.push(r);
+    }
+  }
+
+  const args = [
+    '--agent', agentId,
+    '--name',  displayName,
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--add-dir', ...allowedDirs,
+  ];
+
+  // Optional MCP override. When omitted, the CLI falls back to the user's
+  // default config — so sub-agents share the same MCP servers as the main
+  // chat without any extra wiring.
+  if (typeof opts.mcpConfig === 'string' && opts.mcpConfig.trim()) {
+    args.push('--mcp-config', opts.mcpConfig);
+  }
+
+  // Inline agent definition — wrap in a single-key JSON object
+  if (opts.agentInline && typeof opts.agentInline.prompt === 'string') {
+    const inline = {
+      [agentId]: {
+        prompt:      opts.agentInline.prompt,
+        description: opts.agentInline.description || '',
+      },
+    };
+    args.push('--agents', JSON.stringify(inline));
+  }
+
+  // Permission mode → CLI flag (same mapping as claude-service.js).
+  // Default for spawned agents is 'bypass' so they run autonomously without
+  // popping permission prompts in panes the user isn't watching.
+  const perm = opts.perm || 'bypass';
+  if (perm === 'bypass')      args.push('--dangerously-skip-permissions');
+  else if (perm === 'accept') args.push('--auto-approve-everything');
+
+  const isCmd = binary.endsWith('.cmd');
+  let proc;
+  try {
+    proc = spawn(binary, args, {
+      cwd:         workDir,
+      env:         { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+      windowsHide: true,
+      shell:       isCmd,
+    });
+  } catch (e) {
+    return { ok: false, error: `Could not spawn claude: ${e.message}` };
+  }
+
+  const termId = _nextTermId++;
+  const sender = event.sender;
+  const term = {
+    proc, sender,
+    kind:  'agent',
+    label: displayName,
+    agent: agentId,
+    cwd:   workDir,
+    tail:  '',
+  };
+  terminals.set(termId, term);
+
+  const send = (channel, payload) => {
+    if (!sender.isDestroyed()) sender.send(channel, payload);
+  };
+
+  proc.stdout.on('data', (d) => {
+    const s = d.toString('utf8');
+    _pushTail(term, s);
+    send(`terminal:data:${termId}`, s);
+  });
+  proc.stderr.on('data', (d) => {
+    const s = d.toString('utf8');
+    _pushTail(term, s);
+    send(`terminal:data:${termId}`, s);
+  });
+  proc.on('exit', (code) => {
+    send(`terminal:exit:${termId}`, code ?? 0);
+    terminals.delete(termId);
+  });
+  proc.on('error', (err) => {
+    send(`terminal:data:${termId}`, `\r\n\x1b[31m[agent error: ${err.message}]\x1b[0m\r\n`);
+  });
+
+  console.log(`[terminal:spawn-agent] termId=${termId} pid=${proc.pid} agent=${agentId} name=${displayName}`);
+  return { ok: true, termId, pid: proc.pid, label: displayName, kind: 'agent', agent: agentId, cwd: workDir };
 });
 
 ipcMain.on('terminal:input', (_, { termId, data }) => {
@@ -973,6 +1159,50 @@ ipcMain.on('terminal:input', (_, { termId, data }) => {
   if (t && !t.proc.killed) {
     try { t.proc.stdin.write(data); } catch { /* stdin may be closed */ }
   }
+});
+
+// Programmatic send — appends a newline if missing so it acts like an
+// "Enter" press. Used by the renderer's <terminal-send> tag parser.
+ipcMain.handle('terminal:send-text', (_, { termId, text } = {}) => {
+  const t = terminals.get(termId);
+  if (!t || !t.proc || t.proc.killed) return { ok: false, error: 'Terminal not found.' };
+  if (typeof text !== 'string') return { ok: false, error: 'text must be a string.' };
+  const payload = text.endsWith('\n') ? text : text + '\n';
+  try {
+    t.proc.stdin.write(payload);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// Returns one terminal's tail (cleaner than dumping the whole map).
+ipcMain.handle('terminal:read-tail', (_, { termId, bytes } = {}) => {
+  const t = terminals.get(termId);
+  if (!t) return { ok: false, error: 'Terminal not found.' };
+  const cap = typeof bytes === 'number' && bytes > 0 ? Math.min(bytes, TAIL_CAP_BYTES) : TAIL_CAP_BYTES;
+  return { ok: true, tail: t.tail.slice(-cap) };
+});
+
+// Snapshot of all live terminals for workspace-context injection.
+// `tailLines` controls how much output is included per terminal (default 20).
+ipcMain.handle('terminal:list-active', (_, { tailLines = 20 } = {}) => {
+  const out = [];
+  for (const [termId, t] of terminals) {
+    if (!t.proc || t.proc.killed) continue;
+    const lines = t.tail.split('\n');
+    const tail = lines.slice(-Math.max(1, tailLines)).join('\n').trimEnd();
+    out.push({
+      termId,
+      pid:   t.proc.pid ?? null,
+      kind:  t.kind,
+      label: t.label,
+      agent: t.agent,
+      cwd:   t.cwd,
+      tail,
+    });
+  }
+  return out;
 });
 
 ipcMain.on('terminal:close', (_, termId) => {
