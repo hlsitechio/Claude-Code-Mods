@@ -1,0 +1,8 @@
+{
+  "id": "dev",
+  "name": "Dev",
+  "description": "Full-stack pod: design, frontend, backend, QA, ops, and tech lead.",
+  "tags": ["dev", "fullstack", "build", "ship"],
+  "color": "#7ab8f5",
+  "members": ["designer", "frontend", "backend", "qa", "devops", "techlead"]
+}

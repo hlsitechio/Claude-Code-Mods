@@ -1039,7 +1039,10 @@ ipcMain.handle('terminal:create', (event, { cwd } = {}) => {
 //   addDirs     string[] — optional extra dirs (each constrained to FS_ROOT)
 //
 // Returns: { ok, termId, pid, label, kind: 'agent' } or { ok:false, error }.
-ipcMain.handle('terminal:spawn-agent', (event, opts = {}) => {
+//
+// Implementation lives in _spawnAgentInternal so teams:spawn can call it
+// directly without re-emitting IPC.
+function _spawnAgentInternal(event, opts = {}) {
   if (_activeAgentCount() >= MAX_AGENT_TERMINALS) {
     return { ok: false, error: `Max ${MAX_AGENT_TERMINALS} agent terminals reached.` };
   }
@@ -1152,7 +1155,9 @@ ipcMain.handle('terminal:spawn-agent', (event, opts = {}) => {
 
   console.log(`[terminal:spawn-agent] termId=${termId} pid=${proc.pid} agent=${agentId} name=${displayName}`);
   return { ok: true, termId, pid: proc.pid, label: displayName, kind: 'agent', agent: agentId, cwd: workDir };
-});
+}
+
+ipcMain.handle('terminal:spawn-agent', (event, opts = {}) => _spawnAgentInternal(event, opts));
 
 ipcMain.on('terminal:input', (_, { termId, data }) => {
   const t = terminals.get(termId);
@@ -1211,4 +1216,197 @@ ipcMain.on('terminal:close', (_, termId) => {
     try { t.proc.kill(); } catch { /* already dead */ }
     terminals.delete(termId);
   }
+});
+
+// ── IPC: teams ─────────────────────────────────────────────────────────────
+// A "team" is a folder under teams/<id>/ that contains:
+//
+//   teams/<id>/team.json          team metadata + member order
+//   teams/<id>/<member-id>.json   one agent definition per file (same
+//                                 schema as agents/*.json)
+//
+// Layout for `cyber`:
+//   teams/cyber/team.json
+//   teams/cyber/recon.json
+//   teams/cyber/hunter.json
+//   teams/cyber/intel.json
+//   teams/cyber/analyst.json
+//   teams/cyber/defender.json
+//   teams/cyber/coordinator.json
+//
+// team.json schema:
+//   { "id":"cyber", "name":"Cyber", "description":"...",
+//     "tags":["security","pentest"], "color":"#…",
+//     "members":["recon","hunter","intel","analyst","defender","coordinator"] }
+//
+// Each member file uses the same shape as agents/*.json (with `system`
+// holding the system prompt, `permMode` for the permission mode). When
+// teams:spawn fires, every member's JSON is loaded and forwarded to
+// _spawnAgentInternal as an `agentInline` definition. The 6-agent cap from
+// terminals still applies — if 2 agents are already running, only 4 of a
+// 6-person team spawn and the rest land in `skipped`.
+
+const TEAMS_DIR = path.join(APP_ROOT, 'teams');
+
+function _safeTeamId(id) {
+  return typeof id === 'string'
+    && id
+    && !id.includes('/')
+    && !id.includes('\\')
+    && !id.includes('..');
+}
+
+function _readJsonOrNull(filePath) {
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
+  catch (e) {
+    if (e.code !== 'ENOENT') console.warn(`[teams] read ${filePath}:`, e.message);
+    return null;
+  }
+}
+
+function _readTeamMeta(id) {
+  if (!_safeTeamId(id)) return null;
+  return _readJsonOrNull(path.join(TEAMS_DIR, id, 'team.json'));
+}
+
+// Return the team's member ids in order. Prefer the explicit list in
+// team.json; fall back to alphabetical *.json files in the folder
+// (excluding team.json) so a team works even without a manifest.
+function _enumerateTeamMembers(id) {
+  if (!_safeTeamId(id)) return [];
+  const dir = path.join(TEAMS_DIR, id);
+  let files;
+  try { files = fs.readdirSync(dir); }
+  catch { return []; }
+
+  const meta = _readTeamMeta(id);
+  if (meta && Array.isArray(meta.members) && meta.members.length) {
+    return meta.members.filter(m =>
+      typeof m === 'string' && m && files.includes(`${m}.json`)
+    );
+  }
+
+  return files
+    .filter(f => f.endsWith('.json') && f !== 'team.json' && !f.startsWith('.'))
+    .map(f => f.slice(0, -5))
+    .sort();
+}
+
+function _readTeamMember(teamId, memberId) {
+  if (!_safeTeamId(teamId) || !_safeTeamId(memberId)) return null;
+  return _readJsonOrNull(path.join(TEAMS_DIR, teamId, `${memberId}.json`));
+}
+
+ipcMain.handle('teams:list', async () => {
+  if (!fs.existsSync(TEAMS_DIR)) return [];
+  let entries;
+  try { entries = await fs.promises.readdir(TEAMS_DIR, { withFileTypes: true }); }
+  catch (e) { console.warn('[teams] readdir failed:', e.message); return []; }
+
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    const id      = e.name;
+    const meta    = _readTeamMeta(id) || {};
+    const members = _enumerateTeamMembers(id);
+    out.push({
+      id,
+      name:        meta.name        || id,
+      description: meta.description || '',
+      tags:        Array.isArray(meta.tags) ? meta.tags : [],
+      color:       meta.color       || null,
+      memberCount: members.length,
+    });
+  }
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
+});
+
+ipcMain.handle('teams:get', async (_, id) => {
+  if (!_safeTeamId(id)) return { ok: false, error: 'Invalid team id.' };
+  const meta      = _readTeamMeta(id);
+  const memberIds = _enumerateTeamMembers(id);
+  if (!meta && !memberIds.length) return { ok: false, error: 'Team not found.' };
+
+  const members = memberIds.map(mid => {
+    const m = _readTeamMember(id, mid);
+    if (!m) return { id: mid, error: 'Member file missing or invalid.' };
+    return {
+      id:          mid,
+      name:        m.name        || mid,
+      description: m.description || '',
+      model:       m.model       || null,
+      permMode:    m.permMode    || 'bypass',
+      color:       m.color       || null,
+      systemLen:   typeof m.system === 'string' ? m.system.length : 0,
+    };
+  });
+
+  return {
+    ok: true,
+    team: {
+      id,
+      name:        (meta && meta.name)        || id,
+      description: (meta && meta.description) || '',
+      tags:        (meta && Array.isArray(meta.tags)) ? meta.tags : [],
+      color:       (meta && meta.color)       || null,
+      members,
+    },
+  };
+});
+
+// Spawn every member of a team via _spawnAgentInternal.
+// Returns { ok, spawned: [...], skipped: [...], teamId, teamName }.
+// ok is true only when every member spawned successfully.
+ipcMain.handle('teams:spawn', async (event, { id, cwd } = {}) => {
+  if (!_safeTeamId(id)) return { ok: false, error: 'Invalid team id.', spawned: [], skipped: [] };
+  const memberIds = _enumerateTeamMembers(id);
+  if (!memberIds.length) return { ok: false, error: 'Team not found or empty.', spawned: [], skipped: [] };
+  const meta = _readTeamMeta(id) || {};
+
+  const spawned = [];
+  const skipped = [];
+
+  for (const memberId of memberIds) {
+    if (_activeAgentCount() >= MAX_AGENT_TERMINALS) {
+      skipped.push({ name: memberId, reason: `Max ${MAX_AGENT_TERMINALS} agent terminals reached.` });
+      continue;
+    }
+
+    const m = _readTeamMember(id, memberId);
+    if (!m) {
+      skipped.push({ name: memberId, reason: 'Member JSON missing or invalid.' });
+      continue;
+    }
+
+    const opts = {
+      // Pass each member as an inline agent — keeps things self-contained
+      // and lets a team override the system prompt without touching agents/.
+      agentInline: {
+        id:          memberId,
+        description: m.description || '',
+        prompt:      m.system      || '',
+      },
+      name:      m.name     || memberId,
+      perm:      m.permMode || 'bypass',
+      cwd:       cwd        || (typeof m.cwd === 'string' && m.cwd ? m.cwd : undefined),
+      mcpConfig: m.mcpConfig,
+      addDirs:   Array.isArray(m.addDirs) ? m.addDirs : undefined,
+    };
+
+    const result = _spawnAgentInternal(event, opts);
+    if (result.ok) {
+      spawned.push({ name: opts.name, termId: result.termId, pid: result.pid, agent: memberId });
+    } else {
+      skipped.push({ name: opts.name, reason: result.error || 'spawn failed' });
+    }
+  }
+
+  return {
+    ok: skipped.length === 0,
+    teamId:   id,
+    teamName: meta.name || id,
+    spawned,
+    skipped,
+  };
 });

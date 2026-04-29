@@ -143,6 +143,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     deleteMsgs: (id)       => ipcRenderer.invoke('sessions:delete-msgs', id),
   },
 
+  // ── Teams (folder-per-team rosters under teams/<id>/) ─────────────────────
+  teams: {
+    list:  ()                 => ipcRenderer.invoke('teams:list'),
+    get:   (id)               => ipcRenderer.invoke('teams:get', id),
+    spawn: (id, opts = {})    => ipcRenderer.invoke('teams:spawn', { id, ...opts }),
+  },
+
   // ── Embedded terminal ─────────────────────────────────────────────────────
   terminal: {
     create:     (opts)              => ipcRenderer.invoke('terminal:create', opts || {}),

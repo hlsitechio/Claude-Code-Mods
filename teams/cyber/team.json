@@ -1,0 +1,8 @@
+{
+  "id": "cyber",
+  "name": "Cyber",
+  "description": "Offensive-security pod: recon, exploitation, intel synthesis, blue-team defence.",
+  "tags": ["security", "pentest", "redteam", "ops"],
+  "color": "#c96442",
+  "members": ["recon", "hunter", "intel", "analyst", "defender", "coordinator"]
+}
