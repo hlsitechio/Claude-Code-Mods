@@ -261,6 +261,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('browser:popup', handler);
       return () => ipcRenderer.removeListener('browser:popup', handler);
     },
+    // Operator API — same primitives Claude has via tools, exposed to the
+    // renderer for slash-commands and manual scripting.
+    op: {
+      state:      ()           => ipcRenderer.invoke('browser:op-state'),
+      readPage:   (opts)       => ipcRenderer.invoke('browser:op-read', opts || {}),
+      elements:   (opts)       => ipcRenderer.invoke('browser:op-elements', opts || {}),
+      screenshot: (opts)       => ipcRenderer.invoke('browser:op-screenshot', opts || {}),
+      click:      (opts)       => ipcRenderer.invoke('browser:op-click', opts || {}),
+      type:       (opts)       => ipcRenderer.invoke('browser:op-type', opts || {}),
+      scroll:     (opts)       => ipcRenderer.invoke('browser:op-scroll', opts || {}),
+      nav:        (action)     => ipcRenderer.invoke('browser:op-nav', { action }),
+      navigate:   (url)        => ipcRenderer.invoke('browser:op-navigate', { url }),
+    },
   },
 
   // ── Kanban / Tasks ───────────────────────────────────────────────────────

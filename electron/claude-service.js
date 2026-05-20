@@ -786,6 +786,120 @@ function sanitiseMessages(messages) {
   });
 }
 
+// ── Browser operator tools — exposed to Claude in Direct API mode whenever ─
+// the embedded browser panel has at least one tab open. The matching handlers
+// live on `global.ccmBrowser` (defined in main.js).
+const BROWSER_TOOLS = [
+  {
+    name: 'browser_get_state',
+    description: 'Get the current state of the embedded browser — URL, page title, and loading status. Use this to check what page the user is currently looking at.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'browser_navigate',
+    description: 'Navigate the embedded browser to a URL. Waits for the page to finish loading and returns the final URL and title.',
+    input_schema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'URL to navigate to (https:// is auto-added if missing)' } },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_read_page',
+    description: 'Read the visible text content of the current page. Returns cleaned innerText with the page title and URL. Use for understanding what is on the page.',
+    input_schema: {
+      type: 'object',
+      properties: { max_chars: { type: 'integer', description: 'Max characters to return (default 8000, max 50000)' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_get_elements',
+    description: 'List interactable elements on the page (links, buttons, inputs, selects). Each element gets an integer "i" you can pass back to browser_click. Use this BEFORE clicking when you do not know the exact selector.',
+    input_schema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', description: 'Max elements (default 60, max 200)' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_click',
+    description: 'Click an element on the page. Provide ONE of: index (from browser_get_elements), selector (CSS), or text (substring match against link/button text).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        index:    { type: 'integer', description: 'Element index from browser_get_elements' },
+        selector: { type: 'string',  description: 'CSS selector to click' },
+        text:     { type: 'string',  description: 'Visible text of the link/button to click (case-insensitive substring)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_type',
+    description: 'Type text into an input field. Set submit=true to also submit the surrounding form (or press Enter on the input).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string',  description: 'CSS selector of the input element' },
+        text:     { type: 'string',  description: 'Text to type into the field' },
+        submit:   { type: 'boolean', description: 'Submit the form after typing' },
+      },
+      required: ['selector', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_screenshot',
+    description: 'Capture the current page as a JPEG image. You will see the screenshot as a visual input. Use this when reading text is not enough (e.g. understanding layout, recognizing icons, debugging visual issues).',
+    input_schema: {
+      type: 'object',
+      properties: { quality: { type: 'integer', description: 'JPEG quality 20-95 (default 75)' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_scroll',
+    description: 'Scroll the page. Useful when content is below the fold.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default down)' },
+        amount:    { type: 'integer', description: 'Pixels to scroll (default 600)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_nav',
+    description: 'Browser history navigation: back, forward, or reload.',
+    input_schema: {
+      type: 'object',
+      properties: { action: { type: 'string', enum: ['back', 'forward', 'reload'] } },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+];
+
+async function _executeBrowserTool(name, input) {
+  const op = global.ccmBrowser;
+  if (!op) throw new Error('Browser API not available');
+  switch (name) {
+    case 'browser_get_state':   return op.getActiveTab() || { error: 'No browser tab is open' };
+    case 'browser_navigate':    return op.navigate(input.url);
+    case 'browser_read_page':   return op.readPage({ maxChars: input.max_chars });
+    case 'browser_get_elements':return op.getElements({ limit: input.limit });
+    case 'browser_click':       return op.click(input);
+    case 'browser_type':        return op.type(input);
+    case 'browser_screenshot':  return op.screenshot({ quality: input.quality });
+    case 'browser_scroll':      return op.scroll(input);
+    case 'browser_nav':         return op.nav(input.action);
+    default:                    throw new Error('Unknown tool: ' + name);
+  }
+}
+
 async function streamMessageViaSDK(event, messages, modelId, systemPrompt, requestId) {
   const rid    = requestId || '';
   const chunkCh = rid ? `claude:chunk:${rid}` : 'claude:chunk';
@@ -795,6 +909,7 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
       if (event?.sender && !event.sender.isDestroyed()) event.sender.send(ch, payload);
     } catch { /* window closed during streaming */ }
   };
+  const sendActivity = (data) => safeSend(chunkCh, `\x01ACT:${JSON.stringify(data)}\x02`);
   const cred = await getCredential();
   messages = sanitiseMessages(messages);
 
@@ -822,34 +937,148 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
   const authMode = cred.authToken ? `oauth` : 'apikey';
   console.log(`[claude] model: ${resolvedModel}  auth: ${authMode}`);
 
-  const params = {
+  // Augment the system prompt with browser context if the panel is open.
+  // This makes Claude aware that there's a live page the user is looking at,
+  // even without it calling any tools yet.
+  let effectiveSystem = systemPrompt || '';
+  const hasBrowser = !!(global.ccmBrowser?.isAvailable());
+  if (hasBrowser) {
+    const tab = global.ccmBrowser.getActiveTab();
+    if (tab?.url && tab.url !== 'about:blank') {
+      effectiveSystem += (effectiveSystem ? '\n\n' : '')
+        + `# Browser operator context\n`
+        + `The user has an embedded Chromium browser open. Current page:\n`
+        + `- URL:   ${tab.url}\n`
+        + `- Title: ${tab.title || '(untitled)'}\n`
+        + `\nYou have a full toolkit to inspect, navigate, and interact with this page (browser_read_page, browser_get_elements, browser_click, browser_type, browser_screenshot, browser_navigate, browser_scroll, browser_nav, browser_get_state). Call them whenever the user asks about, references, or implies the page they're looking at — you don't need permission to read it.`;
+    } else {
+      effectiveSystem += (effectiveSystem ? '\n\n' : '')
+        + `The user has an embedded browser panel open but no page is loaded yet. You can call browser_navigate to open one if relevant.`;
+    }
+  }
+
+  const baseParams = {
     model:      resolvedModel,
     max_tokens: 8192,
-    messages,
     stream:     true,
   };
-  if (systemPrompt) params.system = systemPrompt;
+  if (effectiveSystem) baseParams.system = effectiveSystem;
+  if (hasBrowser) baseParams.tools = BROWSER_TOOLS;
+
+  let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0;
+  let fullText = '';
+  let currentMessages = messages;
 
   try {
-    const stream = await client.messages.create(params);
-    let fullText = '', inputTokens = 0, outputTokens = 0, cacheReadTokens = 0;
+    // ── Tool-use loop ──
+    // The SDK streams blocks of either text or tool_use. When the model
+    // requests tools (stop_reason === 'tool_use') we execute them locally,
+    // append a `user` turn with the tool_result blocks, then call again.
+    // Bounded to 15 turns so a runaway agent can't burn the user's quota.
+    const MAX_TURNS = 15;
+    let turn = 0;
+    while (turn++ < MAX_TURNS) {
+      const stream = await client.messages.create({ ...baseParams, messages: currentMessages });
 
-    for await (const chunk of stream) {
-      switch (chunk.type) {
-        case 'content_block_delta':
-          if (chunk.delta.type === 'text_delta') {
-            fullText += chunk.delta.text;
-            safeSend(chunkCh, chunk.delta.text);
+      const turnContent = []; // accumulated blocks for THIS assistant turn
+      let cur = null;          // currently-streaming block
+      let stopReason = null;
+
+      for await (const chunk of stream) {
+        switch (chunk.type) {
+          case 'message_start': {
+            const u = chunk.message?.usage || {};
+            inputTokens     += u.input_tokens              ?? 0;
+            cacheReadTokens += u.cache_read_input_tokens   ?? 0;
+            break;
           }
-          break;
-        case 'message_start': {
-          const u = chunk.message?.usage || {};
-          inputTokens      = u.input_tokens              ?? 0;
-          cacheReadTokens  = u.cache_read_input_tokens   ?? 0;
-          break;
+          case 'content_block_start': {
+            const block = chunk.content_block;
+            if (block.type === 'text') {
+              cur = { type: 'text', text: '' };
+            } else if (block.type === 'tool_use') {
+              cur = { type: 'tool_use', id: block.id, name: block.name, _input: '' };
+              // Surface in the chat as a "Using browser_navigate" chip
+              sendActivity({ type: 'tool', tool: block.name });
+            }
+            break;
+          }
+          case 'content_block_delta': {
+            const d = chunk.delta;
+            if (d.type === 'text_delta' && cur?.type === 'text') {
+              cur.text += d.text;
+              fullText += d.text;
+              safeSend(chunkCh, d.text);
+            } else if (d.type === 'input_json_delta' && cur?.type === 'tool_use') {
+              cur._input += d.partial_json;
+            }
+            break;
+          }
+          case 'content_block_stop': {
+            if (cur?.type === 'tool_use') {
+              try { cur.input = JSON.parse(cur._input || '{}'); }
+              catch { cur.input = {}; }
+              delete cur._input;
+            }
+            if (cur) turnContent.push(cur);
+            cur = null;
+            break;
+          }
+          case 'message_delta': {
+            outputTokens += chunk.usage?.output_tokens ?? 0;
+            if (chunk.delta?.stop_reason) stopReason = chunk.delta.stop_reason;
+            break;
+          }
         }
-        case 'message_delta':  outputTokens = chunk.usage?.output_tokens ?? 0; break;
       }
+
+      // If the model finished naturally, we're done.
+      if (stopReason !== 'tool_use') break;
+
+      // Execute every tool_use block in this turn — push results back as a user message.
+      const toolResults = [];
+      for (const block of turnContent) {
+        if (block.type !== 'tool_use') continue;
+        try {
+          const result = await _executeBrowserTool(block.name, block.input || {});
+          // Special-case screenshots: send the image AS the tool_result content
+          // so the model can SEE the page, not just read about it.
+          if (block.name === 'browser_screenshot' && result?.base64) {
+            toolResults.push({
+              type:        'tool_result',
+              tool_use_id: block.id,
+              content: [
+                { type: 'image',
+                  source: { type: 'base64', media_type: result.mediaType || 'image/jpeg', data: result.base64 } },
+                { type: 'text', text: `Screenshot · ${result.url || ''} · ${result.title || ''}` },
+              ],
+            });
+          } else {
+            toolResults.push({
+              type:        'tool_result',
+              tool_use_id: block.id,
+              content:     typeof result === 'string' ? result : JSON.stringify(result),
+            });
+          }
+        } catch (e) {
+          console.warn('[browser-tool] error:', block.name, e.message);
+          toolResults.push({
+            type:        'tool_result',
+            tool_use_id: block.id,
+            content:     'Tool error: ' + e.message,
+            is_error:    true,
+          });
+        }
+      }
+
+      // Build messages for the next turn — preserve the assistant's full turn
+      // (text + tool_use blocks) and append the user's tool_result turn.
+      currentMessages = [
+        ...currentMessages,
+        { role: 'assistant', content: turnContent },
+        { role: 'user',      content: toolResults },
+      ];
+      // Loop will run again with the augmented conversation.
     }
 
     const donePayload = { inputTokens, outputTokens, cacheReadTokens, model: resolvedModel };
