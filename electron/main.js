@@ -821,6 +821,19 @@ ipcMain.handle('browser:devtools', (_, { viewId }) => {
   return { ok: true };
 });
 
+// Fast path — single-IPC bulk hide of ALL browser views in this window.
+// Used by renderer when a modal/menu/drag is about to obscure the area.
+// Cheaper than setBounds because we skip the coord math.
+ipcMain.handle('browser:hide-all', (event) => {
+  const ownerWin = BrowserWindow.fromWebContents(event.sender);
+  for (const entry of _browserViews.values()) {
+    if (entry.win === ownerWin) {
+      try { entry.view.setVisible(false); } catch (_) {}
+    }
+  }
+  return { ok: true };
+});
+
 ipcMain.handle('browser:close', (_, viewId) => {
   const entry = _browserViews.get(viewId);
   if (!entry) return { ok: false };

@@ -6420,14 +6420,22 @@ function _browserAnyModalVisible() {
     '.kanban-modal, ' +
     '.chat-ctx-menu, ' +
     '.dock-ctx-menu, ' +
+    '.ctx-submenu.is-open, ' +
     '#ctxmenu:not(.hidden), ' +
     '#ctxsub:not(.hidden)'
   );
   for (const el of candidates) {
     // Skip the browser panel's OWN UI even if it has these classes
     if (el.closest('[data-browser-root]')) continue;
-    const cs = el.style.display || getComputedStyle(el).display;
-    if (cs && cs !== 'none' && el.offsetParent !== null) return true;
+    // Use computed style + bounding rect — `offsetParent` returns null for
+    // `position: fixed` elements (which is what all modals/menus are), so the
+    // old `offsetParent !== null` check was always false. getBoundingClientRect
+    // works regardless of positioning model.
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    return true;
   }
   return false;
 }
@@ -6437,9 +6445,15 @@ function _browserSuspendViews() {
   if (!api || !_browser.activeId) return;
   if (_browser.suspended) return;
   _browser.suspended = true;
-  // Park every view off-screen so the renderer's modals (HTML) draw freely
-  for (const t of _browser.tabs) {
-    api.setBounds(t.viewId, -10000, -10000, 1, 1, false);
+  // Single bulk-IPC: tell main "hide ALL my browser views right now" — that's
+  // one round-trip instead of N. Falls back to per-tab setBounds if the new
+  // hideAll API isn't available (older preload).
+  if (typeof api.hideAll === 'function') {
+    api.hideAll();
+  } else {
+    for (const t of _browser.tabs) {
+      api.setBounds(t.viewId, -10000, -10000, 1, 1, false);
+    }
   }
 }
 

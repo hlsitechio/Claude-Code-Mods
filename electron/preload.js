@@ -227,6 +227,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     create:    (opts)                         => ipcRenderer.invoke('browser:create', opts || {}),
     setBounds: (viewId, x, y, width, height, visible) =>
                                                  ipcRenderer.invoke('browser:set-bounds', { viewId, x, y, width, height, visible }),
+    hideAll:   ()                             => ipcRenderer.invoke('browser:hide-all'),
     loadUrl:   (viewId, url)                  => ipcRenderer.invoke('browser:load-url', { viewId, url }),
     nav:       (viewId, action)               => ipcRenderer.invoke('browser:nav', { viewId, action }),
     devtools:  (viewId)                       => ipcRenderer.invoke('browser:devtools', { viewId }),
