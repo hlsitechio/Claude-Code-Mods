@@ -6397,7 +6397,54 @@ function _browserPanelCleanup() {
   _browser.cleanups = [];
   try { _browser.resizeObserver?.disconnect(); } catch (_) {}
   _browser.resizeObserver = null;
+  _browser.modalObserver?.disconnect();
+  _browser.modalObserver = null;
   _browser.mounted = false;
+  _browser.suspended = false;
+}
+
+// WebContentsView is a NATIVE Chromium layer drawn ON TOP of the HTML — it
+// can't be z-indexed under a modal. To make modals (kanban edit task, code
+// preview, profile, etc.) actually overlap the browser, we yank the view
+// off-screen whenever any modal is visible, then restore when none are.
+function _browserAnyModalVisible() {
+  // Selectors for any HTML element that should overlap the browser view.
+  // Full-window modals are mandatory. Tiny floating menus (chat-ctx-menu,
+  // dock-ctx-menu) are ALSO included because they pop up over the viewport
+  // and would otherwise be drawn UNDER the WebContentsView.
+  const candidates = document.querySelectorAll(
+    '.modal:not(.hidden), ' +
+    '.kanban-modal, ' +
+    '.chat-ctx-menu, ' +
+    '.dock-ctx-menu, ' +
+    '#ctxmenu:not(.hidden), ' +
+    '#ctxsub:not(.hidden)'
+  );
+  for (const el of candidates) {
+    // Skip the browser panel's OWN UI even if it has these classes
+    if (el.closest('[data-browser-root]')) continue;
+    const cs = el.style.display || getComputedStyle(el).display;
+    if (cs && cs !== 'none' && el.offsetParent !== null) return true;
+  }
+  return false;
+}
+
+function _browserSuspendViews() {
+  const api = window.electronAPI?.browser;
+  if (!api || !_browser.activeId) return;
+  if (_browser.suspended) return;
+  _browser.suspended = true;
+  // Park every view off-screen so the renderer's modals (HTML) draw freely
+  for (const t of _browser.tabs) {
+    api.setBounds(t.viewId, -10000, -10000, 1, 1, false);
+  }
+}
+
+function _browserResumeViews() {
+  if (!_browser.suspended) return;
+  if (_browserAnyModalVisible()) return; // still blocked
+  _browser.suspended = false;
+  _browser._repositionActive?.();
 }
 
 async function initBrowserPanel(bodyEl) {
@@ -6417,22 +6464,30 @@ async function initBrowserPanel(bodyEl) {
     const viewport = document.getElementById('browser-viewport');
     if (!viewport) return;
     if (!_browser.activeId) return;
+    // If a modal is on top, KEEP the views suspended — modal must win.
+    if (_browser.suspended || _browserAnyModalVisible()) {
+      _browserSuspendViews();
+      return;
+    }
     const r = viewport.getBoundingClientRect();
+    // Also bail if the viewport is hidden (panel collapsed, dockview tab inactive)
+    if (r.width < 4 || r.height < 4) return;
     // Convert viewport coords → BrowserWindow content area coords.
-    // window.scrollY is always 0 in Electron, but use defensively.
     api.setBounds(_browser.activeId,
       r.left + window.scrollX,
       r.top  + window.scrollY,
       r.width, r.height,
       true,
     );
-    // Hide all other tabs by parking them off-screen invisibly
+    // Park all OTHER tabs off-screen invisibly
     for (const t of _browser.tabs) {
       if (t.viewId !== _browser.activeId) {
         api.setBounds(t.viewId, -10000, -10000, 1, 1, false);
       }
     }
   }
+  // Expose so suspend/resume can call it
+  _browser._repositionActive = repositionActive;
 
   // ── Re-render only the toolbar + tab strip (DON'T rebuild the viewport
   //     div — that would trigger a layout shift and confuse the WebContentsView)
@@ -6562,6 +6617,35 @@ async function initBrowserPanel(bodyEl) {
   // Also reposition on any window resize (covers Electron window resize too)
   window.addEventListener('resize', repositionActive);
   _browser.cleanups.push(() => window.removeEventListener('resize', repositionActive));
+
+  // ── Modal overlap fix: hide views whenever HTML modals are visible ────
+  // WebContentsView is a native layer drawn ABOVE the renderer's HTML, so a
+  // modal (kanban edit task, code preview, profile, etc.) is invisible
+  // unless we park the view off-screen first. We use MutationObserver to
+  // catch every class/style/attribute change anywhere under <body>.
+  _browser.modalObserver?.disconnect();
+  const evaluateOverlap = () => {
+    if (_browserAnyModalVisible()) _browserSuspendViews();
+    else                            _browserResumeViews();
+  };
+  _browser.modalObserver = new MutationObserver(() => requestAnimationFrame(evaluateOverlap));
+  _browser.modalObserver.observe(document.body, {
+    subtree:        true,
+    attributes:     true,
+    attributeFilter:['class', 'style', 'hidden', 'aria-hidden'],
+    childList:      true, // catches new modals being mounted
+  });
+
+  // Also yank the view on window blur (other app focused) so it doesn't
+  // float over the user's other windows.
+  const onBlur  = () => _browserSuspendViews();
+  const onFocus = () => evaluateOverlap();
+  window.addEventListener('blur',  onBlur);
+  window.addEventListener('focus', onFocus);
+  _browser.cleanups.push(() => {
+    window.removeEventListener('blur',  onBlur);
+    window.removeEventListener('focus', onFocus);
+  });
 
   // Open a starter tab so the panel isn't empty on first mount
   if (_browser.tabs.length === 0) {
