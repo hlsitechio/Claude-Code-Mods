@@ -939,8 +939,19 @@
       if (_openSub) { _openSub.classList.remove('is-open'); _openSub = null; }
     }
 
-    // Right-click on main-dock (but not on sidebar)
+    // Right-click on main-dock (but not on sidebar).
+    // Skip when the click is inside the chat conversation, composer, or any
+    // panel that has its own contextmenu (terminal, kanban modal, etc.) — those
+    // surfaces handle their own copy/paste/menu UX.
     dockEl.addEventListener('contextmenu', e => {
+      if (e.target.closest(
+        '.msg, #composer-input, .chat-conversation, ' +
+        '.xterm, .xterm-helpers, .xterm-screen, ' +
+        '.kanban-modal, .kanban__cards, .task-card'
+      )) {
+        // Let the surface-specific handler take it; bail without showing the dock menu.
+        return;
+      }
       e.preventDefault();
       const vw = window.innerWidth, vh = window.innerHeight;
 
