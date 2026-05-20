@@ -494,6 +494,10 @@
 
   const _XTERM_THEME = {
     background:'#0e0e10', foreground:'#d4d4da', cursor:'#d97757', cursorAccent:'#0e0e10',
+    // Windows Terminal / PowerShell-style blue selection highlight.
+    // selectionBackground is opaque blue; selectionForeground keeps text readable.
+    selectionBackground:'#264f78', selectionForeground:'#ffffff',
+    selectionInactiveBackground:'#1f3a55',
     black:'#141416', red:'#e06c75', green:'#7ab389', yellow:'#c9a96e',
     blue:'#6a86c3', magenta:'#c678dd', cyan:'#56b6c2', white:'#abb2bf',
     brightBlack:'#5a5a63', brightRed:'#e06c75', brightGreen:'#98c379',
@@ -558,6 +562,68 @@
         const offExit  = api.terminal.onExit(termId, code =>
           term.write(`\r\n\x1b[2m[process exited ${code}]\x1b[0m\r\n`));
         const offInput = term.onData(d => api.terminal.input(termId, d));
+
+        // ── Windows Terminal-style keyboard shortcuts ───────────────────────
+        // Ctrl+Shift+C → copy selection (doesn't conflict with SIGINT)
+        // Ctrl+Shift+V → paste from clipboard
+        // Ctrl+Insert  → copy selection (alternate)
+        // Shift+Insert → paste (alternate)
+        // Bare Ctrl+C also copies WHEN there's a selection (Windows convention) —
+        // if no selection, Ctrl+C falls through to xterm/PTY and sends SIGINT.
+        term.attachCustomKeyEventHandler((e) => {
+          if (e.type !== 'keydown') return true;
+          const ctrl  = e.ctrlKey || e.metaKey;
+          const shift = e.shiftKey;
+          const k     = e.key;
+          // Copy
+          if (
+            (ctrl && shift && (k === 'C' || k === 'c')) ||
+            (ctrl && k === 'Insert') ||
+            (ctrl && !shift && (k === 'C' || k === 'c') && term.hasSelection())
+          ) {
+            const text = term.getSelection();
+            if (text) {
+              navigator.clipboard.writeText(text).catch(() => {});
+              term.clearSelection();
+              window.showToast?.('Copied · ' + text.length + ' chars', 'success', 1200);
+            }
+            return false; // swallow the chord — don't send to PTY
+          }
+          // Paste
+          if (
+            (ctrl && shift && (k === 'V' || k === 'v')) ||
+            (shift && k === 'Insert')
+          ) {
+            navigator.clipboard.readText().then(text => {
+              if (text) api.terminal.input(termId, text);
+            }).catch(() => {});
+            return false;
+          }
+          // Select all — Ctrl+Shift+A is the standard terminal binding
+          if (ctrl && shift && (k === 'A' || k === 'a')) {
+            term.selectAll();
+            return false;
+          }
+          return true;
+        });
+
+        // ── Right-click behavior (Windows Terminal / PowerShell style) ──────
+        // - Selection present → copy + clear + toast (no menu)
+        // - No selection      → paste from clipboard at cursor
+        wrap.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (term.hasSelection()) {
+            const text = term.getSelection();
+            navigator.clipboard.writeText(text).catch(() => {});
+            term.clearSelection();
+            window.showToast?.('Copied · ' + text.length + ' chars', 'success', 1200);
+          } else {
+            navigator.clipboard.readText().then(text => {
+              if (text) api.terminal.input(termId, text);
+            }).catch(() => {});
+          }
+        });
 
         // Wire resize: when xterm reflows, tell the PTY so line-wrapping matches
         const ro = new ResizeObserver(() => {
