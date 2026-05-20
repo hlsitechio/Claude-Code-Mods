@@ -412,12 +412,38 @@ const EFFORT_MAP = {
 // Uses --output-format stream-json --verbose so we get session_id and incremental text.
 // cliSessionId (if set) is passed as --resume so the CLI maintains conversation context.
 // opts: { effort, sessionName, addDirs, maxBudget }
+// ── Browser context for the system prompt ──────────────────────────────────
+// Generates a small markdown block that tells Claude about the embedded
+// browser, the current page, and how the user can switch to Direct mode for
+// full control. Returns '' if no browser is open.
+function buildBrowserContext() {
+  const op = global.ccmBrowser;
+  if (!op?.isAvailable()) return '';
+  const tab = op.getActiveTab();
+  if (!tab?.url || tab.url === 'about:blank') {
+    return `\n\n# Embedded browser\nThe user has the Browser panel open but no page is loaded yet. They can type a URL into the address bar.`;
+  }
+  return `\n\n# Embedded browser
+The user has a Chromium browser panel open showing:
+- **URL:**   ${tab.url}
+- **Title:** ${tab.title || '(untitled)'}
+
+You don't have direct browser tools in this conversation (CLI mode). If the user wants you to *control* the browser (navigate, click, read DOM, screenshot), tell them to switch to **Direct API mode** via the model menu — the embedded operator tools are auto-injected there. You can still read the page via your normal WebFetch tool if the URL is publicly accessible.`;
+}
+
 async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode, requestId, opts = {}) {
   // Determine per-stream IPC channel suffix ('' = legacy main-chat channel)
   const rid = requestId || '';
   const chunkCh = rid ? `claude:chunk:${rid}` : 'claude:chunk';
   const doneCh  = rid ? `claude:done:${rid}`  : 'claude:done';
   const todoCh  = rid ? `claude:todo-update:${rid}` : 'claude:todo-update';
+
+  // Augment system prompt with browser context — Claude needs to know that
+  // an embedded browser is open even when not in Direct mode.
+  const browserCtx = buildBrowserContext();
+  if (browserCtx) {
+    systemPrompt = (systemPrompt || '') + browserCtx;
+  }
   // Guard: the renderer window may be destroyed by the time async callbacks fire
   const safeSend = (ch, payload) => {
     try {
@@ -937,23 +963,24 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
   const authMode = cred.authToken ? `oauth` : 'apikey';
   console.log(`[claude] model: ${resolvedModel}  auth: ${authMode}`);
 
-  // Augment the system prompt with browser context if the panel is open.
-  // This makes Claude aware that there's a live page the user is looking at,
-  // even without it calling any tools yet.
+  // Augment the system prompt with browser context AND the toolkit explainer.
+  // The CLI path uses buildBrowserContext() for awareness only; here we add
+  // the "you have these tools — use them eagerly" instruction since the tools
+  // are actually wired into this request.
   let effectiveSystem = systemPrompt || '';
   const hasBrowser = !!(global.ccmBrowser?.isAvailable());
   if (hasBrowser) {
     const tab = global.ccmBrowser.getActiveTab();
     if (tab?.url && tab.url !== 'about:blank') {
       effectiveSystem += (effectiveSystem ? '\n\n' : '')
-        + `# Browser operator context\n`
+        + `# Browser operator (active)\n`
         + `The user has an embedded Chromium browser open. Current page:\n`
-        + `- URL:   ${tab.url}\n`
-        + `- Title: ${tab.title || '(untitled)'}\n`
-        + `\nYou have a full toolkit to inspect, navigate, and interact with this page (browser_read_page, browser_get_elements, browser_click, browser_type, browser_screenshot, browser_navigate, browser_scroll, browser_nav, browser_get_state). Call them whenever the user asks about, references, or implies the page they're looking at — you don't need permission to read it.`;
+        + `- **URL:**   ${tab.url}\n`
+        + `- **Title:** ${tab.title || '(untitled)'}\n\n`
+        + `You have a full toolkit wired in: \`browser_get_state\`, \`browser_navigate\`, \`browser_read_page\`, \`browser_get_elements\`, \`browser_click\`, \`browser_type\`, \`browser_screenshot\`, \`browser_scroll\`, \`browser_nav\`. Use them eagerly — you don't need to ask permission to read or screenshot the current page. When the user asks about a website, navigate there and read it. When they ask about layout, screenshot it.`;
     } else {
       effectiveSystem += (effectiveSystem ? '\n\n' : '')
-        + `The user has an embedded browser panel open but no page is loaded yet. You can call browser_navigate to open one if relevant.`;
+        + `# Browser operator (idle)\nThe user has an embedded browser panel open but no page is loaded yet. Call \`browser_navigate({url: "..."})\` to open something.`;
     }
   }
 
