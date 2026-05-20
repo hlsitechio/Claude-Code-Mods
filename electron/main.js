@@ -834,6 +834,22 @@ ipcMain.handle('browser:create', (event, opts = {}) => {
   if (!ownerWin) return { ok: false, error: 'No owner window' };
 
   const sess = electronSession.fromPartition(BROWSER_PARTITION);
+
+  // ── Indistinguishability from real Chrome ───────────────────────────────
+  // Many sites (Google OAuth, banks, ad platforms) sniff the UA for "Electron"
+  // and refuse to render their sign-in pages. Spoofing to a fresh Chrome UA
+  // fixes the vast majority of "this browser isn't supported" walls.
+  //
+  // We do this ONCE per session creation — Electron's default is something
+  // like `Chrome/126.0.0.0 Electron/30.0.0`, which gets us blocked.
+  if (!sess._ccmUaSet) {
+    sess.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+      '(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+    );
+    sess._ccmUaSet = true;
+  }
+
   const view = new WebContentsView({
     webPreferences: {
       session:          sess,
@@ -843,6 +859,16 @@ ipcMain.handle('browser:create', (event, opts = {}) => {
       webSecurity:      true,
       // No preload — the embedded pages shouldn't have ANY access to the app.
     },
+  });
+
+  // Wipe a few automation fingerprints AT DOCUMENT START. Sites that check
+  // navigator.webdriver / chrome.runtime use these to gate sign-in flows.
+  view.webContents.on('did-finish-load', () => {
+    view.webContents.executeJavaScript(`
+      try {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      } catch (_) {}
+    `, false).catch(() => {});
   });
 
   const viewId = _nextBrowserViewId++;
@@ -906,6 +932,26 @@ ipcMain.handle('browser:devtools', (_, { viewId }) => {
   if (wc.isDevToolsOpened()) wc.closeDevTools();
   else wc.openDevTools({ mode: 'detach' });
   return { ok: true };
+});
+
+// Escape hatch — when a site refuses to load in our embedded browser
+// (e.g. Google accounts.google.com with strict frame-ancestors policy),
+// the user can one-click pop it open in their real Chrome. Same URL
+// allowlist as setWindowOpenHandler — only http(s) reach the OS.
+ipcMain.handle('browser:open-in-system', (_, { viewId }) => {
+  const entry = _browserViews.get(viewId);
+  if (!entry) return { ok: false, error: 'Unknown view' };
+  const url = entry.view.webContents.getURL();
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return { ok: false, error: 'Refused: only http(s) URLs' };
+    }
+    shell.openExternal(url);
+    return { ok: true, url };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 
 // Fast path — single-IPC bulk hide of ALL browser views in this window.

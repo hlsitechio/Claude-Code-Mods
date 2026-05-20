@@ -231,6 +231,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     loadUrl:   (viewId, url)                  => ipcRenderer.invoke('browser:load-url', { viewId, url }),
     nav:       (viewId, action)               => ipcRenderer.invoke('browser:nav', { viewId, action }),
     devtools:  (viewId)                       => ipcRenderer.invoke('browser:devtools', { viewId }),
+    openInSystem: (viewId)                    => ipcRenderer.invoke('browser:open-in-system', { viewId }),
     close:     (viewId)                       => ipcRenderer.invoke('browser:close', viewId),
     onLoading: (cb) => {
       const handler = (_, data) => cb(data);
