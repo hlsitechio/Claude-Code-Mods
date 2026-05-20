@@ -3,6 +3,35 @@
 var renderIcons = window.renderIcons;
 var ICONS = window.ICONS;
 
+// ── Toast notification system ─────────────────────────────────────────────────
+window.showToast = function(message, type = 'info', duration = 3500) {
+  let stack = document.getElementById('toast-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toast-stack';
+    stack.style.cssText = 'position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:99999;pointer-events:none;';
+    document.body.appendChild(stack);
+  }
+  const t = document.createElement('div');
+  const colors = { info: '#3b82f6', success: '#22c55e', warning: '#f59e0b', error: '#ef4444' };
+  t.style.cssText = `background:rgba(20,20,22,0.95);color:#e7e7ea;padding:9px 14px;border-radius:8px;font-size:13px;
+    border-left:3px solid ${colors[type]||colors.info};box-shadow:0 4px 16px rgba(0,0,0,0.4);
+    pointer-events:auto;max-width:320px;word-break:break-word;
+    animation:toastIn 0.18s ease;opacity:1;transition:opacity 0.25s;`;
+  t.textContent = message;
+  stack.appendChild(t);
+  const remove = () => { t.style.opacity = '0'; setTimeout(() => t.remove(), 280); };
+  t.addEventListener('click', remove);
+  setTimeout(remove, duration);
+};
+// Add keyframe if not already present
+if (!document.getElementById('toast-keyframe')) {
+  const s = document.createElement('style');
+  s.id = 'toast-keyframe';
+  s.textContent = '@keyframes toastIn{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}';
+  document.head.appendChild(s);
+}
+
 // ---------- i18n ----------
 const I18N = {
   'en-US': {
@@ -67,7 +96,8 @@ const I18N = {
     rp_apercu: 'Preview', rp_diff: 'Diff', rp_terminal: 'Terminal',
     rp_fichiers: 'Files', rp_taches: 'Tasks', rp_plan: 'Plan',
     rp_shortcuts: 'Keyboard shortcuts', rp_notes: 'Notes', rp_skills: 'Skills',
-    rp_mcp: 'MCP', rp_git: 'Git', rp_context: 'Context',
+    rp_mcp: 'MCP', rp_git: 'Git', rp_context: 'Context', rp_github: 'GitHub',
+    rp_screenshots: 'Screenshots',
     rp_placeholder: 'placeholder content',
     // Appearance
     theme: 'Theme', font: 'Font',
@@ -118,7 +148,8 @@ const I18N = {
     rp_apercu: 'Aperçu', rp_diff: 'Diff', rp_terminal: 'Terminal',
     rp_fichiers: 'Fichiers', rp_taches: 'Tâches', rp_plan: 'Plan',
     rp_shortcuts: 'Raccourcis clavier',
-    rp_mcp: 'MCP', rp_git: 'Git', rp_context: 'Contexte',
+    rp_mcp: 'MCP', rp_git: 'Git', rp_context: 'Contexte', rp_github: 'GitHub',
+    rp_screenshots: 'Captures',
     rp_placeholder: 'contenu de démonstration',
     theme: 'Thème', font: 'Police',
     th_light: 'Clair', th_dark: 'Sombre', th_system: 'Système',
@@ -711,7 +742,12 @@ function togglePinSession(id) {
 window.__chatHistory = loadSessionMessages(state.activeId);
 
 function switchToSession(id, skipRender = false) {
-  if (id === state.activeId) return;
+  if (id === state.activeId) {
+    // Already active — still re-render the chat in case it was empty
+    // (happens on first load when dockview wasn't ready during startup render)
+    _renderChatForSession(id);
+    return;
+  }
 
   // Persist current session's messages before switching
   saveSessionMessages(state.activeId, window.__chatHistory || []);
@@ -1504,13 +1540,16 @@ document.getElementById('workspace-dock')?.addEventListener('click', async e => 
     document.querySelector(`.ft-node[data-ft-id="${id}"]`)?.classList.toggle('is-open');
     return;
   }
-  // Aperçu toolbar — Reload
+});
+
+// Aperçu toolbar buttons — document-level so they work inside dockview panels
+// (cannot be inside the #workspace-dock handler because that has a .right-panel__body guard)
+document.addEventListener('click', e => {
   if (e.target.closest('#apercu-reload')) {
     const iframe = document.getElementById('apercu-iframe');
     if (iframe) { const src = iframe.srcdoc; iframe.srcdoc = ''; requestAnimationFrame(() => { iframe.srcdoc = src; }); }
     return;
   }
-  // Aperçu toolbar — Fullscreen modal
   if (e.target.closest('#apercu-fullscreen')) {
     const block = getLastRenderableCodeBlock();
     if (block) openCodePreview(block.lang, block.code);
@@ -1557,19 +1596,34 @@ if (savedWidth >= SIDEBAR_MIN && savedWidth <= SIDEBAR_MAX && !sidebarEl.classLi
   _updateTitleOffset();
 }
 
-// Manual resize via drag on the sidebar's inner border edge.
-// Works for both left and right side: we track delta from mouse start.
+// Manual resize via the sidebar-resizer handle OR dragging near the inner edge.
 let _sidebarDrag = null;
-sidebarEl.addEventListener('mousedown', (e) => {
-  const side  = sidebarEl.dataset.sidebarSide || 'left';
-  const rect  = sidebarEl.getBoundingClientRect();
-  const edge  = side === 'left' ? rect.right : rect.left;
-  if (Math.abs(e.clientX - edge) > 6) return;   // only near the inner edge
+
+function _startSidebarDrag(e) {
+  if (sidebarEl.classList.contains('is-collapsed')) return;
   e.preventDefault();
-  _sidebarDrag = { startX: e.clientX, startW: rect.width, side };
+  e.stopPropagation();
+  const side = sidebarEl.dataset.sidebarSide || 'left';
+  _sidebarDrag = { startX: e.clientX, startW: sidebarEl.getBoundingClientRect().width, side };
   sidebarEl.classList.add('is-resizing');
   document.body.classList.add('is-resizing-sidebar');
+}
+
+// Primary: dedicated resizer div
+const sidebarResizerEl = document.getElementById('sidebar-resizer');
+if (sidebarResizerEl) {
+  sidebarResizerEl.addEventListener('mousedown', _startSidebarDrag);
+}
+
+// Fallback: clicking within 8px of the sidebar edge still works
+sidebarEl.addEventListener('mousedown', (e) => {
+  if (e.target === sidebarResizerEl) return; // already handled above
+  const side = sidebarEl.dataset.sidebarSide || 'left';
+  const rect = sidebarEl.getBoundingClientRect();
+  const edge = side === 'left' ? rect.right : rect.left;
+  if (Math.abs(e.clientX - edge) <= 8) _startSidebarDrag(e);
 });
+
 document.addEventListener('mousemove', (e) => {
   if (!_sidebarDrag) return;
   const delta = _sidebarDrag.side === 'left'
@@ -1577,7 +1631,9 @@ document.addEventListener('mousemove', (e) => {
     : _sidebarDrag.startX - e.clientX;
   const w = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, _sidebarDrag.startW + delta));
   sidebarEl.style.width = w + 'px';
+  _updateTitleOffset?.();
 });
+
 document.addEventListener('mouseup', () => {
   if (!_sidebarDrag) return;
   _sidebarDrag = null;
@@ -2041,60 +2097,46 @@ function openUserSubmenu(parentItem) {
   };
 }
 
-// ---------- Slash command menu (triggered by the "/" button in the composer) ----------
+// ---------- Slash command menu (triggered by the "/" button or typing "/" in the composer) ----------
 const SLASH_COMMANDS = [
-  { cmd: '/clear',       desc: 'Clear conversation' },
-  { cmd: '/compact',     desc: 'Summarise + truncate history' },
-  { cmd: '/new',         desc: 'Start a new session' },
-  { cmd: '/model',       desc: 'Switch model' },
-  { cmd: '/permissions', desc: 'Change permission mode' },
-  { cmd: '/cost',        desc: 'Show token usage' },
-  { cmd: '/status',      desc: 'Show session status' },
-  { cmd: '/init',        desc: 'Create a CLAUDE.md' },
-  { cmd: '/doctor',      desc: 'Run diagnostic checks' },
-  { cmd: '/memory',      desc: 'Manage project memory' },
-  { cmd: '/mcp',         desc: 'Manage MCP servers' },
-  { cmd: '/config',      desc: 'Edit settings.json' },
-  { cmd: '/login',       desc: 'Authenticate' },
-  { cmd: '/logout',      desc: 'Sign out' },
-  { cmd: '/help',        desc: 'Show all commands' },
+  // Session
+  { cmd: '/clear',       desc: 'Clear conversation',          icon: '🗑️'  },
+  { cmd: '/compact',     desc: 'Truncate history (keep 8)',   icon: '✂️'  },
+  { cmd: '/new',         desc: 'Start a new session',         icon: '✨'  },
+  { cmd: '/pin',         desc: 'Pin / unpin this session',    icon: '📌'  },
+  // Info
+  { cmd: '/cost',        desc: 'Show token usage',            icon: '💰'  },
+  { cmd: '/status',      desc: 'Show session status',         icon: '📊'  },
+  { cmd: '/help',        desc: 'Show all commands',           icon: '📖'  },
+  // Settings
+  { cmd: '/model',       desc: 'Switch model & effort',       icon: '🤖'  },
+  { cmd: '/permissions', desc: 'Change permission mode',      icon: '🔒'  },
+  { cmd: '/config',      desc: 'Appearance settings',         icon: '🎨'  },
+  // Panels
+  { cmd: '/terminal',    desc: 'Open terminal panel',         icon: '💻'  },
+  { cmd: '/agents',      desc: 'Open AI agents panel',        icon: '🕵️'  },
+  { cmd: '/memory',      desc: 'Manage project memory',       icon: '🧠'  },
+  { cmd: '/mcp',         desc: 'Open MCP tools panel',        icon: '🔌'  },
+  // Auth & tools
+  { cmd: '/init',        desc: 'Create a CLAUDE.md',          icon: '📝'  },
+  { cmd: '/pr',          desc: 'Start from GitHub PR (--from-pr)', icon: '🔗' },
+  { cmd: '/doctor',      desc: 'Run diagnostics',             icon: '🩺'  },
+  { cmd: '/login',       desc: 'Authenticate',                icon: '🔑'  },
+  { cmd: '/logout',      desc: 'Sign out',                    icon: '👋'  },
 ];
 const slashBtn = document.getElementById('slash-btn');
 slashBtn?.addEventListener('click', (e) => {
   e.stopPropagation();
-  showSlashMenu(slashBtn);
-});
-function showSlashMenu(anchor) {
-  ctx.innerHTML = `
-    <div class="slash-menu">
-      ${SLASH_COMMANDS.map(c => `
-        <button data-slash="${escapeHTML(c.cmd)}" class="slash-row">
-          <span class="slash-row__cmd">${escapeHTML(c.cmd)}</span>
-          <span class="slash-row__desc">${escapeHTML(c.desc)}</span>
-        </button>`).join('')}
-    </div>
-  `;
-  ctx.classList.remove('hidden');
-  const r = anchor.getBoundingClientRect();
-  const cRect = ctx.getBoundingClientRect();
-  let left = r.left;
-  left = Math.max(8, Math.min(left, window.innerWidth - cRect.width - 8));
-  let top = r.top - cRect.height - 8;
-  if (top < 8) top = r.bottom + 8;
-  ctx.style.left = left + 'px';
-  ctx.style.top  = top + 'px';
-  ctx.onclick = (ev) => {
-    const btn = ev.target.closest('button[data-slash]');
-    if (!btn) return;
-    const input = document.getElementById('composer-input');
-    if (input) {
-      input.value = btn.dataset.slash + ' ';
-      input.focus();
-      input.dispatchEvent(new Event('input', { bubbles: true }));    // trigger autoGrow
+  // Unify with the inline flow: focus composer and insert "/" to trigger the autocomplete menu
+  const input = document.getElementById('composer-input');
+  if (input) {
+    input.focus();
+    if (!input.value.startsWith('/')) {
+      input.value = '/';
+      input.dispatchEvent(new Event('input', { bubbles: true }));  // triggers inline menu + autoGrow
     }
-    hideCtx();
-  };
-}
+  }
+});
 
 // ---------- Hints visibility (the "Type / for commands" line under the greeting) ----------
 const hintsState = { showCommandHint: localStorage.getItem('ccmod.hints.cmd') !== '0' };
@@ -4465,9 +4507,10 @@ document.addEventListener('click', (e) => {
     if (currentRightPanel === 'apercu') {
       const bodyEl = document.getElementById('right-panel-body');
       if (bodyEl) {
+        _apercuROCleanup(bodyEl);
         bodyEl.innerHTML = renderApercuPanel();
         loadPhosphorIcons?.();
-        requestAnimationFrame(() => initApercuScaling(bodyEl));
+        requestAnimationFrame(() => { initApercuScaling(bodyEl); initApercuServer(bodyEl); });
       }
     }
     return;
@@ -4846,6 +4889,46 @@ function showPermMenu(anchor) {
   };
 }
 
+// ── Image normalise helper (used by attach menu before initLiveChat runs) ────
+// Calls window.__addPendingImage if initLiveChat has run, otherwise re-encodes
+// via canvas and injects directly once the IIFE sets up the global.
+function _normaliseAndAddImage(blob, rawType) {
+  const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+  const mediaType = (rawType || '').toLowerCase();
+  const enqueue = (dataUrl, mt) => {
+    if (window.__addPendingImage) {
+      window.__addPendingImage(dataUrl, mt);
+    } else {
+      // initLiveChat hasn't run yet — schedule for when it does
+      window.__pendingAttachImages = window.__pendingAttachImages || [];
+      window.__pendingAttachImages.push({ dataUrl, mediaType: mt });
+    }
+  };
+  if (ALLOWED.has(mediaType)) {
+    const r = new FileReader();
+    r.onload = () => enqueue(r.result, mediaType);
+    r.readAsDataURL(blob);
+    return;
+  }
+  // Re-encode to PNG via canvas
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+    enqueue(canvas.toDataURL('image/png'), 'image/png');
+  };
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    const r = new FileReader();
+    r.onload = () => enqueue(r.result, 'image/png');
+    r.readAsDataURL(blob);
+  };
+  img.src = url;
+}
+
 // ---------- Composer: attach (+) dropdown ----------
 const attachBtn = document.getElementById('attach-btn');
 const attachOptions = [
@@ -4869,16 +4952,265 @@ attachBtn?.addEventListener('click', (e) => {
   ctx.onclick = (ev) => {
     const btn = ev.target.closest('button[data-attach]');
     if (!btn) return;
-    console.log('[stub] attach:', btn.dataset.attach);
+    const type = btn.dataset.attach;
     hideCtx();
+
+    switch (type) {
+
+      // ── Screenshot / computer vision ──────────────────────────────────────
+      case 'computer': {
+        const fi = document.createElement('input');
+        fi.type = 'file'; fi.accept = 'image/*'; fi.multiple = true;
+        fi.onchange = () => {
+          Array.from(fi.files || []).forEach(file => {
+            _normaliseAndAddImage(file, file.type);
+          });
+          document.getElementById('composer-input')?.focus();
+        };
+        fi.click();
+        break;
+      }
+
+      // ── Attach files (read content into context) ─────────────────────────
+      case 'files': {
+        const fi = document.createElement('input');
+        fi.type = 'file'; fi.multiple = true;
+        fi.accept = '.txt,.md,.js,.ts,.jsx,.tsx,.py,.rs,.go,.java,.c,.cpp,.h,.css,.html,.json,.yaml,.yml,.toml,.sh,.bash,.sql,.xml,.csv';
+        fi.onchange = async () => {
+          const inp = document.getElementById('composer-input');
+          const files = Array.from(fi.files || []);
+          for (const file of files) {
+            try {
+              const text = await file.text();
+              const ext  = file.name.split('.').pop() || 'txt';
+              const block = `\`\`\`${ext}\n// ${file.name}\n${text}\n\`\`\``;
+              if (inp) {
+                inp.value = inp.value ? inp.value + '\n\n' + block : block;
+                inp.style.height = '';
+                inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+              }
+            } catch (err) {
+              showToast?.(`Could not read ${file.name}: ${err.message}`, 'error');
+            }
+          }
+          inp?.focus();
+        };
+        fi.click();
+        break;
+      }
+
+      // ── Image paste / upload ──────────────────────────────────────────────
+      case 'image': {
+        const fi = document.createElement('input');
+        fi.type = 'file'; fi.accept = 'image/*'; fi.multiple = true;
+        fi.onchange = () => {
+          Array.from(fi.files || []).forEach(file => {
+            _normaliseAndAddImage(file, file.type);
+          });
+          document.getElementById('composer-input')?.focus();
+        };
+        fi.click();
+        break;
+      }
+
+      // ── GitHub PR / repo context ──────────────────────────────────────────
+      case 'github': {
+        _showGithubAttachModal();
+        break;
+      }
+
+      // ── Add context (@mention) ───────────────────────────────────────────
+      case 'context': {
+        // Insert @ at cursor to trigger @-mention flow
+        const cinp = document.getElementById('composer-input');
+        if (!cinp) break;
+        const cur = cinp.value;
+        const pos = cinp.selectionStart || cur.length;
+        cinp.value = cur.slice(0, pos) + '@' + cur.slice(pos);
+        cinp.setSelectionRange(pos + 1, pos + 1);
+        cinp.focus();
+        // Trigger input event so any autocomplete picks it up
+        cinp.dispatchEvent(new Event('input'));
+        break;
+      }
+
+      // ── MCP tool ─────────────────────────────────────────────────────────
+      case 'mcp': {
+        // Open MCP panel so the user can pick / configure a tool
+        if (typeof setRightPanelTab === 'function') setRightPanelTab('mcp');
+        else window.Workspace?.activatePanel?.('mcp');
+        break;
+      }
+    }
   };
 });
+
+// ── GitHub attach modal ───────────────────────────────────────────────────────
+// Lets the user paste a PR URL (→ --from-pr) or a repo URL/branch
+// (→ prepends a context block to the composer message).
+function _showGithubAttachModal() {
+  // Remove any stale modal
+  document.getElementById('gh-attach-modal')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'gh-attach-modal';
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box" style="max-width:440px">
+      <div class="modal-box__head">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="opacity:.7">
+          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+        </svg>
+        <span>GitHub context</span>
+        <button class="modal-close" id="gh-modal-close">×</button>
+      </div>
+      <div class="modal-body" style="padding:16px;display:flex;flex-direction:column;gap:12px">
+        <div class="gh-attach-tabs" id="gh-tabs">
+          <button class="gh-tab is-active" data-tab="pr">Pull Request</button>
+          <button class="gh-tab" data-tab="repo">Repo / File</button>
+        </div>
+
+        <!-- PR tab -->
+        <div id="gh-tab-pr">
+          <p style="font-size:12px;color:#8a8a92;margin:0 0 8px">
+            Paste a PR URL or number. Claude will fetch the diff and review context via <code>--from-pr</code>.
+          </p>
+          <input id="gham-pr-input" class="modal-input" placeholder="https://github.com/owner/repo/pull/123 or 123" autocomplete="off" />
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button class="modal-btn modal-btn--primary" id="gh-pr-submit">Load PR into session</button>
+          </div>
+        </div>
+
+        <!-- Repo / File tab -->
+        <div id="gh-tab-repo" style="display:none">
+          <p style="font-size:12px;color:#8a8a92;margin:0 0 8px">
+            Paste a GitHub file or repo URL to fetch its content and inject it as context.
+          </p>
+          <input id="gham-repo-input" class="modal-input" placeholder="https://github.com/owner/repo/blob/main/file.ts" autocomplete="off" />
+          <div style="margin-top:4px;font-size:11px;color:#5a5a6a">
+            Or enter <code>owner/repo</code> for the README / repo summary.
+          </div>
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button class="modal-btn modal-btn--primary" id="gh-repo-submit">Fetch & insert context</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+
+  // Tab switching
+  overlay.querySelectorAll('.gh-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      overlay.querySelectorAll('.gh-tab').forEach(t => t.classList.remove('is-active'));
+      tab.classList.add('is-active');
+      overlay.querySelector('#gh-tab-pr').style.display   = tab.dataset.tab === 'pr'   ? '' : 'none';
+      overlay.querySelector('#gh-tab-repo').style.display = tab.dataset.tab === 'repo' ? '' : 'none';
+    });
+  });
+
+  // Close
+  const closeModal = () => overlay.remove();
+  overlay.querySelector('#gh-modal-close').addEventListener('click', closeModal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
+  document.addEventListener('keydown', function escClose(e) {
+    if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escClose); }
+  });
+
+  // ── PR submit (button + Enter key) ──
+  const prSubmit = () => {
+    const val = overlay.querySelector('#gham-pr-input').value.trim();
+    if (!val) { showToast?.('Enter a PR URL or number', 'warning'); return; }
+    window.__fromPr = val; closeModal();
+    showToast?.(`PR context set: ${val}`, 'success', 3000);
+    document.getElementById('composer-input')?.focus();
+    const inp = document.getElementById('composer-input');
+    if (inp && !inp.value) {
+      const orig = inp.placeholder;
+      inp.setAttribute('data-orig-placeholder', orig);
+      inp.placeholder = `PR loaded — describe what to review or fix…`;
+      setTimeout(() => { inp.placeholder = inp.getAttribute('data-orig-placeholder') || orig; inp.removeAttribute('data-orig-placeholder'); }, 8000);
+    }
+  };
+  overlay.querySelector('#gh-pr-submit').addEventListener('click', prSubmit);
+  overlay.querySelector('#gham-pr-input').addEventListener('keydown', e => { if (e.key === 'Enter') prSubmit(); });
+
+  // ── Repo / file submit ──
+  const repoSubmit = async () => {
+    const val = overlay.querySelector('#gham-repo-input').value.trim();
+    if (!val) { showToast?.('Enter a GitHub URL or owner/repo', 'warning'); return; }
+
+    const btn = overlay.querySelector('#gh-repo-submit');
+    btn.textContent = 'Fetching…'; btn.disabled = true;
+
+    try {
+      const content = await _fetchGithubContent(val);
+      const inp = document.getElementById('composer-input');
+      if (inp) {
+        // Guess language from URL extension
+        const ext = val.split('.').pop().split('?')[0] || 'text';
+        const lang = ['ts','tsx','js','jsx','py','rs','go','java','c','cpp','h','css','html','json','yaml','toml','sh','sql'].includes(ext) ? ext : '';
+        const block = `\`\`\`${lang}\n${content}\n\`\`\``;
+        inp.value = inp.value ? inp.value + '\n\n' + block : block;
+        inp.style.height = '';
+        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+        inp.focus();
+      }
+      closeModal();
+      showToast?.('GitHub content inserted', 'success', 2500);
+    } catch (err) {
+      showToast?.(`GitHub fetch failed: ${err.message}`, 'error');
+      btn.textContent = 'Fetch & insert context'; btn.disabled = false;
+    }
+  };
+  overlay.querySelector('#gh-repo-submit').addEventListener('click', repoSubmit);
+  overlay.querySelector('#gham-repo-input').addEventListener('keydown', e => { if (e.key === 'Enter') repoSubmit(); });
+
+  // Focus the first input
+  setTimeout(() => overlay.querySelector('#gham-pr-input')?.focus(), 80);
+}
+
+// ── Fetch GitHub content via raw.githubusercontent.com or GitHub API ──────────
+async function _fetchGithubContent(input) {
+  // Normalise various GitHub URL formats → raw content URL
+  let rawUrl = null;
+  const ghBlobRe = /github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)/;
+  const ghRawRe  = /raw\.githubusercontent\.com\//;
+  const ghRepoRe = /^github\.com\/([^/]+)\/([^/]+)\/?$/;
+  const shortRe  = /^([\w\-\.]+)\/([\w\-\.]+)$/;
+
+  if (ghRawRe.test(input)) {
+    rawUrl = input.startsWith('http') ? input : 'https://' + input;
+  } else if (ghBlobRe.test(input)) {
+    const m = input.match(ghBlobRe);
+    rawUrl = `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}/${m[4]}`;
+  } else if (ghRepoRe.test(input.replace(/^https?:\/\//, ''))) {
+    const m = input.replace(/^https?:\/\//, '').match(ghRepoRe);
+    rawUrl = `https://raw.githubusercontent.com/${m[1]}/${m[2]}/HEAD/README.md`;
+  } else if (shortRe.test(input)) {
+    const m = input.match(shortRe);
+    rawUrl = `https://raw.githubusercontent.com/${m[1]}/${m[2]}/HEAD/README.md`;
+  } else if (input.startsWith('http')) {
+    rawUrl = input; // try as-is
+  } else {
+    throw new Error('Unrecognised format. Use owner/repo or a GitHub file URL.');
+  }
+
+  const res = await fetch(rawUrl);
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${rawUrl}`);
+  const text = await res.text();
+  if (text.length > 40000) {
+    return text.slice(0, 40000) + '\n\n[… truncated at 40 000 chars …]';
+  }
+  return text;
+}
 
 // ---------- Composer: model dropdown ----------
 const modelChipBtn = document.getElementById('model-chip');
 const modelState = {
   currentModel: 'claude-sonnet-4-6',
   currentEffort: 'tres-eleve',
+  directMode: false,   // true = bypass CLI, talk to Anthropic API directly
   models: [
     { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6',  shortcut: '1' },
     { id: 'claude-sonnet-4-5', label: 'Sonnet 4.5',  shortcut: '2' },
@@ -4911,23 +5243,69 @@ function showModelMenu(anchor) {
       ${ef.id === modelState.currentEffort ? iconSVG('check') : '<span style="width:13px"></span>'}
       <span>${escapeHTML(tEffort(ef))}</span>
     </button>`).join('');
+  const budgetVal = window.__maxBudgetUsd != null ? String(window.__maxBudgetUsd) : '';
+  const isDirect = !!modelState.directMode;
   ctx.innerHTML = `
     <div class="ctx-section">
       <div class="ctx-section__head"><span>${t('model') + 's'}</span><span class="ctx-kbd">⇧ Ctrl I</span></div>
       ${m}
     </div>
     <hr/>
+    <div class="ctx-section${isDirect ? ' ctx-section--muted' : ''}">
+      <div class="ctx-section__head"><span>Effort</span><span class="ctx-kbd">⇧ Ctrl E</span></div>
+      ${isDirect ? `<div class="ctx-muted-note">Not used in Direct API mode</div>` : e}
+    </div>
+    <hr/>
     <div class="ctx-section">
-      <div class="ctx-section__head"><span>${t('eff_faible') === 'Low' ? 'Effort' : 'Effort'}</span><span class="ctx-kbd">⇧ Ctrl E</span></div>
-      ${e}
+      <div class="ctx-section__head"><span>Mode</span></div>
+      <button data-section="mode" data-id="cli">
+        ${!isDirect ? iconSVG('check') : '<span style="width:13px"></span>'}
+        <span>Claude Code (CLI)</span>
+      </button>
+      <button data-section="mode" data-id="direct">
+        ${isDirect ? iconSVG('check') : '<span style="width:13px"></span>'}
+        <span>Direct Claude API</span>
+      </button>
+    </div>
+    <hr/>
+    <div class="ctx-section${isDirect ? ' ctx-section--muted' : ''}">
+      <div class="ctx-section__head"><span>Budget cap (USD)</span></div>
+      ${isDirect ? `<div class="ctx-muted-note">Not used in Direct API mode</div>` : `
+      <div class="ctx-budget-row">
+        <span class="ctx-budget-sym">$</span>
+        <input type="number" id="ctx-budget-input" class="ctx-budget-input"
+          placeholder="No limit" min="0" step="0.5"
+          value="${escapeHTML(budgetVal)}" />
+        <button data-section="budget-clear" class="ctx-budget-clear" title="Remove cap">×</button>
+      </div>`}
     </div>
   `;
   openMenuAbove(anchor);
+  // Budget input — update on blur/enter
+  const budgetInput = document.getElementById('ctx-budget-input');
+  if (budgetInput) {
+    const applyBudget = () => {
+      const v = parseFloat(budgetInput.value);
+      window.__maxBudgetUsd = isNaN(v) || v <= 0 ? null : v;
+    };
+    budgetInput.addEventListener('change', applyBudget);
+    budgetInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { applyBudget(); hideCtx(); }
+    });
+  }
   ctx.onclick = (ev) => {
+    if (ev.target.closest('#ctx-budget-input')) return; // don't close on input click
     const btn = ev.target.closest('button[data-section]');
     if (!btn) return;
-    if (btn.dataset.section === 'model') modelState.currentModel = btn.dataset.id;
+    if (btn.dataset.section === 'model')  modelState.currentModel = btn.dataset.id;
     else if (btn.dataset.section === 'effort') modelState.currentEffort = btn.dataset.id;
+    else if (btn.dataset.section === 'mode') {
+      modelState.directMode = (btn.dataset.id === 'direct');
+      syncModelChip();
+      showModelMenu(anchor); // re-render menu so effort/budget sections grey out
+      return;
+    }
+    else if (btn.dataset.section === 'budget-clear') { window.__maxBudgetUsd = null; if (budgetInput) budgetInput.value = ''; return; }
     syncModelChip();
     hideCtx();
   };
@@ -4935,12 +5313,18 @@ function showModelMenu(anchor) {
 function syncModelChip() {
   const mo = modelState.models.find(m => m.id === modelState.currentModel);
   const ef = modelState.efforts.find(m => m.id === modelState.currentEffort);
-  if (!mo || !ef || !modelChipBtn) return;
+  if (!mo || !modelChipBtn) return;
   const parts = mo.label.split(' ');
   const name = parts.slice(0, 2).join(' ');
   const tail = parts.slice(2).join(' ');
   modelChipBtn.querySelector('.model-chip__name').textContent = name;
-  modelChipBtn.querySelector('.model-chip__meta').textContent = (tail ? tail + ' · ' : '') + tEffort(ef);
+  if (modelState.directMode) {
+    modelChipBtn.querySelector('.model-chip__meta').textContent = (tail ? tail + ' · ' : '') + 'Direct';
+    modelChipBtn.classList.add('is-direct');
+  } else {
+    modelChipBtn.querySelector('.model-chip__meta').textContent = (tail ? tail + ' · ' : '') + (ef ? tEffort(ef) : '');
+    modelChipBtn.classList.remove('is-direct');
+  }
 }
 
 // ---------- Context strip: Agent chip ----------
@@ -5140,7 +5524,9 @@ const rightPanelTabs = [
   { id: 'shortcuts', labelKey: 'rp_shortcuts', icon: 'keyboard',     shortcut: 'Ctrl /'   },
   { id: 'mcp',       labelKey: 'rp_mcp',       icon: 'plugs-connected', shortcut: ''      },
   { id: 'git',       labelKey: 'rp_git',       icon: 'git-branch',   shortcut: ''         },
-  { id: 'context',   labelKey: 'rp_context',   icon: 'gauge',        shortcut: ''         },
+  { id: 'github',      labelKey: 'rp_github',      icon: 'github-logo',  shortcut: ''         },
+  { id: 'screenshots', labelKey: 'rp_screenshots', icon: 'camera',       shortcut: ''         },
+  { id: 'context',     labelKey: 'rp_context',     icon: 'gauge',        shortcut: ''         },
 ];
 
 // Keyboard shortcuts reference — rendered inside the right panel when active.
@@ -5224,19 +5610,111 @@ function getLastRenderableCodeBlock() {
 // ---------- Aperçu (Preview) panel ----------
 const RENDERABLE_LANGS = ['html', 'css', 'javascript', 'js', 'jsx', 'tsx', 'react'];
 
+// ── Apercu: shared toolbar HTML ──────────────────────────────────────────────
+function _apercuToolbar({ langLabel = '', addressContent = '', extraBtns = '' } = {}) {
+  const serverUrl = window.__apercuServerUrl || '';
+  const isServing = !!serverUrl;
+  return `
+    <div class="apercu-toolbar">
+      <!-- Row 1: lang badge · address bar · zoom · action buttons -->
+      <div class="apercu-toolbar-row">
+        ${langLabel ? `<span class="apercu-lang-badge">${escapeHTML(langLabel)}</span>` : ''}
+        <!-- Folder / open-local button -->
+        <button class="icon-btn icon-btn--sm apercu-folder-btn${isServing ? ' is-serving' : ''}"
+                id="apercu-open-folder"
+                title="${isServing ? 'Change folder · ' + escapeHTML(serverUrl) : 'Open local folder or URL'}">
+          <i data-phosphor="${isServing ? 'folder-open' : 'folder-simple'}"></i>
+          ${isServing ? '<span class="apercu-server-dot"></span>' : ''}
+        </button>
+        <!-- Address bar -->
+        <div class="apercu-addr-wrap">
+          ${addressContent}
+        </div>
+        ${isServing ? `
+        <button class="icon-btn icon-btn--sm" id="apercu-stop-server" title="Stop local server · eject folder" style="color:#e06c75">
+          <i data-phosphor="eject"></i>
+        </button>` : ''}
+        <!-- Zoom controls -->
+        <div style="display:flex;align-items:center;gap:1px;background:#111114;border:1px solid #1e1e24;border-radius:5px;padding:0 2px">
+          <button class="icon-btn icon-btn--sm" id="apercu-zoom-out"   title="Zoom out (-)"><i data-phosphor="minus"></i></button>
+          <button id="apercu-zoom-label" title="Reset zoom" style="font-size:10.5px;color:#5a5a63;min-width:34px;text-align:center;background:none;border:none;cursor:pointer;padding:2px 3px;border-radius:3px">--</button>
+          <button class="icon-btn icon-btn--sm" id="apercu-zoom-in"    title="Zoom in (+)"><i data-phosphor="plus"></i></button>
+        </div>
+        <button class="icon-btn icon-btn--sm" id="apercu-reload"     title="Reload preview"><i data-phosphor="arrow-clockwise"></i></button>
+        <button class="icon-btn icon-btn--sm" id="apercu-fullscreen" title="Full-screen"><i data-phosphor="arrows-out"></i></button>
+        ${extraBtns}
+      </div>
+      ${isServing ? `
+      <!-- Row 2: server info banner (copy-able URL for agents) -->
+      <div class="apercu-server-banner">
+        <span class="apercu-server-banner__dot"></span>
+        <span style="font-size:10px;font-weight:600;white-space:nowrap">Local server</span>
+        <code class="apercu-server-banner__url" id="apercu-server-url-label" title="Click to copy · ${escapeHTML(serverUrl)}">${escapeHTML(serverUrl)}</code>
+        <button id="apercu-copy-url" class="apercu-server-banner__copy" title="Copy URL for agents">Copy</button>
+        <span class="apercu-server-banner__dir" title="${escapeHTML(window.__apercuServingDir || '')}">
+          ${escapeHTML((window.__apercuServingDir || '').split(/[\\/]/).pop())}
+        </span>
+      </div>` : ''}
+    </div>`;
+}
+
 function renderApercuPanel() {
-  // Explicit override from "Open in panel" button takes priority
+  // ── External URL mode: folder server or user-typed URL ───────────────────
+  const externalUrl = window.__apercuExternalUrl || null;
+  if (externalUrl) {
+    const toolbar = _apercuToolbar({
+      addressContent: `
+        <i data-phosphor="globe" style="color:#6a86c3;font-size:11px;flex-shrink:0"></i>
+        <input id="apercu-url-input" class="apercu-url-input"
+               value="${escapeHTML(externalUrl)}"
+               placeholder="http://localhost:3000"
+               spellcheck="false" autocomplete="off" />
+        <button class="icon-btn icon-btn--sm" id="apercu-url-go" title="Navigate to URL" style="flex-shrink:0">
+          <i data-phosphor="arrow-right"></i>
+        </button>`,
+    });
+    return `
+      <div class="preview-panel preview-panel--external">
+        ${toolbar}
+        <div id="apercu-vp-wrap" style="flex:1;position:relative;overflow:hidden;min-height:0">
+          <iframe id="apercu-iframe"
+                  src="${escapeHTML(externalUrl)}"
+                  style="position:absolute;top:0;left:0;width:1920px;height:1080px;border:none;transform-origin:0 0;background:#0b0b0c">
+          </iframe>
+        </div>
+      </div>`;
+  }
+
+  // ── Claude-generated code preview (original path) ─────────────────────────
   const block = window.__apercuOverride || getLastRenderableCodeBlock() || getLastAnyCodeBlock();
-  // Clear the override after consuming it
   if (window.__apercuOverride) window.__apercuOverride = null;
 
   if (!block) {
+    // Empty state — still show toolbar with folder button
+    const toolbar = _apercuToolbar({
+      addressContent: `
+        <i data-phosphor="globe" style="color:#3a3a42;font-size:11px;flex-shrink:0"></i>
+        <input id="apercu-url-input" class="apercu-url-input"
+               value=""
+               placeholder="http://localhost:3000 or open a folder ↖"
+               spellcheck="false" autocomplete="off" />
+        <button class="icon-btn icon-btn--sm" id="apercu-url-go" title="Go" style="flex-shrink:0">
+          <i data-phosphor="arrow-right"></i>
+        </button>`,
+    });
     return `
-      <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center">
-        <div style="opacity:.25">${iconSVG('eye')}</div>
-        <p style="font-size:13px;color:#5a5a63;margin:0;line-height:1.5">
-          Preview will appear here when Claude generates code.
-        </p>
+      <div class="preview-panel preview-panel--empty" style="display:flex;flex-direction:column;height:100%">
+        ${toolbar}
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:32px;text-align:center">
+          <div style="opacity:.2">${iconSVG('eye')}</div>
+          <p style="font-size:13px;color:#5a5a63;margin:0;line-height:1.6">
+            Preview appears when Claude generates HTML/JSX.<br>
+            Or open a local folder / type a URL above.
+          </p>
+          <button id="apercu-open-folder-hero" class="ctx-btn" style="margin-top:4px;padding:7px 16px;font-size:12px;border-radius:7px;background:#1a1a1d;border:1px solid #2e2e34;color:#a1a1aa;cursor:pointer;display:flex;align-items:center;gap:6px">
+            <i data-phosphor="folder-simple-open"></i> Open local folder
+          </button>
+        </div>
       </div>`;
   }
 
@@ -5248,26 +5726,25 @@ function renderApercuPanel() {
     const doc = buildPreviewSrcDoc(block.lang, block.code);
     const needsNet = ['jsx', 'tsx', 'react'].includes(block.lang);
     const sb = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+    const toolbar = _apercuToolbar({
+      langLabel,
+      addressContent: `
+        <i data-phosphor="circle-wavy-check" style="color:#7ab389;font-size:11px;flex-shrink:0"></i>
+        <input id="apercu-url-input" class="apercu-url-input"
+               value=""
+               placeholder="Navigate to URL…"
+               spellcheck="false" autocomplete="off" />
+        <button class="icon-btn icon-btn--sm" id="apercu-url-go" title="Navigate to URL" style="flex-shrink:0">
+          <i data-phosphor="arrow-right"></i>
+        </button>`,
+    });
     return `
-      <div class="preview-panel preview-panel--live" style="display:flex;flex-direction:column;height:100%">
-        <div class="preview-toolbar" style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #1e1e24;flex-shrink:0">
-          <span style="font-size:10.5px;font-weight:600;color:#5a5a63;text-transform:uppercase;letter-spacing:.06em;padding:0 4px">${escapeHTML(langLabel)}</span>
-          <div class="preview-addressbar" style="flex:1;display:flex;align-items:center;gap:5px;background:#0e0e10;border:1px solid #1e1e24;border-radius:6px;padding:3px 9px">
-            <i data-phosphor="circle-wavy-check" style="color:#7ab389;font-size:11px"></i>
-            <span style="font-size:11.5px;color:#6a6a72">Claude · live preview</span>
-          </div>
-          <div class="apercu-zoom-ctrl" style="display:flex;align-items:center;gap:1px;background:#111114;border:1px solid #1e1e24;border-radius:5px;padding:0 2px">
-            <button class="icon-btn icon-btn--sm" id="apercu-zoom-out"   title="Zoom out (-)"><i data-phosphor="minus"></i></button>
-            <button id="apercu-zoom-label" title="Reset zoom" style="font-size:10.5px;color:#5a5a63;min-width:34px;text-align:center;background:none;border:none;cursor:pointer;padding:2px 3px;border-radius:3px">--</button>
-            <button class="icon-btn icon-btn--sm" id="apercu-zoom-in"    title="Zoom in (+)"><i data-phosphor="plus"></i></button>
-          </div>
-          <button class="icon-btn icon-btn--sm" id="apercu-reload"      title="Reload"><i data-phosphor="arrow-clockwise"></i></button>
-          <button class="icon-btn icon-btn--sm" id="apercu-fullscreen"  title="Full-screen"><i data-phosphor="arrows-out"></i></button>
-        </div>
+      <div class="preview-panel preview-panel--live">
+        ${toolbar}
         <div id="apercu-vp-wrap" style="flex:1;position:relative;overflow:hidden;min-height:0">
           <iframe id="apercu-iframe" sandbox="${sb}"
                   srcdoc="${doc.replace(/"/g, '&quot;')}"
-                  style="position:absolute;top:0;left:0;width:1280px;height:900px;border:none;transform-origin:top left;background:#0b0b0c">
+                  style="position:absolute;top:0;left:0;width:1920px;height:1080px;border:none;transform-origin:0 0;background:#0b0b0c">
           </iframe>
         </div>
       </div>`;
@@ -5275,16 +5752,22 @@ function renderApercuPanel() {
 
   // ── Code view (Python, Bash, SQL, etc.) ──────────────────────────────────
   const copyId = 'apercu-code-copy-' + Date.now();
+  const toolbar = _apercuToolbar({
+    langLabel,
+    addressContent: `
+      <i data-phosphor="code" style="color:#6a6a72;font-size:11px;flex-shrink:0"></i>
+      <input id="apercu-url-input" class="apercu-url-input"
+             value=""
+             placeholder="Navigate to URL…"
+             spellcheck="false" autocomplete="off" />
+      <button class="icon-btn icon-btn--sm" id="apercu-url-go" title="Navigate" style="flex-shrink:0">
+        <i data-phosphor="arrow-right"></i>
+      </button>`,
+    extraBtns: `<button class="icon-btn icon-btn--sm" id="${copyId}" title="Copy code"><i data-phosphor="copy"></i></button>`,
+  });
   return `
     <div class="preview-panel preview-panel--code" style="display:flex;flex-direction:column;height:100%">
-      <div class="preview-toolbar" style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #1e1e24;flex-shrink:0">
-        <span style="font-size:10.5px;font-weight:600;color:#5a5a63;text-transform:uppercase;letter-spacing:.06em;padding:0 4px">${escapeHTML(langLabel)}</span>
-        <div class="preview-addressbar" style="flex:1;display:flex;align-items:center;gap:5px;background:#0e0e10;border:1px solid #1e1e24;border-radius:6px;padding:3px 9px">
-          <i data-phosphor="code" style="color:#6a6a72;font-size:11px"></i>
-          <span style="font-size:11.5px;color:#6a6a72">Claude · code output</span>
-        </div>
-        <button class="icon-btn icon-btn--sm" id="${copyId}" title="Copy code"><i data-phosphor="copy"></i></button>
-      </div>
+      ${toolbar}
       <div style="flex:1;overflow:auto;padding:16px">
         <pre style="margin:0;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;color:#d4d4d8;white-space:pre-wrap;word-break:break-word">${escapeHTML(block.code)}</pre>
       </div>
@@ -5292,7 +5775,15 @@ function renderApercuPanel() {
 }
 
 // Scale the apercu iframe to match the panel width (desktop viewport simulation).
-// The iframe renders at 1280×900 virtual px; we scale it down to fit the wrapper.
+// Disconnect any existing ResizeObserver before replacing the apercu panel DOM.
+// Call this immediately before any bodyEl.innerHTML assignment that replaces apercu.
+function _apercuROCleanup(container) {
+  const root = container || document;
+  const wrap = root.getElementById?.('apercu-vp-wrap') || root.querySelector?.('#apercu-vp-wrap');
+  if (wrap?._apercuRO) { wrap._apercuRO.disconnect(); wrap._apercuRO = null; }
+}
+
+// The iframe renders at a 1920×1080 virtual canvas; we scale it to fill the wrapper.
 // Called after any DOM insertion that contains the apercu panel.
 function initApercuScaling(container) {
   const root  = container || document;
@@ -5303,7 +5794,7 @@ function initApercuScaling(container) {
   const btnOut = root.getElementById?.('apercu-zoom-out') || root.querySelector?.('#apercu-zoom-out');
   if (!wrap || !frame) return;
 
-  const VIRTUAL_W = 1280;
+  const VIRTUAL_W = 1920; // 2K canvas baseline
   const STEP = 0.1;   // 10% per click
   const MIN  = 0.2;
   const MAX  = 3.0;
@@ -5319,12 +5810,25 @@ function initApercuScaling(container) {
   function applyScale() {
     const base  = autoFitScale();
     const scale = _manual !== null ? _manual : base;
+
+    // Always fill the panel exactly — no scrollbar, no overflow.
+    // Virtual dimensions are computed so that (virtualDim * scale) === panelDim.
+    // Zooming in/out changes the virtual canvas density, never produces a scrollbar.
+    const panelW  = wrap.clientWidth  || 1920;
+    const panelH  = wrap.clientHeight || 900;
+    const virtualW = Math.round(panelW / scale);
+    const virtualH = Math.round(panelH / scale);
+
+    frame.style.width  = virtualW + 'px';
+    frame.style.height = virtualH + 'px';
+    // MUST be top-left — default 50%/50% origin shifts the scaled iframe
+    // away from the wrapper's top-left corner on tall/wide displays
+    frame.style.transformOrigin = '0 0';
     frame.style.transform = `scale(${scale})`;
-    // Keep iframe height proportional so scrollbar appears when zoomed in
-    frame.style.height = Math.round(900 / scale * (_manual !== null ? 1 : 1)) + 'px';
+
     if (label) {
       label.textContent = Math.round(scale * 100) + '%';
-      label.title = _manual !== null ? 'Reset to fit' : 'Zoom is auto-fit — click +/- to lock';
+      label.title = _manual !== null ? 'Reset to auto-fit' : 'Auto-fit — click +/− to zoom';
     }
     if (btnIn)  btnIn.disabled  = scale >= MAX;
     if (btnOut) btnOut.disabled = scale <= MIN;
@@ -5354,6 +5858,123 @@ function initApercuScaling(container) {
   ro.observe(wrap);
   // Stash so we can disconnect if panel is swapped out
   wrap._apercuRO = ro;
+}
+
+// ── Apercu: wire server/URL bar controls ─────────────────────────────────────
+// Called alongside initApercuScaling whenever the apercu panel is rendered.
+function initApercuServer(container) {
+  const api = window.electronAPI?.apercu;
+  if (!api) return;
+
+  const root = container || document;
+  const q    = id => root.getElementById?.(id) || root.querySelector?.('#' + id);
+
+  // ── Navigate to an arbitrary URL ─────────────────────────────────────────
+  function navigateTo(url) {
+    if (!url) return;
+    url = url.trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'http://' + url;
+    }
+    window.__apercuExternalUrl = url;
+    // Re-render the apercu panel with the new URL
+    const bodyEl = document.getElementById('right-panel-body');
+    if (bodyEl) {
+      _apercuROCleanup(bodyEl);
+      bodyEl.innerHTML = renderApercuPanel();
+      window.renderIcons?.(bodyEl);
+      requestAnimationFrame(() => {
+        initApercuScaling(bodyEl);
+        initApercuServer(bodyEl);
+      });
+    }
+  }
+
+  // ── Open folder → start server → navigate ────────────────────────────────
+  async function openFolder() {
+    const result = await api.serve(null); // null = show picker
+    if (!result?.ok) return;
+    window.__apercuServerUrl  = result.url;
+    window.__apercuServingDir = result.dir;
+    window.__apercuExternalUrl = result.url;
+    navigateTo(result.url);
+  }
+
+  // ── Stop the server ───────────────────────────────────────────────────────
+  async function stopServer() {
+    await api.stop();
+    window.__apercuServerUrl   = null;
+    window.__apercuServingDir  = null;
+    window.__apercuExternalUrl = null;
+    // Re-render to go back to Claude preview / empty state
+    const bodyEl = document.getElementById('right-panel-body');
+    if (bodyEl) {
+      _apercuROCleanup(bodyEl);
+      bodyEl.innerHTML = renderApercuPanel();
+      window.renderIcons?.(bodyEl);
+      requestAnimationFrame(() => {
+        initApercuScaling(bodyEl);
+        initApercuServer(bodyEl);
+      });
+    }
+  }
+
+  // ── Wire buttons ──────────────────────────────────────────────────────────
+  q('apercu-open-folder')?.addEventListener('click', openFolder);
+  q('apercu-open-folder-hero')?.addEventListener('click', openFolder);
+  q('apercu-stop-server')?.addEventListener('click', stopServer);
+
+  // URL input: Enter or "Go" button navigates
+  const urlInput = q('apercu-url-input');
+  const urlGo    = q('apercu-url-go');
+  if (urlInput) {
+    urlInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') navigateTo(urlInput.value);
+    });
+    // Focus shows full URL for editing
+    urlInput.addEventListener('focus', () => urlInput.select());
+  }
+  urlGo?.addEventListener('click', () => navigateTo(urlInput?.value || ''));
+
+  // Copy server URL for pasting into chat / terminal
+  q('apercu-copy-url')?.addEventListener('click', async () => {
+    const url = window.__apercuServerUrl;
+    if (!url) return;
+    try { await navigator.clipboard.writeText(url); } catch (_) {}
+    const btn = q('apercu-copy-url');
+    if (btn) { btn.title = 'Copied!'; setTimeout(() => { btn.title = 'Copy server URL for agents'; }, 1500); }
+  });
+
+  // Click on URL label to copy
+  q('apercu-server-url-label')?.addEventListener('click', async () => {
+    const url = q('apercu-server-url-label')?.textContent?.trim();
+    if (url) { try { await navigator.clipboard.writeText(url); } catch (_) {} }
+  });
+
+  // ── Listen for server state changes from other windows ───────────────────
+  // Clean up the previous listener before registering a new one, so re-renders
+  // (panel tab switches, navigateTo calls) don't accumulate stale IPC handlers.
+  window.__apercuServerCleanup?.();
+  window.__apercuServerCleanup = api.onServerChanged(({ url, dir }) => {
+    window.__apercuServerUrl  = url || null;
+    window.__apercuServingDir = dir || null;
+    if (url && !window.__apercuExternalUrl) {
+      window.__apercuExternalUrl = url;
+      navigateTo(url);
+    }
+    if (!url) {
+      window.__apercuExternalUrl = null;
+    }
+  });
+
+  // ── Sync globals on init (in case server already running from prior session) ──
+  api.status().then(({ running, url, dir }) => {
+    if (running && url && !window.__apercuServerUrl) {
+      window.__apercuServerUrl  = url;
+      window.__apercuServingDir = dir;
+      // Don't auto-navigate on init — let user decide
+    }
+  }).catch(() => {});
 }
 
 // Returns any code block (used for the panel code view)
@@ -5532,12 +6153,19 @@ function renderFilesPanel() {
             <path d="M245,110.64A16,16,0,0,0,232,104H216V88a16,16,0,0,0-16-16H130.67L102.93,51.2A16.14,16.14,0,0,0,93,48H40A16,16,0,0,0,24,64V208h0a8,8,0,0,0,8,8H211a8,8,0,0,0,7.69-5.83l28.33-96A16,16,0,0,0,245,110.64ZM93,64l27.74,20.8A16.14,16.14,0,0,0,130.67,88H200v16H72a16,16,0,0,0-15.39,11.61L40,164.38V64Z"/>
           </svg>
         </button>
+        <button class="ft-adddir-btn" id="ft-adddir-btn" title="Add extra directory for Claude (--add-dir)">
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 256 256" fill="currentColor">
+            <path d="M232,104H184V56a16,16,0,0,0-16-16H130.67L102.93,19.2A16.14,16.14,0,0,0,93,16H40A16,16,0,0,0,24,32V208a16,16,0,0,0,16,16H216a8,8,0,0,0,8-8V120A16,16,0,0,0,232,104ZM40,32H93l27.74,20.8A16.14,16.14,0,0,0,130.67,56H168V104H72a16,16,0,0,0-15.39,11.61L40,164.38V32Zm176,168H69.19l26.81-91H232Z"/>
+          </svg>
+          +
+        </button>
         <button class="ft-refresh-btn" id="ft-refresh-btn" title="Refresh">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 256 256" fill="currentColor">
             <path d="M224,48V96a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h30.7L184.24,73.56a80,80,0,1,0,4.9,114,8,8,0,1,1,11.44,11.18A96,96,0,1,1,207,60.14L220,72V48a8,8,0,0,1,16,0Z"/>
           </svg>
         </button>
       </div>
+      <div id="ft-extra-dirs"></div>
       <div class="ft-search">
         <i data-phosphor="magnifying-glass" class="ft-search__icon"></i>
         <input type="text" placeholder="Filter files…" class="ft-search__input" id="ft-filter" autocomplete="off" />
@@ -5548,6 +6176,25 @@ function renderFilesPanel() {
         </div>
       </div>
     </div>`;
+}
+
+// Render the extra dirs list below the path bar
+function _renderExtraDirs() {
+  const container = document.getElementById('ft-extra-dirs');
+  if (!container) return;
+  const dirs = window.__addDirs || [];
+  if (!dirs.length) { container.innerHTML = ''; return; }
+  container.innerHTML = `<div class="ft-extra-dirs">
+    <span class="ft-extra-dirs__label">Extra dirs:</span>
+    ${dirs.map((d, i) => `
+      <span class="ft-extra-dir-chip">
+        <span title="${escapeHTML(d)}">${escapeHTML(d.split(/[/\\]/).slice(-1)[0] || d)}</span>
+        <button onclick="
+          window.__addDirs = (window.__addDirs||[]).filter((_,j)=>j!==${i});
+          if(typeof _renderExtraDirs==='function')_renderExtraDirs();
+        " title="Remove">×</button>
+      </span>`).join('')}
+  </div>`;
 }
 
 async function initFilesPanel() {
@@ -5619,6 +6266,19 @@ async function initFilesPanel() {
     if (!api.files.pickFolder) return;
     const picked = await api.files.pickFolder();
     if (picked) await setRoot(picked);
+  });
+
+  // ── Add extra dir button (--add-dir for Claude CLI) ───────────────────────
+  document.getElementById('ft-adddir-btn')?.addEventListener('click', async () => {
+    if (!api.files.pickFolder) return;
+    const picked = await api.files.pickFolder();
+    if (!picked) return;
+    window.__addDirs = window.__addDirs || [];
+    if (!window.__addDirs.includes(picked)) {
+      window.__addDirs.push(picked);
+      _renderExtraDirs();
+      showToast?.(`Extra dir added: ${picked.split(/[/\\]/).slice(-1)[0]}`, 'success', 2500);
+    }
   });
 
   // Filter input
@@ -5752,6 +6412,13 @@ function renderTerminalPanel() {
             <span class="tlb-sub">Opens a shell + runs <code>claude</code></span>
           </span>
         </button>
+        <button class="term-launch-big term-launch-big--worktree" id="terminal-worktree-btn">
+          <span class="tlb-icon" style="font-size:14px">⎇</span>
+          <span class="tlb-text">
+            <span class="tlb-label">Claude worktree session</span>
+            <span class="tlb-sub">Runs <code>claude --worktree</code> — isolated git branch</span>
+          </span>
+        </button>
         <button class="term-launch-big" id="terminal-new-btn">
           <span class="tlb-icon" style="font-size:11px;font-family:monospace;letter-spacing:-.03em">$_</span>
           <span class="tlb-text">
@@ -5769,6 +6436,8 @@ function renderTerminalPanel() {
 function initTerminalPanel() {
   document.getElementById('terminal-claude-btn')
     ?.addEventListener('click', () => window.Workspace?.openTerminal(true));
+  document.getElementById('terminal-worktree-btn')
+    ?.addEventListener('click', () => window.Workspace?.openTerminal(true, { worktree: true }));
   document.getElementById('terminal-new-btn')
     ?.addEventListener('click', () => window.Workspace?.openTerminal(false));
 }
@@ -6702,6 +7371,843 @@ async function initGitPanel(container) {
   await loadAll();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GitHub Panel — full repo browser + automation (commit/push/PR/branches)
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Screenshots panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+function renderScreenshotsPanel() {
+  return `
+  <div class="sc-panel" id="sc-panel-root">
+    <div class="sc-toolbar">
+      <button class="sc-btn sc-btn--primary" id="sc-capture-btn" title="Capture this window">
+        <svg width="13" height="13" viewBox="0 0 256 256" fill="currentColor"><path d="M208,56H180.28L166.65,35.56A8,8,0,0,0,160,32H96a8,8,0,0,0-6.65,3.56L75.72,56H48A24,24,0,0,0,24,80V192a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V80A24,24,0,0,0,208,56Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V80a8,8,0,0,1,8-8H80a8,8,0,0,0,6.65-3.56L100.28,48h55.44l13.63,20.44A8,8,0,0,0,176,72h32a8,8,0,0,1,8,8ZM128,88a44,44,0,1,0,44,44A44.05,44.05,0,0,0,128,88Zm0,72a28,28,0,1,1,28-28A28,28,0,0,1,128,160Z"/></svg>
+        Window
+      </button>
+      <button class="sc-btn" id="sc-fullscreen-btn" title="Capture full screen">
+        <svg width="13" height="13" viewBox="0 0 256 256" fill="currentColor"><path d="M216,48H40A16,16,0,0,0,24,64V192a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V64A16,16,0,0,0,216,48Zm0,144H40V64H216V192ZM80,96A8,8,0,0,1,96,96v16a8,8,0,0,1-16,0Zm96,0a8,8,0,0,1,8,8v16a8,8,0,0,1-16,0V104A8,8,0,0,1,176,96ZM80,144a8,8,0,0,1,8,8v16a8,8,0,0,1-16,0V152A8,8,0,0,1,80,144Zm96,0a8,8,0,0,1,8,8v16a8,8,0,0,1-16,0V152A8,8,0,0,1,176,144Z"/></svg>
+        Screen
+      </button>
+      <button class="sc-btn sc-btn--region" id="sc-region-btn" title="Select a region to capture">
+        <svg width="13" height="13" viewBox="0 0 256 256" fill="currentColor"><path d="M80,24A8,8,0,0,1,72,32H48A16,16,0,0,0,32,48V72a8,8,0,0,1-16,0V48A32,32,0,0,1,48,16H72A8,8,0,0,1,80,24Zm152,0a8,8,0,0,0-8,8V8a16,16,0,0,0-16-16H184a8,8,0,0,0,0,16h24V32A8,8,0,0,0,232,32ZM24,176a8,8,0,0,0-8,8v24a32,32,0,0,0,32,32H72a8,8,0,0,0,0-16H48a16,16,0,0,1-16-16V184A8,8,0,0,0,24,176Zm216,0a8,8,0,0,0-8,8v24a16,16,0,0,1-16,16H192a8,8,0,0,0,0,16h24a32,32,0,0,0,32-32V184A8,8,0,0,0,240,176ZM128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Z"/></svg>
+        Region
+      </button>
+      <button class="sc-btn" id="sc-paste-btn" title="Paste from clipboard (Ctrl+V)">
+        <svg width="13" height="13" viewBox="0 0 256 256" fill="currentColor"><path d="M165.66,90.34a8,8,0,0,1,0,11.32l-80,80a8,8,0,0,1-11.32-11.32l80-80A8,8,0,0,1,165.66,90.34ZM215.6,40.4a40,40,0,0,0-56.56,0L134.06,65.38a8,8,0,0,0,11.32,11.32L170.36,51.7a24,24,0,0,1,33.94,33.94L179.32,110.6a8,8,0,0,0,11.32,11.32L215.6,97A40,40,0,0,0,215.6,40.4ZM107.06,168.68,82.08,193.66a24,24,0,0,1-33.94-33.94L73.12,134.74A8,8,0,1,0,61.8,123.42L36.82,148.4a40,40,0,0,0,56.56,56.56l24.98-24.98a8,8,0,0,0-11.3-11.3Z"/></svg>
+        Paste
+      </button>
+      <span class="sc-count" id="sc-count"></span>
+      <button class="sc-btn sc-btn--icon" id="sc-clear-all-btn" title="Delete all screenshots" style="margin-left:auto">
+        <svg width="12" height="12" viewBox="0 0 256 256" fill="currentColor"><path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"/></svg>
+      </button>
+    </div>
+    <div class="sc-drop-zone" id="sc-drop-zone">
+      <div class="sc-drop-hint" id="sc-drop-hint">
+        <svg width="28" height="28" viewBox="0 0 256 256" fill="currentColor" style="opacity:.3"><path d="M208,56H180.28L166.65,35.56A8,8,0,0,0,160,32H96a8,8,0,0,0-6.65,3.56L75.72,56H48A24,24,0,0,0,24,80V192a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V80A24,24,0,0,0,208,56Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V80a8,8,0,0,1,8-8H80a8,8,0,0,0,6.65-3.56L100.28,48h55.44l13.63,20.44A8,8,0,0,0,176,72h32a8,8,0,0,1,8,8ZM128,88a44,44,0,1,0,44,44A44.05,44.05,0,0,0,128,88Zm0,72a28,28,0,1,1,28-28A28,28,0,0,1,128,160Z"/></svg>
+        <span>Paste or drag an image, or click Capture</span>
+      </div>
+    </div>
+    <div class="sc-grid" id="sc-grid"></div>
+  </div>
+  <!-- Lightbox -->
+  <div class="sc-lightbox" id="sc-lightbox" style="display:none">
+    <div class="sc-lightbox__backdrop" id="sc-lb-backdrop"></div>
+    <div class="sc-lightbox__content">
+      <img class="sc-lightbox__img" id="sc-lb-img" src="" alt="" />
+      <div class="sc-lightbox__bar">
+        <span class="sc-lightbox__name" id="sc-lb-name"></span>
+        <button class="sc-btn" id="sc-lb-copy">Copy</button>
+        <button class="sc-btn" id="sc-lb-open">Open</button>
+        <button class="sc-btn sc-btn--danger" id="sc-lb-delete">Delete</button>
+        <button class="sc-lightbox__close" id="sc-lb-close">×</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function initScreenshotsPanel(container) {
+  const api = window.electronAPI?.screenshots;
+  if (!api) {
+    console.warn('[screenshots] electronAPI.screenshots not available');
+    return;
+  }
+  const $ = sel => container.querySelector(sel);
+
+  const toast = (msg, type) => {
+    console.log('[screenshots]', type, msg);
+    window.showToast?.(msg, type);
+  };
+
+  let _shots = [];
+  let _lbId  = null;
+
+  async function _reload() {
+    _shots = await api.list().catch(() => []);
+    _renderGrid();
+    const countEl = $('#sc-count');
+    if (countEl) countEl.textContent = _shots.length ? `${_shots.length} screenshot${_shots.length > 1 ? 's' : ''}` : '';
+    const dropHint = $('#sc-drop-hint');
+    const grid     = $('#sc-grid');
+    if (dropHint) dropHint.style.display = _shots.length ? 'none' : 'flex';
+    if (grid)     grid.style.display     = _shots.length ? 'grid' : 'none';
+  }
+
+  function _renderGrid() {
+    const grid = $('#sc-grid');
+    if (!grid) return;
+    grid.innerHTML = _shots.slice().reverse().map(s => `
+      <div class="sc-thumb" data-id="${escapeHTML(s.id)}" title="${escapeHTML(s.name)}">
+        <img class="sc-thumb__img" src="${escapeHTML(s.dataUrl)}" alt="${escapeHTML(s.name)}" loading="lazy" />
+        <div class="sc-thumb__name">${escapeHTML(s.name)}</div>
+        <button class="sc-thumb__del" data-del="${escapeHTML(s.id)}" title="Delete">×</button>
+      </div>`).join('');
+
+    grid.querySelectorAll('.sc-thumb').forEach(el => {
+      el.addEventListener('click', e => {
+        if (e.target.closest('[data-del]')) return;
+        _openLightbox(el.dataset.id);
+      });
+    });
+    grid.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        await api.delete(btn.dataset.del);
+        await _reload();
+        toast('Screenshot deleted', 'info');
+      });
+    });
+  }
+
+  function _openLightbox(id) {
+    const shot = _shots.find(s => s.id === id);
+    if (!shot) return;
+    _lbId = id;
+    const lb = document.getElementById('sc-lightbox');
+    if (!lb) return;
+    lb.style.display = 'flex';
+    document.getElementById('sc-lb-img').src   = shot.dataUrl;
+    document.getElementById('sc-lb-name').textContent = shot.name;
+  }
+  function _closeLightbox() {
+    const lb = document.getElementById('sc-lightbox');
+    if (lb) lb.style.display = 'none';
+    _lbId = null;
+  }
+
+  async function _saveImage(dataUrl) {
+    console.log('[screenshots] saving image, dataUrl length:', dataUrl?.length);
+    const res = await api.save(dataUrl).catch(e => { console.error('[screenshots] save IPC error:', e); return null; });
+    console.log('[screenshots] save result:', res);
+    if (res?.ok) { await _reload(); toast('Screenshot saved ✓', 'success'); }
+    else toast('Failed to save: ' + (res?.error || 'unknown error'), 'error');
+  }
+
+  // ── Capture window ────────────────────────────────────────────────────────
+  $('#sc-capture-btn')?.addEventListener('click', async () => {
+    console.log('[screenshots] capture window clicked');
+    const res = await api.capture().catch(e => { console.error('[sc] capture error:', e); return null; });
+    console.log('[screenshots] capture result:', res?.ok, res?.error);
+    if (res?.ok && res.dataUrl) await _saveImage(res.dataUrl);
+    else toast('Window capture failed: ' + (res?.error || 'no response'), 'error');
+  });
+
+  // ── Capture full screen ───────────────────────────────────────────────────
+  const _screenIcon = `<svg width="13" height="13" viewBox="0 0 256 256" fill="currentColor"><path d="M216,48H40A16,16,0,0,0,24,64V192a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V64A16,16,0,0,0,216,48Zm0,144H40V64H216V192Z"/></svg> Screen`;
+  $('#sc-fullscreen-btn')?.addEventListener('click', async () => {
+    console.log('[screenshots] fullscreen capture clicked');
+    const btn = $('#sc-fullscreen-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    const res = await api.captureFullscreen().catch(e => { console.error('[sc] fullscreen error:', e); return null; });
+    if (btn) { btn.disabled = false; btn.innerHTML = _screenIcon; }
+    console.log('[screenshots] fullscreen result:', res?.ok, res?.error);
+    if (res?.ok && res.dataUrl) await _saveImage(res.dataUrl);
+    else toast('Screen capture failed: ' + (res?.error || 'no response'), 'error');
+  });
+
+  // ── Capture region ────────────────────────────────────────────────────────
+  const _regionIcon = `<svg width="13" height="13" viewBox="0 0 256 256" fill="currentColor"><path d="M208,128a8,8,0,0,1-8,8H136v64a8,8,0,0,1-16,0V136H56a8,8,0,0,1,0-16h64V56a8,8,0,0,1,16,0v64h64A8,8,0,0,1,208,128ZM48,96a8,8,0,0,0,8-8V48H96a8,8,0,0,0,0-16H48A16,16,0,0,0,32,48V88A8,8,0,0,0,48,96Zm160-64H168a8,8,0,0,0,0,16h40V88a8,8,0,0,0,16,0V48A16,16,0,0,0,208,32ZM96,208H56V168a8,8,0,0,0-16,0v40a16,16,0,0,0,16,16H96a8,8,0,0,0,0-16Zm112-48a8,8,0,0,0-8,8v40H168a8,8,0,0,0,0,16h40a16,16,0,0,0,16-16V168A8,8,0,0,0,208,160Z"/></svg> Region`;
+  $('#sc-region-btn')?.addEventListener('click', async () => {
+    console.log('[screenshots] region capture clicked');
+    const btn = $('#sc-region-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Select area…'; }
+    toast('Draw a region on screen — Esc to cancel', 'info', 3000);
+    const res = await api.captureRegion().catch(e => { console.error('[sc] region error:', e); return null; });
+    if (btn) { btn.disabled = false; btn.innerHTML = _regionIcon; }
+    console.log('[screenshots] region result:', res?.ok, res?.cancelled, res?.error);
+    if (res?.ok && res.dataUrl) await _saveImage(res.dataUrl);
+    else if (res && !res.ok && !res.cancelled) toast('Region capture failed: ' + (res.error || ''), 'error');
+  });
+
+  // ── Paste from clipboard ──────────────────────────────────────────────────
+  async function _pasteClipboard() {
+    console.log('[screenshots] paste from clipboard');
+    const res = await api.fromClipboard().catch(e => { console.error('[sc] clipboard error:', e); return null; });
+    console.log('[screenshots] clipboard result:', res?.ok);
+    if (res?.ok && res.dataUrl) await _saveImage(res.dataUrl);
+    else toast('No image on clipboard', 'warning');
+  }
+  $('#sc-paste-btn')?.addEventListener('click', _pasteClipboard);
+
+  // Ctrl+V when panel is visible
+  container.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v') _pasteClipboard();
+  });
+  container.setAttribute('tabindex', '-1');
+
+  // ── Drag & drop ───────────────────────────────────────────────────────────
+  const dropZone = $('#sc-drop-zone');
+  if (dropZone) {
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('sc-drop-zone--over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('sc-drop-zone--over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('sc-drop-zone--over');
+      const file = [...(e.dataTransfer?.files || [])].find(f => f.type.startsWith('image/'));
+      if (!file) { toast('Drop an image file here', 'warning'); return; }
+      const reader = new FileReader();
+      reader.onload = ev => _saveImage(ev.target.result);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // ── Clear all ─────────────────────────────────────────────────────────────
+  $('#sc-clear-all-btn')?.addEventListener('click', async () => {
+    if (!_shots.length) return;
+    if (!confirm(`Delete all ${_shots.length} screenshot${_shots.length > 1 ? 's' : ''}?`)) return;
+    await api.deleteAll();
+    await _reload();
+    toast('All screenshots deleted', 'info');
+  });
+
+  // ── Lightbox wiring ───────────────────────────────────────────────────────
+  document.getElementById('sc-lb-backdrop')?.addEventListener('click', _closeLightbox);
+  document.getElementById('sc-lb-close')?.addEventListener('click', _closeLightbox);
+  document.getElementById('sc-lb-copy')?.addEventListener('click', async () => {
+    const shot = _shots.find(s => s.id === _lbId);
+    if (!shot) return;
+    await api.copyToClipboard(shot.dataUrl).catch(() => {});
+    toast('Copied to clipboard', 'success');
+  });
+  document.getElementById('sc-lb-open')?.addEventListener('click', async () => {
+    const shot = _shots.find(s => s.id === _lbId);
+    if (!shot) return;
+    await api.openFile(shot.id).catch(() => {});
+  });
+  document.getElementById('sc-lb-delete')?.addEventListener('click', async () => {
+    if (!_lbId) return;
+    await api.delete(_lbId);
+    _closeLightbox();
+    await _reload();
+    toast('Screenshot deleted', 'info');
+  });
+
+  await _reload();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+const GH_API = 'https://api.github.com';
+const GH_PAT_KEY = 'gh_panel_pat';
+const GH_REPO_KEY = 'gh_panel_repo';
+
+function _ghToken() { return localStorage.getItem(GH_PAT_KEY) || ''; }
+function _ghRepo()  { return localStorage.getItem(GH_REPO_KEY) || ''; }
+
+async function _ghFetch(path, opts = {}) {
+  const token = _ghToken();
+  const headers = { 'Accept': 'application/vnd.github.v3+json' };
+  if (token) headers['Authorization'] = 'token ' + token;
+  const res = await fetch(GH_API + path, { ...opts, headers: { ...headers, ...(opts.headers||{}) } });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `GitHub API ${res.status}`);
+  }
+  return res.json();
+}
+
+function renderGithubPanel() {
+  const pat  = _ghToken();
+  const repo = _ghRepo();
+  return `
+  <div class="gh-panel" id="gh-panel-root">
+
+    <!-- ── Token row ───────────────────────────────────────────────────── -->
+    <div class="gh-token-row" id="gh-token-row">
+      ${pat
+        ? `<span class="gh-token-ok" id="gh-connected-label">
+             <svg width="11" height="11" viewBox="0 0 16 16" fill="#7ab389"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+             Connected
+           </span>
+           <button class="gh-token-clear" id="gh-clear-token" title="Sign out">Sign out</button>`
+        : `<button class="gh-oauth-btn" id="gh-oauth-btn">
+             <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+             Sign in with GitHub
+           </button>
+           <button class="gh-pat-toggle" id="gh-pat-toggle" title="Use Personal Access Token instead">Use PAT</button>
+           <div class="gh-pat-row" id="gh-pat-row" style="display:none">
+             <input id="gh-pat-input" class="gh-input" type="password"
+                    placeholder="ghp_… Personal Access Token" style="flex:1" />
+             <button class="gh-action-btn gh-action-btn--primary" id="gh-save-token">Save</button>
+           </div>`
+      }
+    </div>
+    <!-- Device flow code display (hidden until flow starts) -->
+    <div class="gh-device-flow" id="gh-device-flow" style="display:none">
+      <div class="gh-device-msg">Open this URL in your browser and enter the code:</div>
+      <a class="gh-device-url" id="gh-device-url" href="#" target="_blank"></a>
+      <div class="gh-device-code" id="gh-device-code"></div>
+      <div class="gh-device-status" id="gh-device-status">Waiting for authorization…</div>
+    </div>
+
+    <!-- ── Repo row ────────────────────────────────────────────────────── -->
+    <div class="gh-repo-row" id="gh-repo-row">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="#6a6a72" style="flex-shrink:0"><path d="M2 2.5A2.5 2.5 0 014.5 0h8.75a.75.75 0 01.75.75v12.5a.75.75 0 01-.75.75h-2.5a.75.75 0 010-1.5h1.75v-2h-8a1 1 0 00-.714 1.7.75.75 0 01-1.072 1.05A2.495 2.495 0 012 11.5v-9zm10.5-1V9h-8c-.356 0-.694.074-1 .208V2.5a1 1 0 011-1h8z"/></svg>
+      <input id="gh-repo-input" class="gh-input" type="text"
+             placeholder="owner/repo  (e.g. torvalds/linux)"
+             value="${escapeHTML(repo)}" style="flex:1;min-width:0" />
+      <button class="gh-action-btn gh-action-btn--primary" id="gh-load-repo" title="Load repo">Load</button>
+    </div>
+
+    <!-- ── Tab bar ─────────────────────────────────────────────────────── -->
+    <div class="gh-tabbar" id="gh-tabbar">
+      <button class="gh-tab-btn gh-tab-btn--active" data-ghtab="files">Files</button>
+      <button class="gh-tab-btn" data-ghtab="prs">Pull Requests</button>
+      <button class="gh-tab-btn" data-ghtab="branches">Branches</button>
+      <button class="gh-tab-btn" data-ghtab="push">Commit &amp; Push</button>
+    </div>
+
+    <!-- ── Tab: Files ──────────────────────────────────────────────────── -->
+    <div class="gh-tab-content" id="gh-view-files">
+      <div class="gh-breadcrumb" id="gh-breadcrumb"></div>
+      <div class="gh-tree" id="gh-tree">
+        <div class="gh-placeholder">Load a repository to browse files.</div>
+      </div>
+    </div>
+
+    <!-- ── Tab: Pull Requests ──────────────────────────────────────────── -->
+    <div class="gh-tab-content" id="gh-view-prs" style="display:none">
+      <div class="gh-pr-list" id="gh-pr-list">
+        <div class="gh-placeholder">No repository loaded.</div>
+      </div>
+      <div class="gh-pr-form" id="gh-pr-form" style="display:none">
+        <div class="gh-form-title">New Pull Request</div>
+        <select id="gh-pr-base" class="gh-input" style="width:100%;margin-bottom:6px">
+          <option value="">Base branch…</option>
+        </select>
+        <select id="gh-pr-head" class="gh-input" style="width:100%;margin-bottom:6px">
+          <option value="">Compare branch…</option>
+        </select>
+        <input id="gh-pr-title" class="gh-input" type="text" placeholder="PR title…"
+               style="width:100%;box-sizing:border-box;margin-bottom:6px" />
+        <textarea id="gh-pr-body" class="gh-input" rows="4"
+                  placeholder="PR description (markdown supported)…"
+                  style="width:100%;box-sizing:border-box;resize:vertical;margin-bottom:8px"></textarea>
+        <div style="display:flex;gap:6px">
+          <button class="gh-action-btn" id="gh-pr-cancel">Cancel</button>
+          <button class="gh-action-btn gh-action-btn--primary" id="gh-pr-submit" style="flex:1">Create PR</button>
+        </div>
+      </div>
+      <button class="gh-fab" id="gh-new-pr-btn" title="New Pull Request">+ New PR</button>
+    </div>
+
+    <!-- ── Tab: Branches ───────────────────────────────────────────────── -->
+    <div class="gh-tab-content" id="gh-view-branches" style="display:none">
+      <div class="gh-branch-list" id="gh-branch-list">
+        <div class="gh-placeholder">No repository loaded.</div>
+      </div>
+      <div class="gh-new-branch-row" id="gh-new-branch-row" style="display:none;margin-top:10px">
+        <input id="gh-new-branch-name" class="gh-input" type="text" placeholder="new-branch-name"
+               style="flex:1;min-width:0" />
+        <select id="gh-new-branch-from" class="gh-input" style="min-width:90px"></select>
+        <button class="gh-action-btn gh-action-btn--primary" id="gh-create-branch-btn">Create</button>
+      </div>
+      <button class="gh-fab" id="gh-new-branch-fab-btn" title="New Branch">+ New branch</button>
+    </div>
+
+    <!-- ── Tab: Commit & Push ──────────────────────────────────────────── -->
+    <div class="gh-tab-content" id="gh-view-push" style="display:none">
+      <div class="gh-push-status" id="gh-push-status">
+        <div class="gh-placeholder">Load a repo first.</div>
+      </div>
+      <div id="gh-push-form" style="display:none">
+        <div class="gh-form-title" style="margin-bottom:8px">Commit &amp; Push to GitHub</div>
+        <div class="gh-push-info" id="gh-push-info" style="margin-bottom:10px"></div>
+        <textarea id="gh-commit-msg-gh" class="gh-input" rows="3"
+                  placeholder="Commit message…"
+                  style="width:100%;box-sizing:border-box;resize:vertical;margin-bottom:8px"></textarea>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <button class="gh-action-btn" id="gh-stage-all" style="flex:1">Stage all</button>
+          <button class="gh-action-btn gh-action-btn--primary" id="gh-commit-push-btn" style="flex:1">Commit &amp; Push</button>
+        </div>
+        <button class="gh-action-btn" id="gh-pull-btn" style="width:100%">⬇ Pull (fast-forward)</button>
+      </div>
+    </div>
+
+  </div>`;
+}
+
+async function initGithubPanel(container) {
+  const $ = sel => container.querySelector(sel);
+  const git = window.electronAPI?.git;
+  const token = _ghToken();
+  let _repo   = _ghRepo();  // 'owner/repo'
+  let _branches = [];
+  let _defaultBranch = 'main';
+  let _activeTab = 'files';
+  let _treePath = '';  // current file tree path
+
+  // ── OAuth / PAT auth wiring ───────────────────────────────────────────────
+  const ghAPI = window.electronAPI?.github;
+
+  function _setConnected(tok, username) {
+    localStorage.setItem(GH_PAT_KEY, tok);
+    const tr = $('#gh-token-row');
+    if (tr) {
+      tr.innerHTML = `
+        <span class="gh-token-ok" id="gh-connected-label">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="#7ab389"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          ${username ? '@' + escapeHTML(username) : 'Connected'}
+        </span>
+        <button class="gh-token-clear" id="gh-clear-token" title="Sign out">Sign out</button>`;
+      _wireTokenClear();
+    }
+    const df = $('#gh-device-flow');
+    if (df) df.style.display = 'none';
+    window.showToast?.('GitHub connected' + (username ? ' as @' + username : ''), 'success');
+  }
+
+  // ── OAuth button → open GitHub in browser (auth flow coming soon) ─────────
+  const oauthBtn = $('#gh-oauth-btn');
+  if (oauthBtn) {
+    oauthBtn.addEventListener('click', () => {
+      window.electronAPI?.github?.openUrl?.('https://github.com/login');
+    });
+  }
+
+  // ── PAT toggle ────────────────────────────────────────────────────────────
+  const patToggleBtn = $('#gh-pat-toggle');
+  if (patToggleBtn) {
+    patToggleBtn.addEventListener('click', () => {
+      const row = $('#gh-pat-row');
+      if (!row) return;
+      const shown = row.style.display !== 'none';
+      row.style.display = shown ? 'none' : 'flex';
+      patToggleBtn.textContent = shown ? 'Use PAT' : 'Hide PAT';
+    });
+  }
+
+  // ── PAT save ──────────────────────────────────────────────────────────────
+  const saveTokenBtn = $('#gh-save-token');
+  if (saveTokenBtn) {
+    saveTokenBtn.addEventListener('click', async () => {
+      const val = ($('#gh-pat-input')?.value || '').trim();
+      if (!val) return;
+      try {
+        const user = await fetch('https://api.github.com/user', {
+          headers: { Authorization: 'token ' + val, Accept: 'application/vnd.github.v3+json' }
+        }).then(r => r.json());
+        _setConnected(val, user.login || null);
+      } catch {
+        _setConnected(val, null);
+      }
+    });
+    ($('#gh-pat-input'))?.addEventListener('keydown', e => { if (e.key === 'Enter') saveTokenBtn.click(); });
+  }
+
+  function _wireTokenClear() {
+    const clrBtn = $('#gh-clear-token');
+    if (clrBtn) clrBtn.addEventListener('click', () => {
+      localStorage.removeItem(GH_PAT_KEY);
+      window.showToast?.('Signed out of GitHub', 'info');
+      setRightPanelTab('github');
+    });
+  }
+  _wireTokenClear();
+
+  // If already connected, try to show username
+  if (token) {
+    _ghFetch('/user').then(u => {
+      const lbl = $('#gh-connected-label');
+      if (lbl && u.login) lbl.innerHTML = lbl.innerHTML.replace('Connected', '@' + escapeHTML(u.login));
+    }).catch(() => {});
+  }
+
+  // ── Auto-detect repo from git remote ─────────────────────────────────────
+  if (!_repo && git) {
+    try {
+      const remoteRes = await git.action('remote', null, ['get-url', 'origin']).catch(() => null);
+      if (remoteRes?.ok && remoteRes.output) {
+        const url = remoteRes.output.trim();
+        const m = url.match(/github\.com[:/]([^/]+\/[^\s/.]+?)(?:\.git)?$/i);
+        if (m) {
+          _repo = m[1];
+          localStorage.setItem(GH_REPO_KEY, _repo);
+          const inp = $('#gh-repo-input');
+          if (inp) inp.value = _repo;
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ── Load repo ─────────────────────────────────────────────────────────────
+  const loadRepoBtn = $('#gh-load-repo');
+  if (loadRepoBtn) {
+    loadRepoBtn.addEventListener('click', async () => {
+      const val = ($('#gh-repo-input')?.value || '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/, '');
+      if (!val) return;
+      _repo = val;
+      localStorage.setItem(GH_REPO_KEY, val);
+      _treePath = '';
+      await _loadAll();
+    });
+    ($('#gh-repo-input'))?.addEventListener('keydown', e => { if (e.key === 'Enter') loadRepoBtn.click(); });
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────────────────
+  container.querySelectorAll('.gh-tab-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      _activeTab = btn.dataset.ghtab;
+      container.querySelectorAll('.gh-tab-btn').forEach(b => b.classList.toggle('gh-tab-btn--active', b.dataset.ghtab === _activeTab));
+      ['files','prs','branches','push'].forEach(t => {
+        const el = $(`#gh-view-${t}`);
+        if (el) el.style.display = t === _activeTab ? 'flex' : 'none';
+      });
+      if (_repo) {
+        if (_activeTab === 'prs')      await _loadPRs();
+        if (_activeTab === 'branches') await _loadBranches();
+        if (_activeTab === 'push')     await _loadPushStatus();
+        if (_activeTab === 'files')    await _loadTree(_treePath);
+      }
+    });
+  });
+
+  // ── File tree ─────────────────────────────────────────────────────────────
+  async function _loadTree(path) {
+    _treePath = path;
+    const treeEl = $('#gh-tree');
+    const bcEl   = $('#gh-breadcrumb');
+    if (!treeEl || !_repo) return;
+    treeEl.innerHTML = '<div class="gh-loading">Loading…</div>';
+
+    // Breadcrumb
+    if (bcEl) {
+      const parts = path ? path.split('/') : [];
+      const crumbs = [{ label: _repo.split('/')[1] || _repo, path: '' }];
+      parts.forEach((p, i) => crumbs.push({ label: p, path: parts.slice(0, i + 1).join('/') }));
+      bcEl.innerHTML = crumbs.map((c, i) =>
+        `<span class="gh-bc-sep">${i ? '/' : ''}</span>` +
+        (i < crumbs.length - 1
+          ? `<button class="gh-bc-btn" data-path="${escapeHTML(c.path)}">${escapeHTML(c.label)}</button>`
+          : `<span class="gh-bc-cur">${escapeHTML(c.label)}</span>`)
+      ).join('');
+      bcEl.querySelectorAll('.gh-bc-btn').forEach(btn => {
+        btn.addEventListener('click', () => _loadTree(btn.dataset.path));
+      });
+    }
+
+    try {
+      const items = await _ghFetch(`/repos/${_repo}/contents/${path}`);
+      if (!Array.isArray(items)) {
+        // It's a file — show raw content
+        treeEl.innerHTML = `<pre class="gh-file-content">${escapeHTML(atob(items.content || ''))}</pre>`;
+        return;
+      }
+      // Sort: dirs first, then files
+      items.sort((a, b) => {
+        if (a.type === b.type) return a.name.localeCompare(b.name);
+        return a.type === 'dir' ? -1 : 1;
+      });
+      treeEl.innerHTML = items.map(item => {
+        const icon = item.type === 'dir'
+          ? `<svg width="13" height="13" viewBox="0 0 16 16" fill="#c9a96e"><path d="M1.75 1A1.75 1.75 0 000 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0016 13.25v-8.5A1.75 1.75 0 0014.25 3H7.5L6.25 1.75A1.75 1.75 0 005.25 1H1.75z"/></svg>`
+          : `<svg width="11" height="13" viewBox="0 0 12 16" fill="#6a6a78"><path d="M6 0L0 0v16h12V4.5L6 0zm4 14H2V2h4v4h4v8z"/></svg>`;
+        return `<div class="gh-tree-row" data-path="${escapeHTML(item.path)}" data-type="${item.type}">
+          <span class="gh-tree-icon">${icon}</span>
+          <span class="gh-tree-name">${escapeHTML(item.name)}</span>
+          ${item.size ? `<span class="gh-tree-size">${_fmtSize(item.size)}</span>` : ''}
+        </div>`;
+      }).join('');
+      treeEl.querySelectorAll('.gh-tree-row').forEach(row => {
+        row.addEventListener('click', () => {
+          const p = row.dataset.path;
+          if (row.dataset.type === 'dir') _loadTree(p);
+          else _loadTree(p);  // file — _loadTree handles both (array = dir, obj = file)
+        });
+      });
+    } catch (e) {
+      treeEl.innerHTML = `<div class="gh-err">${escapeHTML(e.message)}</div>`;
+    }
+  }
+
+  function _fmtSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
+  // ── Pull Requests ─────────────────────────────────────────────────────────
+  async function _loadPRs() {
+    const listEl = $('#gh-pr-list');
+    if (!listEl || !_repo) return;
+    listEl.innerHTML = '<div class="gh-loading">Loading PRs…</div>';
+    try {
+      const prs = await _ghFetch(`/repos/${_repo}/pulls?state=open&per_page=30`);
+      if (!prs.length) {
+        listEl.innerHTML = '<div class="gh-placeholder">No open pull requests.</div>';
+        return;
+      }
+      listEl.innerHTML = prs.map(pr => `
+        <div class="gh-pr-card">
+          <div class="gh-pr-card__head">
+            <span class="gh-pr-num">#${pr.number}</span>
+            <a class="gh-pr-title" href="${escapeHTML(pr.html_url)}" target="_blank">${escapeHTML(pr.title)}</a>
+          </div>
+          <div class="gh-pr-card__meta">
+            <span class="gh-pr-branch">${escapeHTML(pr.head.ref)}</span>
+            <span class="gh-pr-arrow">→</span>
+            <span class="gh-pr-branch">${escapeHTML(pr.base.ref)}</span>
+            <span class="gh-pr-dot">·</span>
+            <span class="gh-pr-author">${escapeHTML(pr.user.login)}</span>
+            <span class="gh-pr-dot">·</span>
+            <span class="gh-pr-date">${new Date(pr.created_at).toLocaleDateString()}</span>
+          </div>
+          ${pr.body ? `<div class="gh-pr-body-preview">${escapeHTML(pr.body.slice(0, 120))}${pr.body.length > 120 ? '…' : ''}</div>` : ''}
+        </div>`).join('');
+    } catch (e) {
+      listEl.innerHTML = `<div class="gh-err">${escapeHTML(e.message)}</div>`;
+    }
+  }
+
+  // PR creation form
+  const newPrBtn = $('#gh-new-pr-btn');
+  const prForm   = $('#gh-pr-form');
+  const prCancel = $('#gh-pr-cancel');
+  const prSubmit = $('#gh-pr-submit');
+
+  if (newPrBtn) newPrBtn.addEventListener('click', async () => {
+    if (!_repo) { window.showToast?.('Load a repo first', 'warning'); return; }
+    prForm.style.display = 'block';
+    newPrBtn.style.display = 'none';
+    // Populate branch selects
+    if (!_branches.length) await _loadBranches(true);
+    const baseEl = $('#gh-pr-base');
+    const headEl = $('#gh-pr-head');
+    const opts = _branches.map(b => `<option value="${escapeHTML(b)}">${escapeHTML(b)}</option>`).join('');
+    if (baseEl) baseEl.innerHTML = `<option value="">Base branch…</option>${opts}`;
+    if (headEl) headEl.innerHTML = `<option value="">Compare branch…</option>${opts}`;
+    if (baseEl) baseEl.value = _defaultBranch;
+  });
+
+  if (prCancel) prCancel.addEventListener('click', () => {
+    prForm.style.display = 'none';
+    newPrBtn.style.display = '';
+  });
+
+  if (prSubmit) prSubmit.addEventListener('click', async () => {
+    const title = ($('#gh-pr-title')?.value || '').trim();
+    const base  = ($('#gh-pr-base')?.value || '').trim();
+    const head  = ($('#gh-pr-head')?.value || '').trim();
+    const body  = ($('#gh-pr-body')?.value || '').trim();
+    if (!title || !base || !head) { window.showToast?.('Fill title, base and head branch', 'warning'); return; }
+    prSubmit.disabled = true;
+    prSubmit.textContent = 'Creating…';
+    try {
+      const pr = await _ghFetch(`/repos/${_repo}/pulls`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, base, head, body })
+      });
+      window.showToast?.(`PR #${pr.number} created!`, 'success');
+      prForm.style.display = 'none';
+      newPrBtn.style.display = '';
+      // inject the fromPr so next Claude message gets context
+      window.__fromPr = `${_repo}#${pr.number}`;
+      await _loadPRs();
+    } catch (e) {
+      window.showToast?.(e.message, 'error');
+    } finally {
+      prSubmit.disabled = false;
+      prSubmit.textContent = 'Create PR';
+    }
+  });
+
+  // ── Branches ──────────────────────────────────────────────────────────────
+  async function _loadBranches(silentOnly = false) {
+    if (!_repo) return;
+    try {
+      const data = await _ghFetch(`/repos/${_repo}/branches?per_page=100`);
+      _branches = data.map(b => b.name);
+
+      // detect default
+      try {
+        const repoMeta = await _ghFetch(`/repos/${_repo}`);
+        _defaultBranch = repoMeta.default_branch || 'main';
+      } catch { /* ignore */ }
+
+      if (silentOnly) return;
+
+      const listEl = $('#gh-branch-list');
+      if (!listEl) return;
+      if (!_branches.length) { listEl.innerHTML = '<div class="gh-placeholder">No branches.</div>'; return; }
+
+      listEl.innerHTML = _branches.map(b => `
+        <div class="gh-branch-row">
+          <span class="gh-branch-icon">⎇</span>
+          <span class="gh-branch-name${b === _defaultBranch ? ' gh-branch-name--default' : ''}">${escapeHTML(b)}</span>
+          ${b === _defaultBranch ? '<span class="gh-branch-badge">default</span>' : ''}
+          <a class="gh-branch-link" href="https://github.com/${escapeHTML(_repo)}/tree/${encodeURIComponent(b)}"
+             target="_blank" title="View on GitHub">↗</a>
+        </div>`).join('');
+
+      // New branch form from selects
+      const fromSel = $('#gh-new-branch-from');
+      if (fromSel) fromSel.innerHTML = _branches.map(b => `<option value="${escapeHTML(b)}">${escapeHTML(b)}</option>`).join('');
+
+    } catch (e) {
+      const listEl = $('#gh-branch-list');
+      if (listEl) listEl.innerHTML = `<div class="gh-err">${escapeHTML(e.message)}</div>`;
+    }
+  }
+
+  // New branch
+  const newBranchFab = $('#gh-new-branch-fab-btn');
+  const newBranchRow = $('#gh-new-branch-row');
+  const createBranchBtn = $('#gh-create-branch-btn');
+
+  if (newBranchFab) newBranchFab.addEventListener('click', () => {
+    if (!_repo) { window.showToast?.('Load a repo first', 'warning'); return; }
+    newBranchRow.style.display = 'flex';
+    newBranchFab.style.display = 'none';
+  });
+
+  if (createBranchBtn) createBranchBtn.addEventListener('click', async () => {
+    const name = ($('#gh-new-branch-name')?.value || '').trim();
+    const from = ($('#gh-new-branch-from')?.value || '').trim() || _defaultBranch;
+    if (!name) { window.showToast?.('Enter a branch name', 'warning'); return; }
+    createBranchBtn.disabled = true;
+    try {
+      // Get SHA of the source branch
+      const ref = await _ghFetch(`/repos/${_repo}/git/ref/heads/${from}`);
+      await _ghFetch(`/repos/${_repo}/git/refs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: `refs/heads/${name}`, sha: ref.object.sha })
+      });
+      window.showToast?.(`Branch "${name}" created from "${from}"`, 'success');
+      $('#gh-new-branch-name').value = '';
+      newBranchRow.style.display = 'none';
+      newBranchFab.style.display = '';
+      await _loadBranches();
+    } catch (e) {
+      window.showToast?.(e.message, 'error');
+    } finally {
+      createBranchBtn.disabled = false;
+    }
+  });
+
+  // ── Commit & Push tab ─────────────────────────────────────────────────────
+  async function _loadPushStatus() {
+    const statusEl  = $('#gh-push-status');
+    const formEl    = $('#gh-push-form');
+    const infoEl    = $('#gh-push-info');
+    if (!statusEl) return;
+
+    if (!_repo) { statusEl.innerHTML = '<div class="gh-placeholder">Load a repo first.</div>'; return; }
+    if (!git)   { statusEl.innerHTML = '<div class="gh-placeholder">Local git not available.</div>'; return; }
+
+    statusEl.innerHTML = '<div class="gh-loading">Checking working tree…</div>';
+    try {
+      const statusRes = await git.action('status', null, ['--porcelain']);
+      const logRes    = await git.action('log', null, ['--oneline', '-5']);
+      const branchRes = await git.action('branch', null, ['--show-current']);
+
+      if (statusEl) statusEl.innerHTML = '';
+      if (formEl)   formEl.style.display = 'block';
+      if (infoEl) {
+        const branch  = (branchRes?.output || '').trim();
+        const changed = (statusRes?.output || '').trim().split('\n').filter(Boolean).length;
+        infoEl.innerHTML = `
+          <div class="gh-push-branch">
+            <span class="gh-branch-icon">⎇</span>
+            <strong>${escapeHTML(branch || 'unknown')}</strong>
+            <span style="color:#6a6a72;font-size:11px;margin-left:6px">${changed} changed file${changed !== 1 ? 's' : ''}</span>
+          </div>
+          ${logRes?.output ? `<div class="gh-recent-commits">
+            <div class="gh-section-label">Recent commits</div>
+            ${(logRes.output.trim().split('\n')).map(l =>
+              `<div class="gh-commit-row">${escapeHTML(l)}</div>`
+            ).join('')}
+          </div>` : ''}`;
+      }
+    } catch (e) {
+      if (statusEl) statusEl.innerHTML = `<div class="gh-err">${escapeHTML(e.message)}</div>`;
+    }
+  }
+
+  const stageAllBtn   = $('#gh-stage-all');
+  const commitPushBtn = $('#gh-commit-push-btn');
+  const pullBtn       = $('#gh-pull-btn');
+
+  if (stageAllBtn) stageAllBtn.addEventListener('click', async () => {
+    if (!git) return;
+    await git.action('add', null, ['.']);
+    await _loadPushStatus();
+    window.showToast?.('All changes staged', 'info');
+  });
+
+  if (commitPushBtn) commitPushBtn.addEventListener('click', async () => {
+    if (!git) return;
+    const msg = ($('#gh-commit-msg-gh')?.value || '').trim();
+    if (!msg) { $('#gh-commit-msg-gh')?.focus(); return; }
+    commitPushBtn.disabled = true;
+    commitPushBtn.textContent = 'Working…';
+    try {
+      const commitRes = await git.action('commit', null, ['-m', msg]);
+      if (!commitRes?.ok) throw new Error(commitRes?.error || 'Commit failed');
+      const pushRes = await git.action('push', null, []);
+      if (!pushRes?.ok) throw new Error(pushRes?.error || 'Push failed');
+      $('#gh-commit-msg-gh').value = '';
+      window.showToast?.('Committed & pushed!', 'success');
+      await _loadPushStatus();
+    } catch (e) {
+      window.showToast?.(e.message, 'error');
+    } finally {
+      commitPushBtn.disabled = false;
+      commitPushBtn.textContent = 'Commit & Push';
+    }
+  });
+
+  if (pullBtn) pullBtn.addEventListener('click', async () => {
+    if (!git) return;
+    pullBtn.disabled = true;
+    try {
+      const res = await git.action('pull', null, ['--ff-only']);
+      if (res?.ok) {
+        window.showToast?.('Pulled successfully', 'success');
+      } else {
+        window.showToast?.(res?.error || 'Pull failed', 'error');
+      }
+      await _loadPushStatus();
+    } catch (e) {
+      window.showToast?.(e.message, 'error');
+    } finally {
+      pullBtn.disabled = false;
+    }
+  });
+
+  // ── Initial load ──────────────────────────────────────────────────────────
+  async function _loadAll() {
+    if (!_repo) return;
+    const repoInp = $('#gh-repo-input');
+    if (repoInp) repoInp.value = _repo;
+    await _loadTree('');
+    await _loadBranches(true);
+  }
+
+  if (_repo) await _loadAll();
+}
+
 // ---------- Path linkifier (code blocks) ----------
 // Scans <pre> elements for Windows/Unix absolute paths, checks real existence
 // via IPC, then wraps live paths in clickable light-blue spans.
@@ -7067,6 +8573,7 @@ const SPLIT_TABS = [
   { id: 'plan',     icon: 'list-checks',     label: 'Plan'     },
   { id: 'taches',   icon: 'kanban',          label: 'Tasks'    },
   { id: 'git',      icon: 'git-branch',      label: 'Git'      },
+  { id: 'github',   icon: 'github-logo',     label: 'GitHub'   },
   { id: 'mcp',      icon: 'plug',            label: 'MCP'      },
   { id: 'context',  icon: 'chart-bar',       label: 'Context'  },
   { id: 'fichiers', icon: 'folder-open',     label: 'Files'    },
@@ -7225,7 +8732,9 @@ function renderPanelContent(id) {
   else if (id === 'skills')    body = renderSkillsDockPanel();
   else if (id === 'mcp')       body = renderMcpPanel();
   else if (id === 'git')       body = renderGitPanel();
-  else if (id === 'context')   body = renderContextPanel();
+  else if (id === 'github')      body = renderGithubPanel();
+  else if (id === 'screenshots') body = renderScreenshotsPanel();
+  else if (id === 'context')     body = renderContextPanel();
   else body = `
     <div class="right-panel__empty">
       <div class="right-panel__empty-icon">${iconSVG(tab.icon)}</div>
@@ -7278,6 +8787,8 @@ function setSplitPaneContent(pane, tabId) {
   if (tabId === 'skills')   requestAnimationFrame(() => initSkillsDockPanel());
   if (tabId === 'mcp')      requestAnimationFrame(() => initMcpPanel(content));
   if (tabId === 'git')      requestAnimationFrame(() => initGitPanel(content));
+  if (tabId === 'github')      requestAnimationFrame(() => initGithubPanel(content));
+  if (tabId === 'screenshots') requestAnimationFrame(() => initScreenshotsPanel(content));
   if (tabId === 'terminal') requestAnimationFrame(() => initTerminalPanel());
 }
 
@@ -7414,7 +8925,7 @@ function setRightPanelTab(id) {
     wirePlanTabEvents(_splitTopTab, document.getElementById('split-content-top'));
     wirePlanTabEvents(_splitBottomTab, document.getElementById('split-content-bottom'));
     if (_splitTopTab === 'apercu' || _splitBottomTab === 'apercu') {
-      requestAnimationFrame(() => initApercuScaling(bodyEl));
+      requestAnimationFrame(() => { initApercuScaling(bodyEl); initApercuServer(bodyEl); });
     }
   } else {
     bodyEl.classList.remove('is-split');
@@ -7444,15 +8955,20 @@ function setRightPanelTab(id) {
       _gitRefreshTimer = null;
     }
 
+    // Disconnect apercu ResizeObserver before replacing the panel DOM
+    if (currentRightPanel === 'apercu') _apercuROCleanup(bodyEl);
+
     bodyEl.innerHTML = renderPanelContent(id);
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(id, bodyEl);
-    if (id === 'apercu')   requestAnimationFrame(() => initApercuScaling(bodyEl));
+    if (id === 'apercu')   requestAnimationFrame(() => { initApercuScaling(bodyEl); initApercuServer(bodyEl); });
     if (id === 'terminal') requestAnimationFrame(() => initTerminalPanel());
     if (id === 'notes')    requestAnimationFrame(() => initNotesPanel());
     if (id === 'skills')   requestAnimationFrame(() => initSkillsDockPanel());
     if (id === 'mcp')      requestAnimationFrame(() => initMcpPanel(bodyEl));
     if (id === 'git')      requestAnimationFrame(() => initGitPanel(bodyEl));
+    if (id === 'github')      requestAnimationFrame(() => initGithubPanel(bodyEl));
+    if (id === 'screenshots') requestAnimationFrame(() => initScreenshotsPanel(bodyEl));
   }
 
   // Sync context-strip chips
@@ -7464,6 +8980,9 @@ function setRightPanelTab(id) {
 // (not triggered by programmatic setRightPanelTab calls)
 window._dvTabChange = function(id) {
   if (!document.body.classList.contains('right-panel-open')) return;
+  // Terminal panels (term-*) and split-chat panels are workspace-only — never
+  // map to a right-panel tab, so clicking them must not replace the current panel.
+  if (id.startsWith('term-') || id.startsWith('split-chat')) return;
   // Skip only if panel is current AND body already has content (handles layout restore)
   const bodyEl = document.getElementById('right-panel-body');
   if (currentRightPanel === id && bodyEl && bodyEl.children.length > 0) return;
@@ -7761,11 +9280,23 @@ function duplicateSession(id) {
   const found = findSession(id);
   if (!found) return;
   const src = found.list[found.index];
-  const newS = createNewSession({ projectId: src.projectId, title: src.title + ' (copy)' });
+  const newS = createNewSession({ projectId: src.projectId, title: src.title + ' (fork)' });
   // Copy messages too
   const msgs = loadSessionMessages(id);
   saveSessionMessages(newS.id, [...msgs]);
   window.__chatHistory = loadSessionMessages(newS.id);
+
+  // Store the source CLI session ID so the first message uses --fork-session
+  // The CLI will create a new branch from the original session
+  if (src.cliSessionId) {
+    const list = loadSessionList();
+    const entry = list.find(s => s.id === newS.id);
+    if (entry) {
+      entry._forkFromCli = src.cliSessionId;
+      saveSessionList(list);
+    }
+  }
+
   switchToSession(newS.id);
   render();
 }
@@ -8039,6 +9570,19 @@ let _streamInterval = setInterval(() => {
 
   // ── Image paste state ─────────────────────────────────────────────────────
   let _pendingImages = []; // [{dataUrl, mediaType}]
+  // Expose on window so the attach menu (outside this IIFE) can push images
+  window.__addPendingImage = (dataUrl, mediaType) => {
+    _pendingImages.push({ dataUrl, mediaType });
+    syncImgPreviews();
+  };
+  // Drain any images queued before this IIFE ran (attach menu pre-launch)
+  if (window.__pendingAttachImages?.length) {
+    window.__pendingAttachImages.splice(0).forEach(({ dataUrl, mediaType }) => {
+      _pendingImages.push({ dataUrl, mediaType });
+    });
+    syncImgPreviews();
+    window.__pendingAttachImages = null;
+  }
 
   // Inject the preview strip into the composer (above the textarea)
   const composerEl = composerInput.closest('.composer');
@@ -8695,6 +10239,264 @@ let _streamInterval = setInterval(() => {
     text = text.trim();
     if (!text || isStreaming) return;
 
+    // ── Slash command interceptor ─────────────────────────────────────────
+    if (text.startsWith('/') && !opts._skipSlash) {
+      const spaceIdx = text.indexOf(' ');
+      const cmd = (spaceIdx === -1 ? text : text.slice(0, spaceIdx)).toLowerCase();
+
+      // System note helper — renders a styled assistant bubble without hitting the API
+      function sysNote(markdown) {
+        clearMock();
+        document.getElementById('chat-scroll')?.querySelector('.chat-empty')?.remove();
+        const div = addAssistantBubble();
+        streamToAssistantBubble(div, markdown);
+        finalizeAssistantBubble(div, null);
+        composerInput.value = '';
+        composerInput.style.height = '';
+      }
+
+      // Helper — clear input silently
+      function clearInput() {
+        composerInput.value = '';
+        composerInput.style.height = '';
+      }
+
+      switch (cmd) {
+
+        // ── /clear — wipe conversation ──────────────────────────────────
+        case '/clear': {
+          window.__chatHistory = [];
+          saveSessionMessages(state.activeId, []);
+          // Also clear the cliSessionId so next turn starts a fresh CLI context
+          const _list = loadSessionList();
+          const _entry = _list.find(s => s.id === state.activeId);
+          if (_entry) { delete _entry.cliSessionId; saveSessionList(_list); }
+          chatConv.innerHTML = '';
+          _renderChatForSession(state.activeId);
+          clearInput();
+          return;
+        }
+
+        // ── /new — start a brand-new session ───────────────────────────
+        case '/new': {
+          clearInput();
+          const newS = createNewSession({ title: 'New session' });
+          switchToSession(newS.id);
+          return;
+        }
+
+        // ── /model — open model switcher ────────────────────────────────
+        case '/model': {
+          clearInput();
+          showConsole('models');
+          return;
+        }
+
+        // ── /permissions — permission mode panel ────────────────────────
+        case '/permissions': {
+          clearInput();
+          showConsole('permissions');
+          return;
+        }
+
+        // ── /memory — memory manager ────────────────────────────────────
+        case '/memory': {
+          clearInput();
+          showConsole('memory');
+          return;
+        }
+
+        // ── /config — open settings (appearance page) ───────────────────
+        case '/config': {
+          clearInput();
+          showConsole('appearance');
+          return;
+        }
+
+        // ── /mcp — open MCP right panel tab ─────────────────────────────
+        case '/mcp': {
+          clearInput();
+          // Make sure right panel is open then switch to the MCP tab
+          if (!document.body.classList.contains('right-panel-open')) {
+            document.getElementById('right-panel-btn')?.click();
+          }
+          requestAnimationFrame(() => setRightPanelTab('mcp'));
+          return;
+        }
+
+        // ── /login — show auth modal ─────────────────────────────────────
+        case '/login': {
+          clearInput();
+          showAuthModal();
+          return;
+        }
+
+        // ── /logout — sign out ───────────────────────────────────────────
+        case '/logout': {
+          clearInput();
+          if (window.electronAPI?.signOut) {
+            window.electronAPI.signOut().then(() => {
+              updateAccountBadge({ mode: 'none', valid: false });
+              setTimeout(() => showAuthModal(), 300);
+            });
+          } else {
+            sysNote('⚠️ **Sign out unavailable** — not running in desktop app mode.');
+          }
+          return;
+        }
+
+        // ── /compact — truncate history, keep last 8 messages ───────────
+        case '/compact': {
+          const hist = window.__chatHistory || [];
+          if (hist.length <= 4) {
+            sysNote('ℹ️ **Nothing to compact** — conversation is already short.');
+            return;
+          }
+          const KEEP = 8;
+          const removed = hist.length - KEEP;
+          window.__chatHistory = hist.slice(-KEEP);
+          saveSessionMessages(state.activeId, window.__chatHistory);
+          _renderChatForSession(state.activeId);
+          sysNote(
+            `✅ **History compacted** — removed **${removed}** older message${removed !== 1 ? 's' : ''}, ` +
+            `keeping the last **${Math.min(hist.length, KEEP)}**.`
+          );
+          return;
+        }
+
+        // ── /cost — show token usage ─────────────────────────────────────
+        case '/cost': {
+          const s = window.__contextStats;
+          if (!s || !s.inputTokens) {
+            sysNote('ℹ️ **No token data yet** — send a message first to see usage.');
+          } else {
+            const used   = s.inputTokens     || 0;
+            const out    = s.outputTokens    || 0;
+            const cached = s.cacheReadTokens || 0;
+            const model  = s.model || modelState?.currentModel || 'unknown';
+            const total  = getModelCtxSize(model);
+            const pct    = ((used / total) * 100).toFixed(1);
+            sysNote(
+              `### 💰 Token Usage\n\n` +
+              `| Metric | Value |\n|---|---|\n` +
+              `| **Input (full context)** | ${used.toLocaleString()} tokens |\n` +
+              `| **Output (response)** | ${out.toLocaleString()} tokens |\n` +
+              `| **Cache hits** | ${cached.toLocaleString()} tokens |\n` +
+              `| **Context used** | ${pct}% of ${(total / 1000).toFixed(0)}k |\n` +
+              `| **Model** | \`${model}\` |`
+            );
+          }
+          return;
+        }
+
+        // ── /status — session status ─────────────────────────────────────
+        case '/status': {
+          const sess   = loadSessionList().find(s => s.id === state.activeId);
+          const hist   = window.__chatHistory || [];
+          const model  = modelState?.currentModel  || 'unknown';
+          const effort = modelState?.currentEffort || '';
+          const perm   = permState?.current || 'unknown';
+          const ctxS   = window.__contextStats;
+          const used   = ctxS?.inputTokens ? `${(ctxS.inputTokens / 1000).toFixed(1)}k` : '—';
+          sysNote(
+            `### 📊 Session Status\n\n` +
+            `| | |\n|---|---|\n` +
+            `| **Session** | ${sess?.title || 'Untitled'} |\n` +
+            `| **Messages** | ${hist.length} |\n` +
+            `| **Model** | \`${model}\`${effort ? ' · ' + effort : ''} |\n` +
+            `| **Permissions** | \`${perm}\` |\n` +
+            `| **Context used** | ${used} |`
+          );
+          return;
+        }
+
+        // ── /help — show all commands ────────────────────────────────────
+        case '/help': {
+          sysNote(
+            `### 📖 Slash Commands\n\n` +
+            `| Command | Action |\n|---|---|\n` +
+            `| \`/clear\` | Clear conversation history |\n` +
+            `| \`/compact\` | Truncate history, keep last 8 messages |\n` +
+            `| \`/new\` | Start a new session |\n` +
+            `| \`/model\` | Switch model & effort level |\n` +
+            `| \`/permissions\` | Change permission mode |\n` +
+            `| \`/cost\` | Show token usage stats |\n` +
+            `| \`/status\` | Show current session status |\n` +
+            `| \`/memory\` | Open memory manager |\n` +
+            `| \`/mcp\` | Open MCP tools panel |\n` +
+            `| \`/config\` | Open appearance settings |\n` +
+            `| \`/login\` | Authenticate |\n` +
+            `| \`/logout\` | Sign out |\n` +
+            `| \`/init\` | Ask Claude to create a CLAUDE.md |\n` +
+            `| \`/pr <url>\` | Start session from a GitHub PR (--from-pr) |\n` +
+            `| \`/doctor\` | Run diagnostics |\n` +
+            `| \`/help\` | Show this help |\n`
+          );
+          return;
+        }
+
+        // ── /init — create CLAUDE.md via Claude ─────────────────────────
+        case '/init': {
+          clearInput();
+          // Delegate to Claude — send a real message asking it to create CLAUDE.md
+          send(
+            'Please create a CLAUDE.md file for this project. Include: project overview, ' +
+            'tech stack, key conventions, important file locations, and any instructions for ' +
+            'Claude Code to follow in this workspace.',
+            { _skipSlash: true }
+          );
+          return;
+        }
+
+        // ── /doctor — diagnostics ────────────────────────────────────────
+        case '/doctor': {
+          const isElectron = !!window.electronAPI?.isElectron;
+          const hasCtx     = !!window.__contextStats;
+          const msgCount   = (window.__chatHistory || []).length;
+          const curModel   = modelState?.currentModel || 'none';
+          const hasMcp     = document.querySelector('.mcp-status-dot') !== null;
+          sysNote(
+            `### 🩺 Diagnostics\n\n` +
+            `| Check | Status |\n|---|---|\n` +
+            `| **Runtime** | ${isElectron ? '✅ Electron desktop' : '⚠️ Web mode (no API access)'} |\n` +
+            `| **Model** | ${curModel !== 'none' ? '✅ ' + curModel : '❌ Not set'} |\n` +
+            `| **Messages in memory** | ${msgCount} |\n` +
+            `| **Context stats** | ${hasCtx ? '✅ Available' : '⚠️ No data yet (send a message)'} |\n` +
+            `| **Permission mode** | \`${permState?.current || 'unknown'}\` |\n` +
+            `| **MCP indicator** | ${hasMcp ? '✅ Found in DOM' : '⚠️ Not detected'} |\n`
+          );
+          return;
+        }
+
+        // ── /pr — start Claude session from a GitHub PR ──────────────────
+        // Usage: /pr <pr-url-or-number>
+        // Sets window.__fromPr so the next send uses --from-pr <value>
+        case '/pr': {
+          const arg = spaceIdx !== -1 ? text.slice(spaceIdx + 1).trim() : '';
+          if (!arg) {
+            sysNote(
+              `### 📋 /pr — Start from a Pull Request\n\n` +
+              `Usage: \`/pr <pr-url-or-number>\`\n\n` +
+              `Examples:\n` +
+              `- \`/pr 123\`\n` +
+              `- \`/pr https://github.com/owner/repo/pull/456\`\n\n` +
+              `Claude Code will fetch the PR diff and start a session with full PR context.`
+            );
+            return;
+          }
+          window.__fromPr = arg;
+          clearInput();
+          sysNote(`### 🔗 PR loaded\n\nNext message will start a Claude session with PR context: \`${arg}\`\n\nType your instructions now.`);
+          return;
+        }
+
+        // ── Unknown slash command — fall through to normal send ──────────
+        default:
+          break;
+      }
+    }
+    // ── End slash command interceptor ─────────────────────────────────────
+
     // Electron check — real API requires desktop app
     if (!window.electronAPI?.isElectron) {
       clearMock();
@@ -8846,6 +10648,17 @@ let _streamInterval = setInterval(() => {
       const sessionEntry = sessionList.find(s => s.id === sessionId);
       const cliSessionId = sessionEntry?.cliSessionId || null;
 
+      // ── Fork-session: on first message of a forked session, pass --fork-session ──
+      // After the fork is established the CLI will assign a new session ID; clear
+      // _forkFromCli so subsequent messages use --resume normally.
+      let forkFromCli = null;
+      if (sessionEntry?._forkFromCli && !cliSessionId) {
+        forkFromCli = sessionEntry._forkFromCli;
+        // Clear immediately so we don't fork again on the next message
+        delete sessionEntry._forkFromCli;
+        saveSessionList(sessionList);
+      }
+
       const agentModel     = resolvedAgent?.model?.trim() || null;
       const effectiveModel = agentModel || modelState?.currentModel || 'claude-sonnet-4-6';
       // Always build system prompt — passed on every turn as a hidden system layer.
@@ -8869,12 +10682,28 @@ let _streamInterval = setInterval(() => {
         : history;
       window.__lastApiContent = undefined;
 
+      // ── Build CLI opts from current UI state ────────────────────────────
+      // Consume --from-pr once, then clear it
+      const fromPr = window.__fromPr || null;
+      if (fromPr) window.__fromPr = null;
+
+      const cliOpts = {
+        effort:       modelState?.currentEffort || null,
+        sessionName:  sessionEntry?.title || null,
+        addDirs:      window.__addDirs || [],
+        maxBudget:    window.__maxBudgetUsd || null,
+        forkFromCli:  forkFromCli || null,
+        fromPr:       fromPr,
+        directMode:   !!modelState?.directMode,
+      };
+
       const result = await window.electronAPI.sendMessage(
         apiMessages,
         effectiveModel,
         effectiveSystem,
         cliSessionId,
-        permState?.current || 'bypass'
+        permState?.current || 'bypass',
+        cliOpts
       );
       const finalText = responseText || result?.text || '';
       history.push({ role: 'assistant', content: finalText });
@@ -9085,6 +10914,145 @@ let _streamInterval = setInterval(() => {
     composerInput.style.height = Math.min(composerInput.scrollHeight, 200) + 'px';
   });
 
+  // ── Inline slash command autocomplete ─────────────────────────────────────
+  // Opens a filtered slash menu above the composer whenever the user types "/"
+  // as the first character. Keyboard nav: ↑↓ to move, Enter/Tab to execute,
+  // Esc to close. Clicking a command executes it immediately.
+  let _inlineSlashOpen  = false;
+  let _inlineSlashIdx   = -1;
+
+  function _getInlineFilter() {
+    const val = composerInput.value;
+    // Only active when text starts with "/" and has no space (no args yet)
+    if (!val.startsWith('/') || val.includes(' ')) return null;
+    return val.slice(1).toLowerCase();
+  }
+
+  function _renderInlineSlashMenu(filter) {
+    const matches = SLASH_COMMANDS.filter(c =>
+      filter === '' || c.cmd.slice(1).startsWith(filter)
+    );
+    if (!matches.length) { _closeInlineSlashMenu(); return; }
+
+    _inlineSlashOpen = true;
+    _inlineSlashIdx  = -1;
+
+    ctx.innerHTML = `
+      <div class="slash-menu slash-menu--inline">
+        ${matches.map((c, i) => {
+          // Underline the matched portion of the command name
+          const body    = c.cmd.slice(1);           // e.g. "clear"
+          const matchLen = filter.length;
+          const matched  = escapeHTML(c.cmd.slice(0, 1 + matchLen));  // "/cl"
+          const rest     = escapeHTML(c.cmd.slice(1 + matchLen));       // "ear"
+          const cmdHtml  = matchLen > 0
+            ? `<span class="slash-row__match">${matched}</span>${rest}`
+            : escapeHTML(c.cmd);
+          return `
+          <button data-slash="${escapeHTML(c.cmd)}" data-sidx="${i}" class="slash-row">
+            <span class="slash-row__cmd">${cmdHtml}</span>
+            <span class="slash-row__desc">${escapeHTML(c.desc)}</span>
+          </button>`;
+        }).join('')}
+      </div>
+    `;
+    ctx.classList.remove('hidden');
+
+    // Position above the composer input, left-aligned with it
+    const rect  = composerInput.closest('.composer')?.getBoundingClientRect()
+                || composerInput.getBoundingClientRect();
+    // Must read ctx size AFTER innerHTML set
+    requestAnimationFrame(() => {
+      const cRect = ctx.getBoundingClientRect();
+      let left = rect.left;
+      left = Math.max(8, Math.min(left, window.innerWidth - cRect.width - 8));
+      const top = rect.top - cRect.height - 8;
+      ctx.style.left     = left + 'px';
+      ctx.style.top      = top  + 'px';
+      ctx.style.minWidth = rect.width + 'px';
+    });
+
+    ctx.onclick = (ev) => {
+      const btn = ev.target.closest('button[data-slash]');
+      if (!btn) return;
+      _executeInlineSlash(btn.dataset.slash);
+    };
+  }
+
+  function _setInlineSlashFocus(idx) {
+    _inlineSlashIdx = idx;
+    ctx.querySelectorAll('button[data-slash]').forEach((b, i) =>
+      b.classList.toggle('slash-row--focused', i === idx)
+    );
+  }
+
+  function _closeInlineSlashMenu() {
+    if (!_inlineSlashOpen) return;
+    _inlineSlashOpen = false;
+    _inlineSlashIdx  = -1;
+    hideCtx();
+  }
+
+  function _executeInlineSlash(cmd) {
+    _closeInlineSlashMenu();
+    composerInput.value = '';
+    composerInput.style.height = '';
+    send(cmd);
+  }
+
+  // Show/filter menu as user types
+  composerInput.addEventListener('input', () => {
+    const filter = _getInlineFilter();
+    if (filter !== null) _renderInlineSlashMenu(filter);
+    else _closeInlineSlashMenu();
+  });
+
+  // Keyboard navigation inside the inline slash menu
+  composerInput.addEventListener('keydown', (e) => {
+    if (!_inlineSlashOpen) return;
+    const btns = [...ctx.querySelectorAll('button[data-slash]')];
+    if (!btns.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      _setInlineSlashFocus((_inlineSlashIdx + 1) % btns.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      _setInlineSlashFocus((_inlineSlashIdx - 1 + btns.length) % btns.length);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      if (_inlineSlashIdx >= 0) {
+        _executeInlineSlash(btns[_inlineSlashIdx].dataset.slash);
+      } else if (btns.length === 1) {
+        _executeInlineSlash(btns[0].dataset.slash);
+      } else {
+        _setInlineSlashFocus(0);   // Tab with no focus → jump to first item
+      }
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      if (_inlineSlashIdx >= 0) {
+        // Focused item — execute it
+        e.preventDefault();
+        _executeInlineSlash(btns[_inlineSlashIdx].dataset.slash);
+      } else if (btns.length === 1) {
+        // Exactly one match — auto-execute it
+        e.preventDefault();
+        _executeInlineSlash(btns[0].dataset.slash);
+      }
+      // Multiple matches, no focus → fall through to normal send (interceptor handles it)
+    } else if (e.key === 'Escape') {
+      e.stopPropagation();
+      _closeInlineSlashMenu();
+    }
+  }, true);   // capture phase so we beat the outer Escape → hideCtx listener
+
+  // Close when user clicks outside
+  document.addEventListener('click', (e) => {
+    if (_inlineSlashOpen && !ctx.contains(e.target) && e.target !== composerInput) {
+      _closeInlineSlashMenu();
+    }
+  });
+  // ── End inline slash autocomplete ─────────────────────────────────────────
+
   // ── Startup: silently refresh if expired, then check, prompt if needed ───────
 
   if (window.electronAPI?.isElectron) {
@@ -9231,9 +11199,18 @@ let _streamInterval = setInterval(() => {
   // ── Startup render: show saved messages (removes the empty-state placeholder) ─
   // Without this, the "How can I help you today?" persists even if the session
   // has prior messages — because _renderChatForSession is only called on switches.
+  // We attempt immediately, then retry up to 3× with increasing delays because
+  // dockview may not have adopted #chat-slot yet when this IIFE first runs.
   clearInterval(_streamInterval); // stop the demo state cycle immediately
   mockCleared = true;
-  _renderChatForSession(state.activeId);
+  (function tryRender(attempts) {
+    const conv = document.querySelector('.chat-conversation');
+    if (conv) {
+      _renderChatForSession(state.activeId);
+    } else if (attempts > 0) {
+      setTimeout(() => tryRender(attempts - 1), 250);
+    }
+  })(4); // up to 4 retries × 250 ms = 1 second window
 
 })(); // end initLiveChat
 
@@ -9384,6 +11361,90 @@ let _streamInterval = setInterval(() => {
 
   // Listen for subsequent changes
   api?.onMaximizeChange?.(setMaxState);
+})();
+
+// ── Dual window ───────────────────────────────────────────────────────────────
+
+(function initDualWindow() {
+  const api = window.electronAPI;
+  if (!api?.getWindowRole) return;
+
+  // Lazy element getters — always re-query so timing doesn't matter
+  const el = id => document.getElementById(id);
+
+  // Apply role to DOM — called after DOM is ready
+  function applyRole(role) {
+    document.body.setAttribute('data-win-role', role);
+    const strip    = el('secondary-sidebar-strip');
+    const spawnBtn = el('tb-spawn-secondary');
+    const numChip  = el('screen-number-chip');
+
+    if (role === 'secondary') {
+      if (strip)    strip.style.display = 'flex';
+      if (spawnBtn) spawnBtn.style.display = 'none';
+      if (numChip)  { numChip.textContent = '2'; numChip.title = 'Screen 2 (secondary)'; }
+    } else {
+      if (strip)    strip.style.display = 'none';
+      if (spawnBtn) spawnBtn.style.display = '';
+      if (numChip)  { numChip.textContent = '1'; numChip.title = 'Screen 1 (primary)'; }
+    }
+  }
+
+  async function refreshSpawnBtn() {
+    const spawnBtn = el('tb-spawn-secondary');
+    if (!spawnBtn) return;
+    const has = await api.hasSecondary().catch(() => false);
+    spawnBtn.classList.toggle('has-secondary', !!has);
+    spawnBtn.title = has ? 'Focus second screen window' : 'Open second screen window';
+  }
+
+  // Wait for DOM then init
+  function onReady() {
+    // Get role from main process — retry a few times in case main hasn't set it yet
+    async function fetchRole(attempts = 5) {
+      for (let i = 0; i < attempts; i++) {
+        try {
+          const role = await api.getWindowRole();
+          applyRole(role);
+          if (role === 'primary') refreshSpawnBtn();
+          return;
+        } catch { /* retry */ }
+        await new Promise(r => setTimeout(r, 300));
+      }
+      applyRole('primary'); // fallback
+    }
+    fetchRole();
+
+    // Listen for role changes
+    api.onRoleChanged?.(role => {
+      applyRole(role);
+      if (role === 'primary') refreshSpawnBtn();
+    });
+
+    // Spawn / focus secondary
+    el('tb-spawn-secondary')?.addEventListener('click', async () => {
+      const btn = el('tb-spawn-secondary');
+      if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+      await api.spawnSecondary().catch(() => {});
+      await new Promise(r => setTimeout(r, 800));
+      if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+      refreshSpawnBtn();
+    });
+
+    // Make primary
+    el('btn-make-primary')?.addEventListener('click', async () => {
+      await api.makePrimary().catch(() => {});
+    });
+
+    // Close secondary window
+    el('btn-close-secondary')?.addEventListener('click', () => api.closeWindow?.());
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', onReady);
+  } else {
+    onReady();
+  }
 })();
 
 // ── Workspace switcher ────────────────────────────────────────────────────────

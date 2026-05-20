@@ -140,13 +140,15 @@
     shortcuts: 'Shortcuts',
     mcp:       'MCP',
     git:       'Git',
-    context:   'Context',
+    github:      'GitHub',
+    screenshots: 'Screenshots',
+    context:     'Context',
   };
 
   // Ordered list of tool panels that appear in the right group
   const TOOL_IDS = [
     'apercu', 'diff', 'terminal', 'fichiers',
-    'taches', 'plan', 'notes', 'skills', 'git', 'mcp', 'context', 'shortcuts',
+    'taches', 'plan', 'notes', 'skills', 'git', 'github', 'screenshots', 'mcp', 'context', 'shortcuts',
   ];
 
   let dv           = null;
@@ -509,6 +511,7 @@
       async init(panelApi) {
         const p = panelApi.params || {};
         const isClaude = !!p.isClaude;
+        const isWorktree = !!p.isWorktree;
         const api = window.electronAPI;
         if (!api?.terminal) { wrap.textContent = 'No terminal API'; return; }
         const Terminal = window.Terminal;
@@ -519,6 +522,7 @@
           theme: _XTERM_THEME,
           fontFamily: '"Cascadia Code","Fira Code","JetBrains Mono",Consolas,monospace',
           fontSize: 13, lineHeight: 1.4, cursorBlink: true,
+          cursorInactiveStyle: 'block',
           scrollback: 5000, allowProposedApi: true,
         });
         const fitAddon = new FitAddon();
@@ -536,6 +540,8 @@
         // send `claude\r`. This is more reliable than a fixed timeout because
         // PowerShell 7 can take 0.5–2s to fully initialize.
         let _claudeLaunched = false;
+        // Build the claude launch command — plain `claude` or `claude --worktree`
+        const claudeCmd = isWorktree ? 'claude --worktree\r\n' : 'claude\r\n';
         function _maybeAutoLaunch(chunk) {
           if (!isClaude || _claudeLaunched) return;
           // Shell prompt patterns: ends with "> " or "$ " (PowerShell / bash)
@@ -544,7 +550,7 @@
           if (/[>$]\s*$/.test(plain)) {
             _claudeLaunched = true;
             // Small extra delay so the prompt line is fully rendered
-            setTimeout(() => api.terminal.input(termId, 'claude\r\n'), 120);
+            setTimeout(() => api.terminal.input(termId, claudeCmd), 120);
           }
         }
 
@@ -575,7 +581,7 @@
 
         // Fallback: if no prompt detected within 3s, send claude anyway
         if (isClaude) setTimeout(() => {
-          if (!_claudeLaunched) { _claudeLaunched = true; api.terminal.input(termId, 'claude\r\n'); }
+          if (!_claudeLaunched) { _claudeLaunched = true; api.terminal.input(termId, claudeCmd); }
         }, 3000);
 
         _inst = {
@@ -591,10 +597,13 @@
     };
   }
 
-  function openTerminal(isClaude = false) {
-    if (!dv) { _pendingTerminals.push(isClaude); return; }
+  function openTerminal(isClaude = false, opts = {}) {
+    if (!dv) { _pendingTerminals.push({ isClaude, opts }); return; }
     if (isClaude) _termClaudeSeq++; else _termShellSeq++;
-    const label = isClaude ? `Claude ${_termClaudeSeq}` : `Shell ${_termShellSeq}`;
+    const isWorktree = isClaude && !!opts.worktree;
+    const label = isWorktree
+      ? `Worktree ${_termClaudeSeq}`
+      : isClaude ? `Claude ${_termClaudeSeq}` : `Shell ${_termShellSeq}`;
     const id    = `term-${Date.now()}`;
 
     // Find a reference panel to dock beside (prefer existing terminal panels)
@@ -613,7 +622,7 @@
       id,
       component: 'terminal-instance',
       title: label,
-      params: { isClaude, label },
+      params: { isClaude, label, isWorktree },
       position: refId
         ? { direction: 'within', referencePanel: refId }
         : { direction: 'right',  referencePanel: 'chat' },
@@ -707,7 +716,13 @@
 
     // ── Bug C fix: drain any openTerminal calls queued before dv was ready ──
     if (_pendingTerminals.length) {
-      setTimeout(() => { _pendingTerminals.splice(0).forEach(openTerminal); }, 100);
+      setTimeout(() => {
+        _pendingTerminals.splice(0).forEach(item => {
+          // item may be a plain bool (legacy) or { isClaude, opts }
+          if (typeof item === 'boolean') openTerminal(item);
+          else openTerminal(item.isClaude, item.opts || {});
+        });
+      }, 100);
     }
 
     /* ── Drag — suppress browser "Move" badge ────────────────────── */
@@ -734,7 +749,9 @@
     dv.onDidActivePanelChange(e => {
       if (!e || _suppressTabChange) return;
       const { id } = e;
-      if (!id.startsWith('canvas-') && id !== 'chat' && id !== 'sidebar') {
+      const isWorkspaceOnly = id.startsWith('canvas-') || id.startsWith('term-')
+                           || id.startsWith('split-chat') || id === 'chat' || id === 'sidebar';
+      if (!isWorkspaceOnly) {
         assignBodyId(id);
         if (typeof window._dvTabChange === 'function') window._dvTabChange(id);
       }
@@ -1064,6 +1081,151 @@
 
   // Always visible in the new layout — no separate toggle needed
   function isVisible() { return true; }
+
+  /* ── Cross-window panel drag ─────────────────────────────────────── */
+  (function initCrossWindowDrag() {
+    const api = window.electronAPI?.panelDrag;
+    if (!api) return;
+
+    // Panels that can be moved between windows (stateless tool panels only)
+    const MOVABLE = new Set(TOOL_IDS);
+
+    let _dragging    = null;   // { panelId }
+    let _dragActive  = false;
+    let _startX      = 0;
+    let _startY      = 0;
+
+    // ── Drop-zone overlay (shown on this window when cursor enters from other) ──
+    const _overlay = document.createElement('div');
+    _overlay.id = 'xwin-drop-overlay';
+    _overlay.innerHTML = `
+      <div class="xwin-drop-inner">
+        <svg width="36" height="36" viewBox="0 0 256 256" fill="currentColor">
+          <path d="M240,72H208V56a16,16,0,0,0-16-16H32A16,16,0,0,0,16,56V168a16,16,0,0,0,16,16H80v16a16,16,0,0,0,16,16H240a16,16,0,0,0,16-16V88A16,16,0,0,0,240,72ZM32,168V56H192v16H96A16,16,0,0,0,80,88v80Zm208,16H96V88H240V184Z"/>
+        </svg>
+        <span class="xwin-drop-label">Drop to move here</span>
+        <span class="xwin-drop-panel"></span>
+      </div>`;
+    document.body.appendChild(_overlay);
+
+    function _showOverlay(panelId) {
+      _overlay.querySelector('.xwin-drop-panel').textContent = PANEL_TITLES[panelId] || panelId;
+      _overlay.classList.add('xwin-drop--active');
+    }
+    function _hideOverlay() {
+      _overlay.classList.remove('xwin-drop--active');
+    }
+
+    // ── Detect dockview tab drag ──────────────────────────────────────
+    document.addEventListener('mousedown', e => {
+      const tab = e.target.closest('.dv-tab');
+      if (!tab) return;
+
+      // Get the panel ID for this tab — dockview sets the active panel on mousedown
+      _startX = e.clientX;
+      _startY = e.clientY;
+      _dragging = null;
+      _dragActive = false;
+
+      // Resolve panel ID: try tab's data attrs, then use active panel after tick
+      const resolve = () => {
+        // The active panel should have just changed to match the clicked tab
+        const panel = dv?.activePanel;
+        if (!panel || !MOVABLE.has(panel.id)) return;
+        _dragging = { panelId: panel.id };
+      };
+      // Try immediately, then after dockview processes the click
+      resolve();
+      setTimeout(resolve, 16);
+    }, { passive: true });
+
+    document.addEventListener('mousemove', e => {
+      if (!_dragging) return;
+      const dx = Math.abs(e.clientX - _startX);
+      const dy = Math.abs(e.clientY - _startY);
+      if (!_dragActive && (dx > 8 || dy > 8)) {
+        _dragActive = true;
+        api.start(_dragging.panelId).catch(() => {});
+        console.log('[xwin-drag] drag started:', _dragging.panelId);
+      }
+    }, { passive: true });
+
+    document.addEventListener('mouseup', async e => {
+      if (!_dragging || !_dragActive) {
+        _dragging = null; _dragActive = false;
+        return;
+      }
+      const { panelId } = _dragging;
+      _dragging = null; _dragActive = false;
+
+      const result = await api.end().catch(() => null);
+      _hideOverlay();
+
+      if (result?.transferred && result.panelId === panelId) {
+        // Remove the panel from THIS window — it will open in the other
+        console.log('[xwin-drag] transfer confirmed, closing local panel:', panelId);
+        const panel = dv?.getPanel(panelId);
+        if (panel) {
+          try { panel.api.close(); } catch (_) {}
+        }
+      }
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && _dragActive) {
+        _dragActive = false; _dragging = null;
+        api.cancel().catch(() => {});
+        _hideOverlay();
+      }
+    });
+
+    // ── Clicking / releasing on the overlay in the receiving window ─────────
+    // When the user drags from another window and releases the mouse here,
+    // the source window may not see the mouseup (mouse left it). Handle both
+    // click and mouseup on the overlay so the transfer always completes.
+    let _overlayDropBusy = false;
+    async function _doOverlayDrop() {
+      if (_overlayDropBusy || !_overlay.classList.contains('xwin-drop--active')) return;
+      _overlayDropBusy = true;
+      try {
+        // Use 'accept' — tells main process THIS window is the target,
+        // no cursor-position check (avoids DPI/bounds mismatch on Windows).
+        const result = await api.accept().catch(() => null);
+        _hideOverlay();
+        // onReceive fires on this window via main.js → no extra work needed
+        console.log('[xwin-drag] overlay accept result:', result);
+      } finally {
+        _overlayDropBusy = false;
+      }
+    }
+    _overlay.addEventListener('mouseup', _doOverlayDrop);
+    _overlay.addEventListener('click',   _doOverlayDrop);
+
+    // ── Listen for cursor entering THIS window during another window's drag ──
+    api.onCursor(data => {
+      if (!data) { _hideOverlay(); return; }
+      const { cursorInThisWindow, panelId } = data;
+      if (cursorInThisWindow) {
+        _showOverlay(panelId);
+      } else {
+        _hideOverlay();
+      }
+    });
+
+    // ── Receive a panel from another window ───────────────────────────
+    api.onReceive(panelId => {
+      console.log('[xwin-drag] receiving panel:', panelId);
+      _hideOverlay();
+      // Small delay so the source window's close animation finishes
+      setTimeout(() => {
+        activatePanel(panelId);
+        // Trigger panel content init
+        if (typeof window._dvTabChange === 'function') {
+          window._dvTabChange(panelId);
+        }
+      }, 120);
+    });
+  })();
 
   /* ── Export ───────────────────────────────────────────────────────── */
   window.Workspace = {

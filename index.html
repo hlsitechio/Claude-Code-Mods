@@ -14,8 +14,19 @@
   <!-- ===== CUSTOM TITLE BAR ===== -->
   <div id="titlebar" class="titlebar">
     <div id="ws-switcher" class="ws-switcher"></div>
-    <span class="titlebar__title">Claude Code Mods</span>
+
+    <!-- Center column: title only (badge lives in the sidebar strip now) -->
+    <span class="titlebar__title" id="titlebar-title">Claude Code Mods</span>
+
     <div class="titlebar__controls" id="titlebar-controls">
+      <!-- Screen number indicator (always visible — shows which monitor this window is on) -->
+      <div id="screen-number-chip" class="screen-number-chip" title="Screen 1 (primary)">1</div>
+      <!-- Dual-window spawn button (hidden in secondary) -->
+      <button id="tb-spawn-secondary" class="titlebar__btn titlebar__btn--spawn" title="Open second screen window" aria-label="Spawn secondary window">
+        <svg width="14" height="14" viewBox="0 0 256 256" fill="currentColor">
+          <path d="M240,72H208V56a16,16,0,0,0-16-16H32A16,16,0,0,0,16,56V168a16,16,0,0,0,16,16H80v16a16,16,0,0,0,16,16H240a16,16,0,0,0,16-16V88A16,16,0,0,0,240,72ZM32,168V56H192v16H96A16,16,0,0,0,80,88v80Zm208,16H96V88H240V184Z"/>
+        </svg>
+      </button>
       <button class="titlebar__btn titlebar__btn--close"    id="tb-close"    title="Close"    aria-label="Close"></button>
       <button class="titlebar__btn titlebar__btn--minimize" id="tb-minimize" title="Minimize" aria-label="Minimize"></button>
       <button class="titlebar__btn titlebar__btn--maximize" id="tb-maximize" title="Maximize" aria-label="Maximize / Restore"></button>
@@ -25,8 +36,26 @@
   <!-- ===== APP SHELL ===== -->
   <div id="app-shell" class="flex flex-1 w-full min-h-0">
 
+    <!-- Secondary-window sidebar strip (shown instead of sidebar in secondary role) -->
+    <div id="secondary-sidebar-strip" class="secondary-sidebar-strip" style="display:none">
+      <span class="secondary-sidebar-strip__label">SECONDARY</span>
+      <div class="secondary-sidebar-strip__actions">
+        <button id="btn-make-primary" class="secondary-sidebar-strip__btn secondary-sidebar-strip__btn--primary" title="Move sidebar here — make this the primary window">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+          <span>Make Primary</span>
+        </button>
+        <button id="btn-close-secondary" class="secondary-sidebar-strip__btn secondary-sidebar-strip__btn--close" title="Close this window">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          <span>Close</span>
+        </button>
+      </div>
+    </div>
+
     <!-- SIDEBAR — plain fixed aside, toggled left/right via JS (no dockview) -->
     <aside id="sidebar" data-sidebar-side="left" class="flex h-full shrink-0 flex-col border-r border-ink-800 bg-ink-900">
+      <div class="sidebar-resizer" id="sidebar-resizer" title="Drag to resize sidebar"></div>
 
       <div class="nav-group" id="nav-group">
         <button class="nav-group__header" id="nav-toggle" aria-label="Toggle quick actions">
@@ -449,6 +478,8 @@
           <button class="ctx-item" data-add="notes">Notes</button>
           <button class="ctx-item" data-add="skills">Skills</button>
           <button class="ctx-item" data-add="git">Git</button>
+          <button class="ctx-item" data-add="github">GitHub</button>
+          <button class="ctx-item" data-add="screenshots">Screenshots</button>
           <button class="ctx-item" data-add="mcp">MCP</button>
           <button class="ctx-item" data-add="context">Context</button>
           <button class="ctx-item" data-add="shortcuts">Shortcuts</button>

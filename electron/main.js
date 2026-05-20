@@ -1,5 +1,40 @@
 'use strict';
 
+// ── Global crash guards — must come before any other code ────────────────────
+// Suppress benign stream / IPC pipe errors that Electron would otherwise
+// surface as "A JavaScript error occurred in the main process" dialogs.
+// These happen when a PTY, child process stdout, or renderer IPC pipe
+// breaks at the OS level (e.g. window closed while write was in flight).
+process.on('uncaughtException', (err) => {
+  const msg = err?.message || '';
+  // Known benign: broken pipe, closed stream, EOF on write
+  if (
+    msg.includes('write EOF') ||
+    msg.includes('EPIPE') ||
+    msg.includes('ERR_IPC_CHANNEL_CLOSED') ||
+    msg.includes('channel closed') ||
+    msg.includes('socket hang up')
+  ) {
+    console.warn('[main] suppressed benign stream error:', msg);
+    return; // swallow — do NOT re-throw
+  }
+  // Everything else: log and let Electron handle it normally
+  console.error('[main] uncaughtException:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const msg = String(reason?.message || reason || '');
+  if (
+    msg.includes('write EOF') ||
+    msg.includes('EPIPE') ||
+    msg.includes('ERR_IPC_CHANNEL_CLOSED')
+  ) {
+    console.warn('[main] suppressed benign rejection:', msg);
+    return;
+  }
+  console.error('[main] unhandledRejection:', reason);
+});
+
 const {
   app, BrowserWindow, Menu, Tray, shell,
   ipcMain, globalShortcut, Notification, nativeImage,
@@ -129,6 +164,10 @@ function openAboutWindow() {
 // ── Window ───────────────────────────────────────────────────────────────────
 
 let mainWin = null;
+
+// ── Dual-window state ────────────────────────────────────────────────────────
+let _secondWin    = null;
+let _primaryWinId = null;   // BrowserWindow.id of the current "primary" window
 
 function createWindow() {
   const state = loadWindowState();
@@ -262,7 +301,19 @@ function createWindow() {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   const win = createWindow();
+  _primaryWinId = win.id;   // first window is always primary
   createTray(win);
+
+  // Allow desktopCapturer / screen recording on Electron 32+ (Windows/Mac)
+  const { session } = require('electron');
+  if (session.defaultSession.setDisplayMediaRequestHandler) {
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      const { desktopCapturer } = require('electron');
+      desktopCapturer.getSources({ types: ['screen'] }).then(sources => {
+        callback({ video: sources[0], audio: 'loopback' });
+      }).catch(() => callback({}));
+    });
+  }
 
   // Global shortcuts
   globalShortcut.register('CommandOrControl+Shift+Space', () => {
@@ -283,6 +334,7 @@ app.on('before-quit', () => { app.isQuiting = true; });
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  _apercuStopServer(); // close local static server so port is freed immediately
 });
 
 // ── IPC: app info ────────────────────────────────────────────────────────────
@@ -296,11 +348,29 @@ ipcMain.handle('app:info', () => ({
 
 // ── IPC: window controls ─────────────────────────────────────────────────────
 
-ipcMain.on('window:minimize',  () => mainWin?.minimize());
-ipcMain.on('window:maximize',  () => mainWin?.isMaximized() ? mainWin.unmaximize() : mainWin?.maximize());
-ipcMain.on('window:close',     () => { if (mainWin) { app.isQuiting = true; mainWin.close(); } });
-ipcMain.on('window:hide',      () => mainWin?.hide());
-ipcMain.handle('window:is-maximized', () => mainWin?.isMaximized() ?? false);
+function _winFromEvent(e) {
+  try {
+    if (!e?.sender || e.sender.isDestroyed()) return null;
+    return BrowserWindow.fromWebContents(e.sender) || null;
+  } catch { return null; }
+}
+
+ipcMain.on('window:minimize',  (e) => { _winFromEvent(e)?.minimize(); });
+ipcMain.on('window:maximize',  (e) => { const w = _winFromEvent(e); if (w) w.isMaximized() ? w.unmaximize() : w.maximize(); });
+ipcMain.on('window:close',     (e) => {
+  const w = _winFromEvent(e);
+  if (!w || w.isDestroyed()) return;
+  if (w.id === mainWin?.id) {
+    // Primary window: minimize to tray (handled by win.on('close') handler) or quit
+    app.isQuiting = true;
+    w.close();
+  } else {
+    // Secondary window: just close this window, leave primary running
+    w.destroy();   // destroy() bypasses the 'close' event, no preventDefault possible
+  }
+});
+ipcMain.on('window:hide',      (e) => { _winFromEvent(e)?.hide(); });
+ipcMain.handle('window:is-maximized', (e) => { const w = _winFromEvent(e); return w?.isMaximized() ?? false; });
 
 // Find-in-page
 ipcMain.on('find:start',  (_, text)   => mainWin?.webContents.findInPage(text, { findNext: false }));
@@ -371,8 +441,9 @@ ipcMain.handle('claude:sign-out', () => {
 
 // ── IPC: streaming chat ──────────────────────────────────────────────────────
 
-ipcMain.handle('claude:send', async (event, { messages, model, system, cliSessionId, permMode, requestId }) => {
-  return getClaudeService().streamMessage(event, messages, model, system, cliSessionId, permMode, requestId);
+ipcMain.handle('claude:send', async (event, { messages, model, system, cliSessionId, permMode, requestId, effort, sessionName, addDirs, maxBudget, forkFromCli, fromPr, directMode }) => {
+  const opts = { effort, sessionName, addDirs, maxBudget, forkFromCli, fromPr, directMode };
+  return getClaudeService().streamMessage(event, messages, model, system, cliSessionId, permMode, requestId, opts);
 });
 
 // ── Active project cwd ────────────────────────────────────────────────────────
@@ -737,6 +808,11 @@ ipcMain.handle('shell:open', async (_, filePath) => {
   }
 });
 
+ipcMain.handle('shell:open-url', async (_, url) => {
+  try { await shell.openExternal(url); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
 // Native folder picker — returns the selected path or null if cancelled
 ipcMain.handle('fs:pick-folder', async () => {
   const { dialog, BrowserWindow } = require('electron');
@@ -1087,15 +1163,679 @@ ipcMain.handle('git:remote', (_, cwd) => {
 });
 
 ipcMain.handle('git:action', async (_, { action, cwd, args = [] }) => {
-  // action: 'stage' | 'unstage' | 'commit' | 'stash'
-  const allowed = ['add', 'restore', 'commit', 'stash'];
-  if (!allowed.includes(action)) return { ok: false, error: 'not allowed' };
+  // Extended allowlist for GitHub panel (push/pull/log/status/branch/remote)
+  const allowed = [
+    'add', 'restore', 'commit', 'stash',
+    'push', 'pull', 'fetch',
+    'log', 'status', 'branch', 'remote',
+    'diff', 'show',
+  ];
+  if (!allowed.includes(action)) return { ok: false, error: 'not allowed: ' + action };
   try {
-    const out = _gitExec([action, ...args], cwd);
-    return { ok: true, out };
+    // _gitExec swallows throws and returns stderr string on failure.
+    // We need to distinguish: run it directly so we can get exit code.
+    const { execFileSync } = require('child_process');
+    const output = execFileSync('git', [action, ...args], {
+      cwd: cwd || APP_ROOT,
+      encoding: 'utf8',
+      timeout: 30000,
+      windowsHide: true,
+    }).trim();
+    return { ok: true, output, out: output };
+  } catch (e) {
+    const errMsg = (e.stderr || e.stdout || e.message || '').toString().trim();
+    return { ok: false, error: errMsg, output: '' };
+  }
+});
+
+/* ── GitHub OAuth ──────────────────────────────────────────────────────────── */
+// Device Flow client ID for Claude Code Mods
+const GH_CLIENT_ID = process.env.GH_OAUTH_CLIENT_ID || '178c6fc778ccc68e1d6a'; // gh-cli public id as default
+
+ipcMain.handle('github:auth', async (_, action) => {
+  const { execFileSync } = require('child_process');
+  const https = require('https');
+
+  function httpsPost(url, body) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const data = Buffer.from(body);
+      const req = https.request({
+        hostname: u.hostname, path: u.pathname + u.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+          'Content-Length': data.length,
+        },
+      }, res => {
+        let raw = '';
+        res.on('data', d => raw += d);
+        res.on('end', () => { try { resolve(JSON.parse(raw)); } catch { resolve({}); } });
+      });
+      req.on('error', reject);
+      req.write(data);
+      req.end();
+    });
+  }
+
+  // ── Try gh CLI first ──────────────────────────────────────────────────────
+  if (action === 'gh-token') {
+    try {
+      const token = execFileSync('gh', ['auth', 'token'], {
+        encoding: 'utf8', timeout: 5000, windowsHide: true,
+      }).trim();
+      if (!token) return { ok: false };
+      return { ok: true, token };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  // ── Start Device Flow ─────────────────────────────────────────────────────
+  if (action === 'device-start') {
+    try {
+      const data = await httpsPost(
+        'https://github.com/login/device/code',
+        `client_id=${GH_CLIENT_ID}&scope=repo,user`
+      );
+      if (!data.device_code) return { ok: false, error: data.error_description || 'Device flow failed' };
+      return {
+        ok: true,
+        deviceCode:      data.device_code,
+        userCode:        data.user_code,
+        verificationUri: data.verification_uri,
+        interval:        data.interval || 5,
+        expiresIn:       data.expires_in || 900,
+      };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  // ── Poll Device Flow ──────────────────────────────────────────────────────
+  if (action === 'device-poll') {
+    const { deviceCode } = _;
+    // argument passed as second param
+    return { ok: false, error: 'use device-poll-code' };
+  }
+
+  return { ok: false, error: 'unknown action' };
+});
+
+ipcMain.handle('github:device-poll', async (_, { deviceCode }) => {
+  const https = require('https');
+  function httpsPost(url, body) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const data = Buffer.from(body);
+      const req = https.request({
+        hostname: u.hostname, path: u.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json',
+          'Content-Length': data.length,
+        },
+      }, res => {
+        let raw = '';
+        res.on('data', d => raw += d);
+        res.on('end', () => { try { resolve(JSON.parse(raw)); } catch { resolve({}); } });
+      });
+      req.on('error', reject);
+      req.write(data);
+      req.end();
+    });
+  }
+  try {
+    const data = await httpsPost(
+      'https://github.com/login/oauth/access_token',
+      `client_id=${GH_CLIENT_ID}&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`
+    );
+    if (data.access_token) return { ok: true, token: data.access_token };
+    if (data.error === 'authorization_pending') return { ok: false, pending: true };
+    if (data.error === 'slow_down') return { ok: false, pending: true, slowDown: true };
+    return { ok: false, error: data.error_description || data.error || 'Unknown' };
   } catch (e) {
     return { ok: false, error: e.message };
   }
+});
+
+/* ── Screenshots ───────────────────────────────────────────────────────────── */
+const SC_DIR = path.join(__dirname, '..', 'screenshot');
+if (!fs.existsSync(SC_DIR)) fs.mkdirSync(SC_DIR, { recursive: true });
+
+function _scMeta() {
+  const metaPath = path.join(SC_DIR, '_meta.json');
+  try { return JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch { return []; }
+}
+function _scSaveMeta(list) {
+  fs.writeFileSync(path.join(SC_DIR, '_meta.json'), JSON.stringify(list), 'utf8');
+}
+
+ipcMain.handle('screenshots:list', () => {
+  try {
+    const meta = _scMeta();
+    const result = meta.map(m => {
+      const filePath = path.join(SC_DIR, m.id + '.png');
+      if (!fs.existsSync(filePath)) return null;
+      const data = fs.readFileSync(filePath);
+      return { id: m.id, name: m.name, dataUrl: 'data:image/png;base64,' + data.toString('base64') };
+    }).filter(Boolean);
+    console.log('[sc] list:', result.length, 'screenshots from', SC_DIR);
+    return result;
+  } catch (e) {
+    console.error('[sc] list error:', e.message);
+    return [];
+  }
+});
+
+ipcMain.handle('screenshots:save', (_, { dataUrl, name }) => {
+  try {
+    const id   = 'sc-' + Date.now();
+    const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+    const buf = Buffer.from(base64, 'base64');
+    fs.writeFileSync(path.join(SC_DIR, id + '.png'), buf);
+    const meta = _scMeta();
+    meta.push({ id, name: name || new Date().toLocaleString() });
+    _scSaveMeta(meta);
+    console.log('[sc] saved', id, buf.length, 'bytes →', SC_DIR);
+    return { ok: true, id };
+  } catch (e) {
+    console.error('[sc] save error:', e.message);
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('screenshots:delete', (_, id) => {
+  if (!/^sc-\d+$/.test(id)) return { ok: false, error: 'Invalid id' };
+  try {
+    const filePath = path.join(SC_DIR, id + '.png');
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    _scSaveMeta(_scMeta().filter(m => m.id !== id));
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('screenshots:delete-all', () => {
+  try {
+    _scMeta().forEach(m => {
+      try { fs.unlinkSync(path.join(SC_DIR, m.id + '.png')); } catch {}
+    });
+    _scSaveMeta([]);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('screenshots:capture', async (event) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const img = await win.webContents.capturePage();
+    const dataUrl = 'data:image/png;base64,' + img.toPNG().toString('base64');
+    console.log('[sc] window capture ok, size:', img.getSize());
+    return { ok: true, dataUrl };
+  } catch (e) {
+    console.error('[sc] window capture error:', e.message);
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('screenshots:from-clipboard', () => {
+  try {
+    const { clipboard } = require('electron');
+    const img = clipboard.readImage();
+    if (img.isEmpty()) { console.log('[sc] clipboard: empty'); return { ok: false }; }
+    const dataUrl = 'data:image/png;base64,' + img.toPNG().toString('base64');
+    console.log('[sc] clipboard ok, size:', img.getSize());
+    return { ok: true, dataUrl };
+  } catch (e) {
+    console.error('[sc] clipboard error:', e.message);
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('screenshots:copy-to-clipboard', (_, { dataUrl }) => {
+  try {
+    const { clipboard, nativeImage } = require('electron');
+    const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+    const img = nativeImage.createFromBuffer(Buffer.from(base64, 'base64'));
+    clipboard.writeImage(img);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('screenshots:open-file', (_, id) => {
+  if (!/^sc-\d+$/.test(id)) return { ok: false, error: 'Invalid id' };
+  const filePath = path.join(SC_DIR, id + '.png');
+  if (fs.existsSync(filePath)) shell.openPath(filePath);
+  return { ok: true };
+});
+
+/* Capture full screen — uses capturePage on a 1×1 hidden window trick to avoid
+   desktopCapturer permission issues on Windows, falling back to desktopCapturer */
+ipcMain.handle('screenshots:capture-fullscreen', async () => {
+  try {
+    // Preferred: desktopCapturer (works on Windows without extra permissions)
+    const { desktopCapturer, screen } = require('electron');
+    const display  = screen.getPrimaryDisplay();
+    const { width, height } = display.size;
+    const scale    = display.scaleFactor || 1;
+    const pw = Math.round(width * scale);
+    const ph = Math.round(height * scale);
+    console.log('[sc] fullscreen capture, logical:', width, 'x', height, 'scale:', scale, 'physical:', pw, 'x', ph);
+    const sources  = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: pw, height: ph },
+    });
+    console.log('[sc] sources found:', sources.length, sources.map(s => s.name));
+    if (!sources.length) return { ok: false, error: 'No screen source found' };
+    const dataUrl = sources[0].thumbnail.toDataURL();
+    console.log('[sc] fullscreen ok, dataUrl length:', dataUrl.length);
+    return { ok: true, dataUrl };
+  } catch (e) {
+    console.error('[sc] fullscreen error:', e.message, e.stack);
+    return { ok: false, error: e.message };
+  }
+});
+
+/* Region capture — opens transparent overlay, waits for selection */
+let _overlayWin   = null;
+let _regionResolve = null;
+
+ipcMain.handle('screenshots:capture-region', () => {
+  return new Promise(resolve => {
+    const { screen } = require('electron');
+    const display = screen.getPrimaryDisplay();
+    const { bounds } = display;
+
+    _regionResolve = resolve;
+    _overlayWin = new BrowserWindow({
+      x: bounds.x, y: bounds.y,
+      width: bounds.width, height: bounds.height,
+      frame: false, transparent: true,
+      alwaysOnTop: true, skipTaskbar: true,
+      fullscreen: false, resizable: false,
+      webPreferences: { nodeIntegration: true, contextIsolation: false },
+    });
+    _overlayWin.loadFile(path.join(__dirname, 'screenshot-overlay.html'));
+    _overlayWin.setAlwaysOnTop(true, 'screen-saver');
+    _overlayWin.on('closed', () => {
+      _overlayWin = null;
+      if (_regionResolve) { _regionResolve({ ok: false, cancelled: true }); _regionResolve = null; }
+    });
+  });
+});
+
+ipcMain.on('screenshot-overlay:cancel', () => {
+  if (_overlayWin) { _overlayWin.destroy(); _overlayWin = null; }
+  if (_regionResolve) { _regionResolve({ ok: false, cancelled: true }); _regionResolve = null; }
+});
+
+ipcMain.on('screenshot-overlay:select', async (_, bounds) => {
+  // Hide overlay immediately so it's not in the capture
+  if (_overlayWin) { _overlayWin.hide(); }
+  await new Promise(r => setTimeout(r, 120)); // let OS redraw
+
+  try {
+    const { desktopCapturer, screen, nativeImage } = require('electron');
+    const display = screen.getPrimaryDisplay();
+    const { width, height } = display.size;
+    const scale   = display.scaleFactor || 1;
+
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: Math.round(width * scale), height: Math.round(height * scale) },
+    });
+
+    if (_overlayWin) { _overlayWin.destroy(); _overlayWin = null; }
+
+    if (!sources.length) {
+      if (_regionResolve) { _regionResolve({ ok: false, error: 'No screen source' }); _regionResolve = null; }
+      return;
+    }
+
+    const cropped = sources[0].thumbnail.crop({
+      x:      Math.round(bounds.x      * scale),
+      y:      Math.round(bounds.y      * scale),
+      width:  Math.round(bounds.width  * scale),
+      height: Math.round(bounds.height * scale),
+    });
+
+    if (_regionResolve) {
+      _regionResolve({ ok: true, dataUrl: cropped.toDataURL() });
+      _regionResolve = null;
+    }
+  } catch (e) {
+    if (_overlayWin) { _overlayWin.destroy(); _overlayWin = null; }
+    if (_regionResolve) { _regionResolve({ ok: false, error: e.message }); _regionResolve = null; }
+  }
+});
+
+/* ── Cross-window panel drag ───────────────────────────────────────────────── */
+
+let _panelDragState = null;  // { sourceWinId, panelId, pollTimer }
+
+ipcMain.handle('panel:drag-start', (event, panelId) => {
+  if (_panelDragState) clearInterval(_panelDragState.pollTimer);
+  const sourceWin = _winFromEvent(event);
+  if (!sourceWin) return;
+
+  const pollTimer = setInterval(() => {
+    const { screen } = require('electron');
+    const pos = screen.getCursorScreenPoint();
+    BrowserWindow.getAllWindows().forEach(w => {
+      if (w.isDestroyed()) return;
+      const b = w.getBounds();
+      const inside = pos.x >= b.x && pos.x <= b.x + b.width &&
+                     pos.y >= b.y && pos.y <= b.y + b.height;
+      // Tell each window whether the dragged cursor is currently in it
+      w.webContents.send('panel:drag-cursor', {
+        panelId,
+        sourceWinId: sourceWin.id,
+        cursorInThisWindow: inside,
+        cursorPos: pos,
+      });
+    });
+  }, 40);   // ~25fps poll
+
+  _panelDragState = { sourceWinId: sourceWin.id, panelId, pollTimer };
+  console.log('[panel-drag] start', panelId, 'from win', sourceWin.id);
+});
+
+ipcMain.handle('panel:drag-end', (event) => {
+  if (!_panelDragState) return { transferred: false };
+  clearInterval(_panelDragState.pollTimer);
+
+  const { screen } = require('electron');
+  const pos     = screen.getCursorScreenPoint();
+  const srcId   = _panelDragState.sourceWinId;
+  const panelId = _panelDragState.panelId;
+  _panelDragState = null;
+
+  // Which window is the cursor in right now?
+  const wins      = BrowserWindow.getAllWindows();
+  const targetWin = wins.find(w => {
+    if (w.isDestroyed() || w.id === srcId) return false;
+    const b = w.getBounds();
+    return pos.x >= b.x && pos.x <= b.x + b.width &&
+           pos.y >= b.y && pos.y <= b.y + b.height;
+  });
+
+  // Clear drag-over overlays on all windows
+  wins.forEach(w => { if (!w.isDestroyed()) w.webContents.send('panel:drag-cursor', null); });
+
+  if (!targetWin) {
+    console.log('[panel-drag] dropped in same window — no transfer');
+    return { transferred: false };
+  }
+
+  console.log('[panel-drag] transferring', panelId, '→ win', targetWin.id);
+  targetWin.webContents.send('panel:receive', panelId);
+  return { transferred: true, panelId };
+});
+
+// Called from the RECEIVING window's overlay click/mouseup.
+// The caller IS the target — no cursor-position check needed.
+ipcMain.handle('panel:drag-accept', (event) => {
+  if (!_panelDragState) return { transferred: false };
+  clearInterval(_panelDragState.pollTimer);
+
+  const targetWin = _winFromEvent(event);
+  const { panelId, sourceWinId } = _panelDragState;
+  _panelDragState = null;
+
+  const wins = BrowserWindow.getAllWindows();
+  wins.forEach(w => { if (!w.isDestroyed()) w.webContents.send('panel:drag-cursor', null); });
+
+  if (!targetWin || targetWin.id === sourceWinId) {
+    console.log('[panel-drag] drag-accept from same window — no transfer');
+    return { transferred: false };
+  }
+
+  console.log('[panel-drag] transferring', panelId, '→ win', targetWin.id, '(overlay accept)');
+  targetWin.webContents.send('panel:receive', panelId);
+  return { transferred: true, panelId };
+});
+
+ipcMain.handle('panel:drag-cancel', () => {
+  if (!_panelDragState) return;
+  clearInterval(_panelDragState.pollTimer);
+  _panelDragState = null;
+  BrowserWindow.getAllWindows().forEach(w => {
+    if (!w.isDestroyed()) w.webContents.send('panel:drag-cursor', null);
+  });
+});
+
+/* ── Apercu local static server ───────────────────────────────────────────── */
+// Serves any local folder on a random port so the Preview iframe can load it.
+// The URL is injected into the renderer as window.__apercuServerUrl so agents
+// (chat, terminals, split-chat) can reference it.
+
+let _apercuHttpServer  = null;
+let _apercuServerUrl   = null;
+let _apercuServingDir  = null;
+
+const _MIME = {
+  '.html':'text/html', '.htm':'text/html', '.css':'text/css',
+  '.js':'application/javascript', '.mjs':'application/javascript',
+  '.ts':'application/typescript', '.tsx':'text/tsx', '.jsx':'text/jsx',
+  '.json':'application/json', '.svg':'image/svg+xml',
+  '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg',
+  '.gif':'image/gif', '.webp':'image/webp', '.ico':'image/x-icon',
+  '.woff':'font/woff', '.woff2':'font/woff2', '.ttf':'font/ttf',
+  '.mp4':'video/mp4', '.mp3':'audio/mpeg', '.pdf':'application/pdf',
+  '.txt':'text/plain', '.md':'text/markdown',
+};
+
+function _apercuStopServer() {
+  if (_apercuHttpServer) {
+    try { _apercuHttpServer.close(); } catch (_) {}
+    _apercuHttpServer = null;
+    _apercuServerUrl  = null;
+    _apercuServingDir = null;
+  }
+}
+
+function _apercuBroadcast(url, dir) {
+  BrowserWindow.getAllWindows().forEach(w => {
+    if (!w.isDestroyed()) w.webContents.send('apercu:server-changed', { url, dir });
+  });
+}
+
+ipcMain.handle('apercu:serve', async (event, folderPath) => {
+  const { dialog } = require('electron');
+  const http = require('http');
+  const path = require('path');
+  const fs   = require('fs');
+
+  // If no folder given, open a system folder picker
+  if (!folderPath) {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const res = await dialog.showOpenDialog(win, {
+      title:      'Select folder to serve in Preview',
+      properties: ['openDirectory'],
+    });
+    if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true };
+    folderPath = res.filePaths[0];
+  }
+
+  _apercuStopServer();
+
+  return new Promise(resolve => {
+    const server = http.createServer((req, res) => {
+      let urlPath = decodeURIComponent(req.url.split('?')[0]);
+      if (urlPath === '/') urlPath = '/index.html';
+
+      // Resolve & guard against path traversal.
+      // Must add path.sep so "base-evil/foo" doesn't pass startsWith("base") check.
+      const base     = path.resolve(folderPath);
+      const filePath = path.resolve(base, '.' + urlPath);
+      if (filePath !== base && !filePath.startsWith(base + path.sep)) {
+        res.writeHead(403); res.end('Forbidden'); return;
+      }
+
+      const tryFile = (fp, cb) => {
+        fs.stat(fp, (err, stat) => {
+          if (err)            { cb(null); return; }
+          if (stat.isDirectory()) { tryFile(path.join(fp, 'index.html'), cb); return; }
+          fs.readFile(fp, (e, data) => cb(e ? null : { data, fp }));
+        });
+      };
+
+      tryFile(filePath, result => {
+        if (!result) { res.writeHead(404, {'Content-Type':'text/plain'}); res.end('Not found'); return; }
+        const ext  = path.extname(result.fp).toLowerCase();
+        const mime = _MIME[ext] || 'application/octet-stream';
+        res.writeHead(200, {
+          'Content-Type':                mime,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control':               'no-cache',
+        });
+        res.end(result.data);
+      });
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      _apercuHttpServer  = server;
+      _apercuServingDir  = folderPath;
+      _apercuServerUrl   = `http://localhost:${port}`;
+      console.log(`[apercu-server] serving ${folderPath} → ${_apercuServerUrl}`);
+      _apercuBroadcast(_apercuServerUrl, folderPath);
+      resolve({ ok: true, url: _apercuServerUrl, dir: folderPath, port });
+    });
+
+    server.on('error', e => {
+      console.error('[apercu-server] error:', e.message);
+      resolve({ ok: false, error: e.message });
+    });
+  });
+});
+
+ipcMain.handle('apercu:stop', () => {
+  _apercuStopServer();
+  _apercuBroadcast(null, null);
+  return { ok: true };
+});
+
+ipcMain.handle('apercu:status', () => ({
+  running: !!_apercuHttpServer,
+  url:     _apercuServerUrl,
+  dir:     _apercuServingDir,
+}));
+
+/* ── Dual-window ───────────────────────────────────────────────────────────── */
+
+function _broadcastRole() {
+  BrowserWindow.getAllWindows().forEach(w => {
+    if (!w.isDestroyed()) {
+      w.webContents.send('window:role-changed', w.id === _primaryWinId ? 'primary' : 'secondary');
+    }
+  });
+}
+
+ipcMain.handle('window:get-role', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return win && win.id === _primaryWinId ? 'primary' : 'secondary';
+});
+
+ipcMain.handle('window:spawn-secondary', async (event) => {
+  // If already open, just focus it
+  if (_secondWin && !_secondWin.isDestroyed()) {
+    _secondWin.focus();
+    return { ok: true, alreadyOpen: true };
+  }
+
+  const { screen } = require('electron');
+  const displays = screen.getAllDisplays();
+  const senderWin = BrowserWindow.fromWebContents(event.sender);
+  const currentDisplay = screen.getDisplayMatching(senderWin.getBounds());
+  const otherDisplay   = displays.find(d => d.id !== currentDisplay.id) || currentDisplay;
+  const { bounds }     = otherDisplay;
+
+  _secondWin = new BrowserWindow({
+    x:           bounds.x,
+    y:           bounds.y,
+    width:       bounds.width,     // fill the entire display — works on 1080p, 2K, 4K
+    height:      bounds.height,
+    minWidth:    800,
+    minHeight:   500,
+    frame:       false,
+    transparent: false,
+    backgroundColor: '#0b0b0c',
+    title: 'Claude Code Mods — Secondary',
+    webPreferences: {
+      preload:          path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration:  false,
+    },
+    show: false,
+  });
+
+  const prodUrl = `file://${path.join(__dirname, '../dist/index.html')}`;
+  if (isDev) {
+    // Reuse same port-scanning logic as main window
+    const http = require('http');
+    const findVitePort = (ports, cb) => {
+      if (!ports.length) return cb(5182);
+      const [p, ...rest] = ports;
+      const req = http.get(`http://localhost:${p}/`, r => { r.resume(); cb(p); });
+      req.on('error', () => findVitePort(rest, cb));
+      req.setTimeout(300, () => { req.destroy(); findVitePort(rest, cb); });
+    };
+    await new Promise(resolve => {
+      findVitePort([5182,5183,5184,5185,5186,5187,5188,5189,5190], port => {
+        // Guard: window may have been closed before the async port scan finished
+        if (_secondWin && !_secondWin.isDestroyed()) {
+          _secondWin.loadURL(`http://localhost:${port}`).then(resolve).catch(resolve);
+        } else {
+          resolve();
+        }
+      });
+    });
+  } else {
+    await _secondWin.loadURL(prodUrl);
+  }
+  _secondWin.show();
+
+  // Send role immediately after ready-to-show
+  // Broadcast role after app has had time to mount (Vite dev needs ~600ms)
+  _secondWin.webContents.once('did-finish-load', () => {
+    if (_secondWin && !_secondWin.isDestroyed()) {
+      setTimeout(() => _broadcastRole(), 800);
+    }
+  });
+
+  // Wire window controls IPC for the secondary window too
+  _secondWin.on('maximize',   () => _secondWin?.webContents.send('window:maximized'));
+  _secondWin.on('unmaximize', () => _secondWin?.webContents.send('window:unmaximized'));
+  _secondWin.on('closed', () => {
+    _secondWin = null;
+    // If secondary was primary, revert to main window
+    if (_primaryWinId !== mainWin?.id) {
+      _primaryWinId = mainWin?.id;
+      _broadcastRole();
+    }
+  });
+
+  return { ok: true };
+});
+
+ipcMain.handle('window:make-primary', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return { ok: false };
+  _primaryWinId = win.id;
+  _broadcastRole();
+  return { ok: true };
+});
+
+ipcMain.handle('window:close-secondary', () => {
+  if (_secondWin && !_secondWin.isDestroyed()) _secondWin.close();
+  return { ok: true };
+});
+
+ipcMain.handle('window:has-secondary', () => {
+  return !!(_secondWin && !_secondWin.isDestroyed());
 });
 
 ipcMain.handle('terminal:create', (event, { cwd, cols, rows } = {}) => {
