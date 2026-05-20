@@ -7543,7 +7543,10 @@ async function initMcpPanel(container) {
 
   // ── Known presets ──────────────────────────────────────────────────────────
   const PRESETS = [
-    { label: 'filesystem',   name: 'filesystem',   cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', process?.env?.HOME || '~'], env: {} },
+    // `process` is not available in the renderer (contextIsolation strips it).
+    // Use a literal `~` placeholder — the user will edit it to their real path
+    // before saving, OR the user can leverage the form's editable args field.
+    { label: 'filesystem',   name: 'filesystem',   cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '~'], env: {} },
     { label: 'GitHub',       name: 'github',        cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: '' } },
     { label: 'memory',       name: 'memory',        cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'], env: {} },
     { label: 'fetch',        name: 'fetch',         cmd: 'npx', args: ['-y', '@modelcontextprotocol/server-fetch'], env: {} },
