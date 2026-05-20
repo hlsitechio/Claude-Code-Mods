@@ -424,27 +424,24 @@ const TOOLS = [
   // (separate from the user's main Chrome) and persists across sessions.
   // ════════════════════════════════════════════════════════════════════════
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────
+  // ── Lifecycle (attached mode — connects to CCM\'s embedded browser) ────
   {
     name: 'chrome_launch',
-    description: 'Start a real Chrome subprocess controlled by CCM. Uses a dedicated profile (NOT the user\'s main Chrome) so cookies/extensions/passwords accumulate in Claude\'s identity. Lazy — most chrome_* tools auto-launch if not running. Call this explicitly to set headless mode or extra flags.',
+    description: 'Attach to CCM\'s embedded browser via CDP (http://127.0.0.1:9222). This is the SAME browser the user sees in the Browser panel — chrome_* tools and browser_* tools drive the same browser, two different control surfaces. Auto-attaches on first chrome_* call; this tool is for explicit reconnection.',
     inputSchema: {
       type: 'object',
-      properties: {
-        headless:  { type: 'boolean', description: 'Run without a window (for backend/scrape tasks)' },
-        extraArgs: { type: 'array', items: { type: 'string' }, description: 'Extra Chrome command-line flags' },
-      },
+      properties: {},
       additionalProperties: false,
     },
   },
   {
     name: 'chrome_close',
-    description: 'Gracefully shut down Claude\'s Chrome subprocess. Profile data persists for next launch.',
+    description: 'Detach the CDP connection. Does NOT close the embedded browser — the user\'s tabs stay open. Just releases our control session so the next call reconnects fresh.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'chrome_status',
-    description: 'Get state of Claude\'s Chrome: running flag, version, PID, profile path, tab count.',
+    description: 'Get CDP attach state: connected flag, endpoint, version, list of browseable pages (filtered to exclude CCM app UI).',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 
@@ -456,10 +453,11 @@ const TOOLS = [
   },
   {
     name: 'chrome_target_new_tab',
-    description: 'Open a new Chrome tab. If url is provided, navigates to it before returning.',
+    description: 'Navigate the active browser-panel tab to a URL. NOTE: In attached mode we navigate the CURRENT tab rather than creating a new one (Electron dockview owns tab lifecycle). To open a NEW tab, the user must click "+" in the CCM Browser panel.',
     inputSchema: {
       type: 'object',
-      properties: { url: { type: 'string', description: 'Optional URL to load' } },
+      properties: { url: { type: 'string', description: 'URL to load in the active browser-panel tab' } },
+      required: ['url'],
       additionalProperties: false,
     },
   },

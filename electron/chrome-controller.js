@@ -55,12 +55,28 @@ function _puppeteer() {
 }
 
 // ── Singleton state ────────────────────────────────────────────────────────
-let _browser     = null;  // Puppeteer Browser
+let _browser     = null;  // Puppeteer Browser (attached, not spawned)
 let _connectedAt = 0;
 let _chromePath  = null;  // resolved path to chrome.exe / Chrome.app / chrome
 
+// CDP endpoint the embedded Chromium exposes (set by main.js's command-line
+// switch). We connect here instead of launching a separate Chrome process —
+// so the `chrome_*` tools drive the SAME WebContentsView the user sees.
+const CDP_ENDPOINT = process.env.CCM_CDP_ENDPOINT || 'http://127.0.0.1:9222';
+
 function profileDir() {
   return path.join(app.getPath('userData'), 'chrome-profile');
+}
+
+// Works across Puppeteer versions — `isConnected()` was a method in v21-,
+// `connected` is a property in v22+. Don't trust either to exist.
+function _isBrowserAlive() {
+  if (!_browser) return false;
+  try {
+    if (typeof _browser.isConnected === 'function') return _browser.isConnected();
+    if (typeof _browser.connected === 'boolean')    return _browser.connected;
+    return true; // assume alive if neither API is available
+  } catch (_) { return false; }
 }
 
 // ── Find system Chrome ─────────────────────────────────────────────────────
@@ -97,104 +113,117 @@ function findChrome() {
   return null;
 }
 
-// ── Launch / connect ───────────────────────────────────────────────────────
+// ── Attach (no longer spawn — connect to embedded Chromium) ───────────────
+// The chrome_* tools now control the SAME WebContentsView the user sees in
+// the CCM panel, by connecting via CDP to Electron's --remote-debugging-port
+// (set in main.js before app.whenReady).
+//
+// Previously this spawned a separate Chrome subprocess. That caused two
+// browsers to compete + ate Chrome's anti-bot fingerprint anyway. The new
+// design: one browser, two control surfaces (in-process IPC + external CDP).
 async function launch(opts = {}) {
-  if (_browser && _browser.isConnected()) {
+  if (_isBrowserAlive()) {
     return { ok: true, alreadyRunning: true, ...(await status()) };
   }
-  const chromePath = findChrome();
-  if (!chromePath) {
+  const pup = _puppeteer();
+  try {
+    _browser = await pup.connect({
+      browserURL:       CDP_ENDPOINT,
+      defaultViewport:  null,
+      // Newer puppeteer (>= 22) deprecated the old "Page domain" — use the
+      // protocol target style which works for Electron-hosted Chromium.
+      protocolTimeout:  30_000,
+    });
+  } catch (e) {
     throw new Error(
-      'Could not find Chrome on this system. Install Chrome from ' +
-      'https://www.google.com/chrome or set the path manually via the ' +
-      'CCM_CHROME_PATH env var.'
+      `Could not connect to embedded Chromium at ${CDP_ENDPOINT}. ` +
+      `This usually means Electron didn't start with --remote-debugging-port ` +
+      `(it should — set in main.js). Original error: ${e.message}`
     );
   }
-
-  const dir = profileDir();
-  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
-
-  const pup = _puppeteer();
-  // Pipe transport beats port — only the parent process (us) can drive Chrome.
-  // Headless: default false for interactive use; opts.headless = 'new' for backend tasks.
-  const companionExtPath = path.join(__dirname, 'chrome-companion-ext');
-  _browser = await pup.launch({
-    executablePath:    process.env.CCM_CHROME_PATH || chromePath,
-    headless:          opts.headless === true ? 'new' : false,
-    userDataDir:       dir,
-    pipe:              true,  // ← stdio CDP, not localhost port
-    defaultViewport:   null,  // use the actual window size
-    ignoreDefaultArgs: ['--enable-automation'], // strip the "Chrome is being controlled" infobar
-    args: [
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-blink-features=AutomationControlled', // hide navigator.webdriver
-      '--disable-features=Translate', // avoid the Google Translate side panel
-      // Auto-load the companion MV3 extension — gives Claude access to
-      // chrome.tabGroups / sessions / history / bookmarks / downloads /
-      // management / declarativeNetRequest / search / system.* — APIs
-      // that CDP cannot reach. We deliberately DON'T pass
-      // --disable-extensions-except so the user can still install other
-      // extensions in Claude's profile (uBlock, Vimium, etc).
-      `--load-extension=${companionExtPath}`,
-      ...(opts.extraArgs || []),
-    ],
-  });
-
   _connectedAt = Date.now();
-
-  // Crash recovery — when Chrome disconnects (user closes window, crash, etc),
-  // clear our handle so the next call can re-launch cleanly.
   _browser.on('disconnected', () => {
-    console.log('[chrome-controller] browser disconnected');
+    console.log('[chrome-controller] CDP disconnected — will reconnect on next call');
     _browser = null;
   });
-
   return { ok: true, ...(await status()) };
 }
 
 async function close() {
-  if (!_browser) return { ok: true, alreadyClosed: true };
-  try { await _browser.close(); } catch (_) {}
+  // We don't "close" — that would kill the user's main app. Just detach
+  // the CDP session so the next call reconnects fresh.
+  if (!_browser) return { ok: true, alreadyDetached: true };
+  try { await _browser.disconnect(); } catch (_) {}
   _browser = null;
-  return { ok: true };
+  return { ok: true, detached: true };
 }
 
 async function status() {
-  if (!_browser || !_browser.isConnected()) {
-    return { running: false, chromePath: findChrome(), profileDir: profileDir() };
+  if (!_isBrowserAlive()) {
+    return { running: false, endpoint: CDP_ENDPOINT, profileDir: profileDir() };
   }
   let version = null;
   try { version = await _browser.version(); } catch (_) {}
   const pages = await _browser.pages();
   return {
     running:      true,
+    mode:         'attached',
+    endpoint:     CDP_ENDPOINT,
     version,
-    pid:          _browser.process()?.pid || null,
     profileDir:   profileDir(),
-    chromePath:   _chromePath,
     connectedAt:  _connectedAt,
     pageCount:    pages.length,
-    activePageId: (await _activePage())?.target()._targetId || null,
+    pages:        await Promise.all(pages.map(async p => ({
+      url:   p.url(),
+      title: await p.title().catch(() => ''),
+    }))),
   };
 }
 
 async function _ensureBrowser() {
-  if (!_browser || !_browser.isConnected()) {
+  if (!_isBrowserAlive()) {
     await launch();
   }
   return _browser;
 }
 
-// Most operations target the "active" page — what the user last opened or
-// brought to the front. If there are no pages yet, we open about:blank.
+// When connected to Electron, browser.pages() lists EVERY web context —
+// the CCM main window (file://app.asar/index.html or http://localhost:5182),
+// every WebContentsView (browser panels), DevTools, etc. We need to find
+// the user's BROWSER panel view — not the app UI itself.
+//
+// Heuristic: a "browseable" page is one whose URL is http(s) or about:blank
+// and NOT pointing at our app's own assets / dev server / file://.
+function _isBrowserableUrl(url) {
+  if (!url) return false;
+  if (url === 'about:blank' || url === 'about:srcdoc') return true;
+  if (url.startsWith('chrome://') || url.startsWith('chrome-error://') ||
+      url.startsWith('devtools://') || url.startsWith('chrome-extension://')) return false;
+  if (url.startsWith('file://')) return false; // app assets
+  // Vite dev server ports (CCM uses 5182-5190)
+  if (/^https?:\/\/localhost:51\d\d(\/|$)/.test(url)) return false;
+  if (/^https?:\/\/127\.0\.0\.1:51\d\d(\/|$)/.test(url)) return false;
+  return url.startsWith('http://') || url.startsWith('https://');
+}
+
+// Most operations target the "active" browser-panel page — NOT the CCM app
+// UI itself. We filter the page list to URLs that look like the user is
+// browsing, then pick the last one (most recently opened/active).
 async function _activePage() {
   const browser = await _ensureBrowser();
   const pages = await browser.pages();
-  if (!pages.length) return browser.newPage();
-  // Puppeteer doesn't expose "focused tab" cleanly; the last opened is the
-  // best heuristic since Chrome adds new tabs at the end + brings them front.
-  return pages[pages.length - 1];
+  const browseable = [];
+  for (const p of pages) {
+    try { if (_isBrowserableUrl(p.url())) browseable.push(p); } catch (_) {}
+  }
+  if (!browseable.length) {
+    throw new Error(
+      'No browser-panel tab is open. Open the Browser panel in CCM ' +
+      '(right-click dock → Add panel → Browser) and load a page first.'
+    );
+  }
+  // Prefer the most recently opened — usually the active tab in the panel
+  return browseable[browseable.length - 1];
 }
 
 async function _pageById(targetId) {
@@ -204,14 +233,18 @@ async function _pageById(targetId) {
 }
 
 // ── Target / tab operations ────────────────────────────────────────────────
+// targetList returns ONLY browser-panel tabs, filtered to exclude the CCM
+// app UI and other Electron internals.
 async function targetList() {
   const browser = await _ensureBrowser();
   const pages   = await browser.pages();
   const out = [];
   for (const p of pages) {
+    const url = p.url();
+    if (!_isBrowserableUrl(url)) continue;
     out.push({
       id:    p.target()._targetId,
-      url:   p.url(),
+      url,
       title: await p.title().catch(() => ''),
       type:  p.target().type(),
     });
@@ -220,14 +253,19 @@ async function targetList() {
 }
 
 async function targetNewTab({ url } = {}) {
-  const browser = await _ensureBrowser();
-  const page = await browser.newPage();
-  if (url) await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  // When attached to Electron we can't "open a new tab" the way real Chrome
+  // does — Electron's dockview owns tab lifecycle. Best we can do is
+  // navigate the active panel to the given URL, OR ask the renderer (via a
+  // future bridge) to create a new browser-panel tab. For now we navigate.
+  if (!url) throw new Error('url required (cannot create new tabs from CDP in attached mode — open one in CCM\'s Browser panel first)');
+  const page = await _activePage();
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   return {
     ok:    true,
     id:    page.target()._targetId,
     url:   page.url(),
     title: await page.title().catch(() => ''),
+    note:  'Navigated active browser-panel tab. Use the CCM panel UI to open NEW tabs.',
   };
 }
 
