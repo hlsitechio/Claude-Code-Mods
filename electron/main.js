@@ -668,6 +668,182 @@ ipcMain.handle('kanban:summary', () => {
   return lines.join('\n');
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ── IPC: Embedded browser (WebContentsView-based tabs) ────────────────────
+// Real Chromium tabs pinned over a region of the main BrowserWindow. Each tab
+// is its own Chromium process with isolated session, cookies, devtools.
+// The renderer manages tab UI + URL bar + bounds; the main process owns the
+// WebContentsView lifecycle and ferries page events back through IPC.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const { WebContentsView, session: electronSession } = require('electron');
+
+const _browserViews = new Map(); // viewId → { view, win, ownerWebContentsId }
+let _nextBrowserViewId = 1;
+
+// A single persistent partition shared by every browser tab so cookies +
+// localStorage survive across panel re-renders and app restarts. Isolated from
+// the main app session — the app's safeStorage / Anthropic cookies live in the
+// default session, which the browser tabs cannot see.
+const BROWSER_PARTITION = 'persist:ccm-browser';
+
+function _safeBrowseUrl(url) {
+  if (typeof url !== 'string') return null;
+  url = url.trim();
+  if (!url) return null;
+  // about:, data: and javascript: must NOT be allowed — they could pivot inside
+  // the renderer's origin in older Chromium versions.
+  if (/^(javascript|data|file):/i.test(url)) return null;
+  // Bare "google.com" or "about:blank" → coerce to https:// (or about:blank)
+  if (url === 'about:blank') return url;
+  if (!/^https?:\/\//i.test(url)) {
+    // Heuristic: if it has whitespace OR no dot, treat as a search query
+    if (/\s/.test(url) || !url.includes('.')) {
+      return 'https://duckduckgo.com/?q=' + encodeURIComponent(url);
+    }
+    return 'https://' + url;
+  }
+  return url;
+}
+
+function _attachBrowserViewListeners(viewId, view) {
+  const wc = view.webContents;
+  const owner = _browserViews.get(viewId)?.ownerWebContentsId;
+  const send = (channel, payload) => {
+    const ownerWc = BrowserWindow.getAllWindows()
+      .map(w => w.webContents)
+      .find(w => w.id === owner);
+    if (ownerWc && !ownerWc.isDestroyed()) {
+      try { ownerWc.send(channel, { viewId, ...payload }); } catch (_) {}
+    }
+  };
+
+  wc.on('did-start-loading',  ()                 => send('browser:loading', { loading: true }));
+  wc.on('did-stop-loading',   ()                 => send('browser:loading', { loading: false }));
+  wc.on('did-navigate',       (_e, url)          => send('browser:nav',     { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }));
+  wc.on('did-navigate-in-page',(_e, url)         => send('browser:nav',     { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }));
+  wc.on('page-title-updated', (_e, title)        => send('browser:title',   { title }));
+  wc.on('page-favicon-updated', (_e, favicons)   => send('browser:favicon', { favicon: favicons?.[0] || null }));
+  wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
+    if (isMain && code !== -3) send('browser:fail', { code, desc, url });
+  });
+
+  // Popups (target=_blank, window.open) → open in a new tab in this owner window
+  wc.setWindowOpenHandler(({ url }) => {
+    try {
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        send('browser:popup', { url });
+      } else {
+        send('browser:popup-blocked', { url });
+      }
+    } catch (_) {}
+    return { action: 'deny' };
+  });
+}
+
+ipcMain.handle('browser:create', (event, opts = {}) => {
+  const ownerWin = BrowserWindow.fromWebContents(event.sender);
+  if (!ownerWin) return { ok: false, error: 'No owner window' };
+
+  const sess = electronSession.fromPartition(BROWSER_PARTITION);
+  const view = new WebContentsView({
+    webPreferences: {
+      session:          sess,
+      contextIsolation: true,
+      nodeIntegration:  false,
+      sandbox:          true,
+      webSecurity:      true,
+      // No preload — the embedded pages shouldn't have ANY access to the app.
+    },
+  });
+
+  const viewId = _nextBrowserViewId++;
+  _browserViews.set(viewId, {
+    view, win: ownerWin, ownerWebContentsId: event.sender.id,
+  });
+  ownerWin.contentView.addChildView(view);
+  // Start off-screen until renderer sends first set-bounds
+  view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  view.setVisible(false);
+
+  _attachBrowserViewListeners(viewId, view);
+
+  // Load the requested URL (or about:blank to show a welcome state)
+  const startUrl = _safeBrowseUrl(opts.url) || 'about:blank';
+  view.webContents.loadURL(startUrl).catch(() => {});
+
+  return { ok: true, viewId };
+});
+
+ipcMain.handle('browser:set-bounds', (_, { viewId, x, y, width, height, visible }) => {
+  const entry = _browserViews.get(viewId);
+  if (!entry) return { ok: false, error: 'Unknown view' };
+  // Clamp to integers — WebContentsView is finicky about fractional pixels
+  entry.view.setBounds({
+    x:      Math.max(0, Math.round(x)),
+    y:      Math.max(0, Math.round(y)),
+    width:  Math.max(1, Math.round(width)),
+    height: Math.max(1, Math.round(height)),
+  });
+  entry.view.setVisible(visible !== false);
+  return { ok: true };
+});
+
+ipcMain.handle('browser:load-url', (_, { viewId, url }) => {
+  const entry = _browserViews.get(viewId);
+  if (!entry) return { ok: false, error: 'Unknown view' };
+  const safe = _safeBrowseUrl(url);
+  if (!safe) return { ok: false, error: 'Refused URL' };
+  entry.view.webContents.loadURL(safe).catch(() => {});
+  return { ok: true, url: safe };
+});
+
+ipcMain.handle('browser:nav', (_, { viewId, action }) => {
+  const entry = _browserViews.get(viewId);
+  if (!entry) return { ok: false, error: 'Unknown view' };
+  const nh = entry.view.webContents.navigationHistory;
+  switch (action) {
+    case 'back':    if (nh.canGoBack())    nh.goBack();    break;
+    case 'forward': if (nh.canGoForward()) nh.goForward(); break;
+    case 'reload':  entry.view.webContents.reload();       break;
+    case 'stop':    entry.view.webContents.stop();         break;
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('browser:devtools', (_, { viewId }) => {
+  const entry = _browserViews.get(viewId);
+  if (!entry) return { ok: false };
+  const wc = entry.view.webContents;
+  if (wc.isDevToolsOpened()) wc.closeDevTools();
+  else wc.openDevTools({ mode: 'detach' });
+  return { ok: true };
+});
+
+ipcMain.handle('browser:close', (_, viewId) => {
+  const entry = _browserViews.get(viewId);
+  if (!entry) return { ok: false };
+  try {
+    entry.win.contentView.removeChildView(entry.view);
+    entry.view.webContents.close();
+  } catch (_) {}
+  _browserViews.delete(viewId);
+  return { ok: true };
+});
+
+// When a window closes, destroy all its browser views so we don't leak processes.
+app.on('browser-window-created', (_, win) => {
+  win.on('closed', () => {
+    for (const [id, entry] of _browserViews) {
+      if (entry.win === win) {
+        try { entry.view.webContents.close(); } catch (_) {}
+        _browserViews.delete(id);
+      }
+    }
+  });
+});
+
 // ── IPC: knowledge-base file editor ──────────────────────────────────────────
 // Whitelist of editable files. Paths are resolved at read/write time.
 const APP_ROOT   = path.join(__dirname, '..');

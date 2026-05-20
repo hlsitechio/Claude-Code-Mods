@@ -219,6 +219,50 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getCwd: ()            => ipcRenderer.invoke('project:get-cwd'),
   },
 
+  // ── Embedded browser (WebContentsView-based Chromium tabs) ───────────────
+  // Each tab is a real Chromium process pinned over a panel region.
+  // The renderer owns the tab UI + URL bar + bounds; main process owns the
+  // WebContentsView lifecycle and ferries page events back.
+  browser: {
+    create:    (opts)                         => ipcRenderer.invoke('browser:create', opts || {}),
+    setBounds: (viewId, x, y, width, height, visible) =>
+                                                 ipcRenderer.invoke('browser:set-bounds', { viewId, x, y, width, height, visible }),
+    loadUrl:   (viewId, url)                  => ipcRenderer.invoke('browser:load-url', { viewId, url }),
+    nav:       (viewId, action)               => ipcRenderer.invoke('browser:nav', { viewId, action }),
+    devtools:  (viewId)                       => ipcRenderer.invoke('browser:devtools', { viewId }),
+    close:     (viewId)                       => ipcRenderer.invoke('browser:close', viewId),
+    onLoading: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:loading', handler);
+      return () => ipcRenderer.removeListener('browser:loading', handler);
+    },
+    onNav: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:nav', handler);
+      return () => ipcRenderer.removeListener('browser:nav', handler);
+    },
+    onTitle: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:title', handler);
+      return () => ipcRenderer.removeListener('browser:title', handler);
+    },
+    onFavicon: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:favicon', handler);
+      return () => ipcRenderer.removeListener('browser:favicon', handler);
+    },
+    onFail: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:fail', handler);
+      return () => ipcRenderer.removeListener('browser:fail', handler);
+    },
+    onPopup: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:popup', handler);
+      return () => ipcRenderer.removeListener('browser:popup', handler);
+    },
+  },
+
   // ── Kanban / Tasks ───────────────────────────────────────────────────────
   // Per-project task board (kanban.json in the active project cwd).
   // Same file is used by the CLI tool (bin/kanban.mjs) so terminals + chat + UI stay in sync.
