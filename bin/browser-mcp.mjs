@@ -32,20 +32,38 @@ function endpointFilePath() {
   return path.join(dir, 'ccm-browser-endpoint.json');
 }
 
-function readEndpoint() {
+// In-memory cache for the endpoint envelope. Read from disk ONCE at startup
+// (or when the previous endpoint becomes unreachable) — eliminates the
+// ~1-3ms file-read overhead from every single tool call. The endpoint file
+// only changes between Electron launches, so a long-lived cache is safe.
+let _endpointCache = null;
+function readEndpoint(forceRefresh = false) {
+  if (_endpointCache && !forceRefresh) return _endpointCache;
   try {
     const txt = fs.readFileSync(endpointFilePath(), 'utf8');
     const env = JSON.parse(txt);
     if (!env.url || !env.token) return null;
+    _endpointCache = env;
     return env;
   } catch (_) {
+    _endpointCache = null;
     return null;
   }
 }
 
 // ── HTTP client ─────────────────────────────────────────────────────────────
+// Persistent keep-alive agent — reuses the TCP connection across every tool
+// call in the session instead of paying TCP handshake cost (~3-5ms) every
+// time. The Electron HTTP server already supports keep-alive by default.
+const _httpAgent = new http.Agent({
+  keepAlive:        true,
+  keepAliveMsecs:   30_000,
+  maxSockets:       4,       // a small pool is enough — calls are typically serial
+  timeout:          60_000,
+});
+
 async function callOp(cmd, body = {}) {
-  const env = readEndpoint();
+  let env = readEndpoint();
   if (!env) {
     throw new Error(
       'Claude Code Mods is not running. Launch the CCM desktop app, ' +
@@ -65,8 +83,10 @@ async function callOp(cmd, body = {}) {
         'Content-Type':   'application/json',
         'Authorization':  'Bearer ' + env.token,
         'Content-Length': Buffer.byteLength(data),
+        'Connection':     'keep-alive',
       },
-      timeout: 30000,
+      agent:   _httpAgent, // reuse TCP connection
+      timeout: 30_000,
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -89,7 +109,10 @@ async function callOp(cmd, body = {}) {
       });
     });
     req.on('error', err => {
-      if (err.code === 'ECONNREFUSED') {
+      // Stale endpoint? Force-reread the file on the way out so the NEXT call
+      // picks up a fresh port/token if Electron restarted between requests.
+      if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.code === 'EPIPE') {
+        _endpointCache = null;
         reject(new Error('Cannot reach Claude Code Mods (connection refused). Is the app running?'));
       } else {
         reject(err);
@@ -131,7 +154,7 @@ const TOOLS = [
   },
   {
     name: 'browser_get_elements',
-    description: 'List interactable elements on the page (links, buttons, inputs, selects). Each element gets an integer "i" you can pass back to browser_click. Use this BEFORE clicking when you do not know the exact selector.',
+    description: 'List interactable elements on the page (links, buttons, inputs, selects). Compact format: each item has i (stable index — pass to browser_click), t (tag), s (CSS selector), x (visible text, ≤80 chars), r ([x,y,w,h] in pixels), optionally h (href, anchors only) and v (type, inputs only). Use this BEFORE clicking when you do not know the exact selector.',
     inputSchema: {
       type: 'object',
       properties: { limit: { type: 'integer', description: 'Max elements (default 60, max 200)' } },

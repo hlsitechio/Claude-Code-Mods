@@ -807,9 +807,9 @@ function _attachBrowserViewListeners(viewId, view) {
 
   wc.on('did-start-loading',  ()                 => send('browser:loading', { loading: true }));
   wc.on('did-stop-loading',   ()                 => send('browser:loading', { loading: false }));
-  wc.on('did-navigate',       (_e, url)          => send('browser:nav',     { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }));
-  wc.on('did-navigate-in-page',(_e, url)         => send('browser:nav',     { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }));
-  wc.on('page-title-updated', (_e, title)        => send('browser:title',   { title }));
+  wc.on('did-navigate',       (_e, url)          => { _invalidateActiveTabCache(); send('browser:nav', { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }); });
+  wc.on('did-navigate-in-page',(_e, url)         => { _invalidateActiveTabCache(); send('browser:nav', { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }); });
+  wc.on('page-title-updated', (_e, title)        => { _invalidateActiveTabCache(); send('browser:title', { title }); });
   wc.on('page-favicon-updated', (_e, favicons)   => send('browser:favicon', { favicon: favicons?.[0] || null }));
   wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
     if (isMain && code !== -3) send('browser:fail', { code, desc, url });
@@ -978,20 +978,38 @@ async function _browserWaitLoad(entry, timeoutMs = 15000) {
   });
 }
 
+// `getActiveTab` is called by the LLM almost every turn to know what page
+// the user is on. Page state (URL, title) only changes on navigation —
+// invalidate the cache from inside `navigate()` and `nav()` so a stale read
+// can never persist past a real change. 250ms TTL keeps the cache useful
+// across rapid back-to-back tool calls while staying fresh enough that a
+// user-driven nav (typing in the address bar) is reflected within a quarter
+// second.
+let _activeTabCache = null;
+let _activeTabCacheAt = 0;
+const ACTIVE_TAB_TTL_MS = 250;
+function _invalidateActiveTabCache() { _activeTabCacheAt = 0; }
+
 const ccmBrowser = {
   isAvailable() {
     return _browserViews.size > 0;
   },
 
   getActiveTab() {
+    const now = Date.now();
+    if (_activeTabCache && now - _activeTabCacheAt < ACTIVE_TAB_TTL_MS) {
+      return _activeTabCache;
+    }
     const entry = _firstBrowserView();
-    if (!entry) return null;
+    if (!entry) { _activeTabCache = null; return null; }
     const wc = entry.view.webContents;
-    return {
-      url:   wc.getURL(),
-      title: wc.getTitle(),
+    _activeTabCache = {
+      url:       wc.getURL(),
+      title:     wc.getTitle(),
       isLoading: wc.isLoading(),
     };
+    _activeTabCacheAt = now;
+    return _activeTabCache;
   },
 
   async navigate(url) {
@@ -999,8 +1017,10 @@ const ccmBrowser = {
     if (!entry) throw new Error('No browser tab is open. Ask the user to open the Browser panel first.');
     const safe = _safeBrowseUrl(url);
     if (!safe) throw new Error('Refused URL: ' + url);
+    _invalidateActiveTabCache();
     await entry.view.webContents.loadURL(safe);
     await _browserWaitLoad(entry);
+    _invalidateActiveTabCache();
     return { url: entry.view.webContents.getURL(), title: entry.view.webContents.getTitle() };
   },
 
@@ -1028,6 +1048,15 @@ const ccmBrowser = {
   async getElements(opts = {}) {
     const limit = Math.max(10, Math.min(200, opts.limit || 60));
     // Return clickable / fillable elements with stable selectors and visible text.
+    // Compact field names — they show up in EVERY subsequent tool-use turn as
+    // part of the cached conversation. Short names = fewer tokens × N turns.
+    //   i  = index (stable, used by browser_click({index}))
+    //   t  = tag (a / button / input / ...)
+    //   s  = selector (CSS, used by browser_click({selector}))
+    //   x  = visible text (trimmed, ≤80 chars)
+    //   h  = href (anchors only)
+    //   v  = type/value hint (inputs only)
+    //   r  = rect [x, y, w, h] as 4-element array
     const js = `
       (function() {
         const items = [];
@@ -1039,7 +1068,7 @@ const ccmBrowser = {
           if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
           return true;
         }
-        function trim(s) { return (s || '').replace(/\\s+/g, ' ').trim().slice(0, 100); }
+        function trim(s) { return (s || '').replace(/\\s+/g, ' ').trim().slice(0, 80); }
         function selectorFor(el) {
           if (el.id) return '#' + CSS.escape(el.id);
           if (el.name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
@@ -1056,18 +1085,16 @@ const ccmBrowser = {
           const r = el.getBoundingClientRect();
           const item = {
             i: items.length,
-            tag,
-            selector: selectorFor(el),
-            text:  trim(el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title')),
-            href:  tag === 'a' ? el.href : undefined,
-            type:  tag === 'input' ? el.type : undefined,
-            name:  el.name || undefined,
-            x: Math.round(r.left), y: Math.round(r.top),
-            w: Math.round(r.width), h: Math.round(r.height),
+            t: tag,
+            s: selectorFor(el),
+            x: trim(el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title')),
+            r: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
           };
+          if (tag === 'a' && el.href) item.h = el.href;
+          if (tag === 'input' && el.type) item.v = el.type;
           items.push(item);
         }
-        return { url: location.href, title: document.title, elements: items };
+        return { url: location.href, title: document.title, count: items.length, elements: items };
       })();
     `;
     return _browserExec(null, js);
@@ -1077,13 +1104,17 @@ const ccmBrowser = {
     // Accept { selector }, { text } or { index } from get_elements
     const { selector, text, index } = opts;
     if (typeof index === 'number') {
-      // Re-query elements and click by index
+      // Re-query elements and click by index. The compact field name `s`
+      // holds the selector after the recent payload-tightening — fall back
+      // to `selector` for backwards compatibility if an older list is passed.
       const list = await this.getElements({ limit: 200 });
       const target = list.elements[index];
       if (!target) throw new Error('No element at index ' + index);
+      const sel = target.s || target.selector;
+      if (!sel) throw new Error('Element at index ' + index + ' has no selector');
       return _browserExec(null, `
         (function() {
-          const el = document.querySelector(${JSON.stringify(target.selector)});
+          const el = document.querySelector(${JSON.stringify(sel)});
           if (!el) return { ok: false, error: 'Element vanished' };
           el.scrollIntoView({ block: 'center' });
           el.click();
@@ -1166,15 +1197,22 @@ const ccmBrowser = {
     const entry = _firstBrowserView();
     if (!entry) throw new Error('No browser tab is open');
     const nh = entry.view.webContents.navigationHistory;
+    _invalidateActiveTabCache();
     switch (action) {
       case 'back':    if (nh.canGoBack())    nh.goBack();    break;
       case 'forward': if (nh.canGoForward()) nh.goForward(); break;
       case 'reload':  entry.view.webContents.reload();       break;
     }
     await _browserWaitLoad(entry);
+    _invalidateActiveTabCache();
     return { url: entry.view.webContents.getURL(), title: entry.view.webContents.getTitle() };
   },
 };
+
+// Cache-invalidation for `getActiveTab` is wired into the existing
+// `_attachBrowserViewListeners` (above) — every did-navigate /
+// did-navigate-in-page / page-title-updated busts the cache before it
+// can serve a stale read.
 global.ccmBrowser = ccmBrowser;
 
 // IPC mirror — for renderer-driven invocations (slash commands, etc.)
