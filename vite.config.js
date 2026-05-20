@@ -30,7 +30,13 @@ export default defineConfig({
   // Electron loads via file:// and absolute /assets/... paths break.
   base: './',
   plugins: [
-    copyClassicScripts(['icons.js', 'workspace.js', 'app.js']),
+    copyClassicScripts([
+      'icons.js', 'workspace.js', 'app.js', 'error-capture.js',
+      'toast.js', 'split-chat.js',
+      // Note: xterm.js / xterm-addon-fit.js / xterm.css / dockview-core.min.js
+      // live in public/ — Vite copies that directory verbatim to dist/, so we
+      // don't list them here.
+    ]),
     // tailwind.css is a Vite-processed stylesheet (not a classic script) —
     // Vite handles it automatically via the <link> in index.html.
   ],

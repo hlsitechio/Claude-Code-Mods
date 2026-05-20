@@ -269,14 +269,18 @@ function createWindow() {
 
   // Forward renderer console messages to terminal (errors & warnings visible in npm run output).
   // Suppress harmless DevTools Protocol noise (Autofill CDP commands unsupported in Electron).
-  win.webContents.on('console-message', (eventOrLevel, maybeMsg, maybeLine, maybeSource) => {
-    const isObj = typeof eventOrLevel === 'object' && eventOrLevel !== null;
+  // Electron 36+ uses a single Event arg with .level as a STRING ('warning'/'error'/etc).
+  // Older signature was (event, levelNumber, msg, line, sourceId) — we keep both paths for safety.
+  win.webContents.on('console-message', (eventOrLevel, maybeMsg) => {
+    const isObj  = typeof eventOrLevel === 'object' && eventOrLevel !== null;
     const msg    = isObj ? (eventOrLevel.message || '') : (typeof maybeMsg === 'string' ? maybeMsg : '');
-    const level  = isObj ? (eventOrLevel.level  || 0)  : 0;  // 1=info,2=warn,3=error
+    // New API: level is string. Legacy API: level is number (1=info, 2=warn, 3=error).
+    const rawLevel = isObj ? eventOrLevel.level : eventOrLevel;
+    const isError  = rawLevel === 'error'   || rawLevel === 3;
+    const isWarn   = rawLevel === 'warning' || rawLevel === 'warn' || rawLevel === 2;
     if (msg.includes('Autofill.enable') || msg.includes('Autofill.setAddresses')) return;
-    if (level >= 2) {
-      // Show warnings and errors in the Electron terminal so they're visible
-      const prefix = level >= 3 ? '[RENDERER ERROR]' : '[RENDERER WARN]';
+    if (isError || isWarn) {
+      const prefix = isError ? '[RENDERER ERROR]' : '[RENDERER WARN]';
       console.log(prefix, msg.slice(0, 400));
     }
   });
