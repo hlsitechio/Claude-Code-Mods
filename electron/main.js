@@ -770,8 +770,10 @@ ipcMain.handle('kanban:summary', () => {
 const { WebContentsView, session: electronSession } = require('electron');
 const ccmBrowserProfile = require('./browser-profile');
 const ccmChrome         = require('./chrome-controller');
+const ccmChromeFiles    = require('./chrome-files');
 global.ccmBrowserProfile = ccmBrowserProfile;
 global.ccmChrome         = ccmChrome;
+global.ccmChromeFiles    = ccmChromeFiles;
 
 const _browserViews = new Map(); // viewId → { view, win, ownerWebContentsId }
 let _nextBrowserViewId = 1;

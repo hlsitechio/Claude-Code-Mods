@@ -130,6 +130,8 @@ async function _handle(req, res) {
   const profile = global.ccmBrowserProfile;
   // Chrome (real Chrome via CDP) ops route through global.ccmChrome.
   const chrome  = global.ccmChrome;
+  // Phase 7 — closed-Chrome file/registry editors.
+  const chromeFiles = global.ccmChromeFiles;
   try {
     let result;
     switch (cmd) {
@@ -289,6 +291,19 @@ async function _handle(req, res) {
 
       // ── Convenience ──────────────────────────────────────────
       case 'chrome-open-internal':         result = await chrome.openInternalPage(body); break;
+
+      // ── Phase 7 · Closed-Chrome file/registry editors ──
+      case 'chrome-files-info':            result = await chromeFiles.profileInfo(); break;
+      case 'chrome-flags-list':            result = await chromeFiles.flagsList(); break;
+      case 'chrome-flags-set':             result = await chromeFiles.flagsSet(body); break;
+      case 'chrome-prefs-get':             result = await chromeFiles.prefsGet(body); break;
+      case 'chrome-prefs-set':             result = await chromeFiles.prefsSet(body); break;
+      case 'chrome-prefs-list':            result = await chromeFiles.prefsListTopLevel(); break;
+      case 'chrome-bookmarks-json-read':   result = await chromeFiles.bookmarksJsonRead(); break;
+      case 'chrome-bookmarks-json-write':  result = await chromeFiles.bookmarksJsonWrite(body); break;
+      case 'chrome-policy-list':           result = await chromeFiles.policyList(); break;
+      case 'chrome-policy-set':            result = await chromeFiles.policySet(body); break;
+      case 'chrome-policy-delete':         result = await chromeFiles.policyDelete(body); break;
 
       // ── Phase 6 · Extension API bridge (chrome.* APIs CDP can't reach)
       // Tab groups
