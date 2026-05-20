@@ -5345,6 +5345,9 @@ function syncModelChip() {
     modelChipBtn.classList.remove('is-direct');
   }
 }
+// Expose so the browser panel's mode pill can toggle/read mode state.
+window.modelState    = modelState;
+window.syncModelChip = syncModelChip;
 
 // ---------- Context strip: Agent chip ----------
 const agentPillBtn  = document.getElementById('agent-pill');
@@ -6351,6 +6354,13 @@ function renderBrowserPanel() {
           </div>`;
         }).join('')}
         <button class="browser-tab__new" id="browser-new-tab" title="New tab (Ctrl+T)"><i data-phosphor="plus"></i></button>
+        <!-- Mode badge — pinned right. Click switches CLI <→ Direct so Claude can drive the browser. -->
+        <button class="browser-mode-pill" id="browser-mode-pill"
+                data-direct="${window.modelState?.directMode ? 'true' : 'false'}"
+                title="Click to toggle: in Direct mode Claude has full browser control via tools.">
+          <i data-phosphor="${window.modelState?.directMode ? 'check-circle' : 'robot'}" class="browser-mode-pill__icon"></i>
+          <span class="browser-mode-pill__label">${window.modelState?.directMode ? 'Direct · Claude can drive' : 'CLI · Click to let Claude drive'}</span>
+        </button>
       </div>
 
       <!-- Toolbar -->
@@ -6639,6 +6649,21 @@ async function initBrowserPanel(bodyEl) {
 
     root.querySelector('#browser-new-tab')?.addEventListener('click', () => openTab('about:blank'));
     root.querySelector('#browser-welcome-newtab')?.addEventListener('click', () => openTab('https://duckduckgo.com'));
+
+    // Mode pill — one-click toggle between CLI and Direct
+    root.querySelector('#browser-mode-pill')?.addEventListener('click', () => {
+      if (!window.modelState) return;
+      window.modelState.directMode = !window.modelState.directMode;
+      if (typeof window.syncModelChip === 'function') window.syncModelChip();
+      window.showToast?.(
+        window.modelState.directMode
+          ? 'Direct API mode — Claude can now control the browser'
+          : 'CLI mode — browser tools off',
+        'success',
+        2500,
+      );
+      refreshChrome(); // re-render so the pill label updates
+    });
 
     // Tab click → activate; close-button click → close
     root.querySelectorAll('.browser-tab').forEach(tabEl => {
