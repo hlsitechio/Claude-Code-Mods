@@ -6402,6 +6402,9 @@ function _browserPanelCleanup() {
   _browser.mounted = false;
   _browser.suspended = false;
 }
+// Expose so workspace.js can call cleanup when the dockview panel's
+// dispose() fires (user clicked the X on the panel tab).
+window._browserPanelCleanup = _browserPanelCleanup;
 
 // WebContentsView is a NATIVE Chromium layer drawn ON TOP of the HTML — it
 // can't be z-indexed under a modal. To make modals (kanban edit task, code

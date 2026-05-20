@@ -752,7 +752,23 @@
           element: panelEl,
           init(params) {
             const pid = params.params?.id;
-            if (pid) panelBodies[pid] = bodyDiv;
+            if (pid) {
+              panelBodies[pid] = bodyDiv;
+              panelEl.dataset.panelId = pid;
+            }
+          },
+          dispose() {
+            // When user clicks the tab X, dockview calls this. We need to run
+            // panel-specific teardown — without this, native overlays (the
+            // browser's WebContentsView) get orphaned after the HTML panel
+            // disappears.
+            const pid = panelEl.dataset.panelId;
+            try {
+              if (pid === 'browser' && typeof window._browserPanelCleanup === 'function') {
+                window._browserPanelCleanup();
+              }
+            } catch (_) { /* swallow — dispose must not throw */ }
+            if (pid) delete panelBodies[pid];
           },
         };
       },
