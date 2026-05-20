@@ -10079,6 +10079,9 @@ let _streamInterval = setInterval(() => {
   function addUserBubble(text, images = []) {
     const div = document.createElement('div');
     div.className = 'msg msg--user';
+    // Stash the raw text on the element so the context menu can copy it
+    // verbatim (including markdown) without having to re-parse the DOM.
+    div.dataset.raw = text || '';
     // Images render above text in their own right-aligned strip (no dark bubble behind them)
     const imgHtml = images.length
       ? `<div class="msg__imgs">${images.map(img =>
@@ -10121,6 +10124,185 @@ let _streamInterval = setInterval(() => {
     scrollBottom();
     return div;
   }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Chat context menu — Copy text / Copy as Markdown / Paste / Cut
+  // ─────────────────────────────────────────────────────────────────────────
+  // - On a chat bubble (.msg): Copy text + Copy as Markdown
+  // - On the composer:         Cut + Copy + Paste + Select all
+  // - On a code block:         Copy code (plus the bubble items above)
+  //
+  // Keyboard shortcuts (active when chat has focus or selection is inside it):
+  //   Ctrl+Shift+C → copy as markdown (the bubble that contains the selection)
+  //   Ctrl+C / Ctrl+V are browser native and work as-is for selected text + composer.
+  // ─────────────────────────────────────────────────────────────────────────
+  const _chatMenu = document.getElementById('chat-ctx-menu');
+
+  function _hideChatMenu() {
+    if (!_chatMenu) return;
+    _chatMenu.style.display = 'none';
+    _chatMenu.setAttribute('aria-hidden', 'true');
+  }
+
+  function _showChatMenu(x, y, items) {
+    if (!_chatMenu || !items.length) return;
+    _chatMenu.innerHTML = items.map(it => {
+      if (it.type === 'separator') return '<div class="chat-ctx-sep"></div>';
+      return `<button class="chat-ctx-item${it.disabled ? ' is-disabled' : ''}" data-action="${it.id}"${it.disabled ? ' disabled' : ''}>
+        <i data-phosphor="${it.icon || 'square'}"></i>
+        <span class="chat-ctx-label">${escapeHTML(it.label)}</span>
+        ${it.kbd ? `<span class="chat-ctx-kbd">${escapeHTML(it.kbd)}</span>` : ''}
+      </button>`;
+    }).join('');
+    if (window.renderIcons) window.renderIcons(_chatMenu);
+
+    // Position — clamp to viewport so we never overflow the screen edge
+    _chatMenu.style.display = 'block';
+    _chatMenu.setAttribute('aria-hidden', 'false');
+    const rect = _chatMenu.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const left = Math.min(x, vw - rect.width  - 8);
+    const top  = Math.min(y, vh - rect.height - 8);
+    _chatMenu.style.left = Math.max(4, left) + 'px';
+    _chatMenu.style.top  = Math.max(4, top)  + 'px';
+  }
+
+  // ── Action runner ────────────────────────────────────────────────────────
+  async function _runChatMenuAction(action, ctx) {
+    switch (action) {
+      case 'copy-text': {
+        // Prefer the active selection (lets user copy a quoted snippet only).
+        // Fall back to the entire bubble's plain-text content.
+        const sel = window.getSelection?.()?.toString() || '';
+        const text = sel || ctx.bubble?.querySelector('.msg__body')?.innerText || '';
+        if (text) {
+          await navigator.clipboard.writeText(text).catch(() => {});
+          window.showToast?.('Copied · ' + text.length + ' chars', 'success', 1500);
+        }
+        break;
+      }
+      case 'copy-md': {
+        // Stash on dataset.raw — see addUserBubble / streamToAssistantBubble.
+        const md = ctx.bubble?.dataset.raw || ctx.bubble?.querySelector('.msg__body')?.innerText || '';
+        if (md) {
+          await navigator.clipboard.writeText(md).catch(() => {});
+          window.showToast?.('Copied as Markdown', 'success', 1500);
+        }
+        break;
+      }
+      case 'copy-code': {
+        // The code-block module already wires its own "Copy code" button; we
+        // mirror that path here so right-click works on any code block.
+        const codeEl = ctx.codeBlock?.querySelector('pre') || ctx.codeBlock?.querySelector('code');
+        const code = codeEl?.innerText || '';
+        if (code) {
+          await navigator.clipboard.writeText(code).catch(() => {});
+          window.showToast?.('Code copied', 'success', 1500);
+        }
+        break;
+      }
+      case 'paste': {
+        const text = await navigator.clipboard.readText().catch(() => '');
+        if (!text) break;
+        const input = ctx.composer;
+        if (input && (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT')) {
+          const s = input.selectionStart ?? input.value.length;
+          const e = input.selectionEnd   ?? s;
+          input.setRangeText(text, s, e, 'end');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.focus();
+        }
+        break;
+      }
+      case 'cut': {
+        const input = ctx.composer;
+        if (!input) break;
+        const s = input.selectionStart ?? 0;
+        const e = input.selectionEnd   ?? 0;
+        if (s === e) break;
+        const selText = input.value.slice(s, e);
+        await navigator.clipboard.writeText(selText).catch(() => {});
+        input.setRangeText('', s, e, 'end');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+        break;
+      }
+      case 'select-all': {
+        const input = ctx.composer;
+        if (input?.select) input.select();
+        break;
+      }
+    }
+    _hideChatMenu();
+  }
+
+  // ── Wire contextmenu on the chat conversation + composer ─────────────────
+  function _onChatContextMenu(e) {
+    const bubble    = e.target.closest('.msg');
+    const codeBlock = e.target.closest('.code-block');
+    const composer  = e.target.closest('#composer-input');
+    if (!bubble && !composer) return; // let default menu show elsewhere
+
+    e.preventDefault();
+    const items = [];
+    const hasSel = (window.getSelection?.()?.toString() || '').length > 0;
+
+    if (composer) {
+      const hasInputSel = composer.selectionStart !== composer.selectionEnd;
+      items.push({ id: 'cut',        label: 'Cut',        icon: 'scissors',        kbd: 'Ctrl+X', disabled: !hasInputSel });
+      items.push({ id: 'copy-text',  label: 'Copy',       icon: 'copy',            kbd: 'Ctrl+C', disabled: !hasInputSel });
+      items.push({ id: 'paste',      label: 'Paste',      icon: 'clipboard-text',  kbd: 'Ctrl+V' });
+      items.push({ type: 'separator' });
+      items.push({ id: 'select-all', label: 'Select all', icon: 'selection-all',   kbd: 'Ctrl+A' });
+    } else if (bubble) {
+      // Right-click on a chat bubble (user or assistant)
+      if (codeBlock) {
+        items.push({ id: 'copy-code', label: 'Copy code', icon: 'code', kbd: '' });
+        items.push({ type: 'separator' });
+      }
+      items.push({ id: 'copy-text', label: hasSel ? 'Copy selection' : 'Copy text', icon: 'copy',    kbd: 'Ctrl+C' });
+      items.push({ id: 'copy-md',   label: 'Copy as Markdown',                       icon: 'text-aa', kbd: 'Ctrl+Shift+C' });
+    }
+
+    _showChatMenu(e.clientX, e.clientY, items);
+    const ctxData = { bubble, codeBlock, composer };
+    // Wire item clicks (single-use listener — menu re-renders on next open)
+    _chatMenu.onclick = (ev) => {
+      const btn = ev.target.closest('.chat-ctx-item');
+      if (!btn || btn.disabled) return;
+      _runChatMenuAction(btn.dataset.action, ctxData);
+    };
+  }
+
+  document.addEventListener('contextmenu', _onChatContextMenu);
+
+  // Close on outside click, scroll, Escape, or any keydown
+  document.addEventListener('click', (e) => {
+    if (_chatMenu && !_chatMenu.contains(e.target)) _hideChatMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') _hideChatMenu();
+  });
+  document.addEventListener('scroll', _hideChatMenu, true);
+
+  // ── Keyboard shortcut: Ctrl+Shift+C → copy as Markdown ────────────────────
+  // Fires when the user's text selection is inside a chat bubble.
+  document.addEventListener('keydown', async (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return;
+    if (e.key !== 'C' && e.key !== 'c') return;
+    const sel = window.getSelection();
+    const anchor = sel?.anchorNode;
+    if (!anchor) return;
+    const node = anchor.nodeType === 1 ? anchor : anchor.parentElement;
+    const bubble = node?.closest?.('.msg');
+    if (!bubble) return;
+    e.preventDefault();
+    const md = bubble.dataset.raw || bubble.querySelector('.msg__body')?.innerText || '';
+    if (md) {
+      await navigator.clipboard.writeText(md).catch(() => {});
+      window.showToast?.('Copied as Markdown', 'success', 1500);
+    }
+  });
 
   // ── Tool activity chips ─────────────────────────────────────────────────
   // Chips are injected via \x01ACT:{json}\x02 markers piggybacked on claude:chunk.
@@ -10197,6 +10379,9 @@ let _streamInterval = setInterval(() => {
   }
 
   function streamToAssistantBubble(div, text) {
+    // Keep the raw markdown on the element so the context menu can serve
+    // "Copy as Markdown" without having to round-trip through the rendered HTML.
+    div.dataset.raw = text || '';
     div.querySelector('.msg__body').innerHTML = mdToHtml(text);
     if (window.renderIcons) window.renderIcons(div.querySelector('.msg__body'));
     scrollBottom();
