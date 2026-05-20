@@ -6378,16 +6378,15 @@ function renderBrowserPanel() {
         <button class="browser-btn" id="browser-devtools" title="DevTools (F12)"><i data-phosphor="bug"></i></button>
       </div>
 
-      <!-- The viewport — main process positions the WebContentsView over this exact rect -->
+      <!-- The viewport — main process positions the WebContentsView over this exact rect.
+           Welcome state is intentionally minimal — the tab strip's "+" button is the
+           only entry point, so duplicating it inside the viewport just creates a
+           ghost element that re-appears when the view is suspended on blur. -->
       <div class="browser-viewport" id="browser-viewport">
         ${tabs.length === 0 ? `
           <div class="browser-welcome">
-            <i data-phosphor="globe" style="font-size:40px;opacity:.4"></i>
-            <h2>Embedded browser</h2>
-            <p>Open a new tab to start browsing. Each tab is a real Chromium process — isolated from this app.</p>
-            <button class="browser-welcome__btn" id="browser-welcome-newtab">
-              <i data-phosphor="plus"></i><span>New tab</span>
-            </button>
+            <i data-phosphor="globe" style="font-size:32px;opacity:.25"></i>
+            <p style="opacity:.5">Click <strong>+</strong> in the tab strip above to start browsing.</p>
           </div>` : ''}
       </div>
     </div>`;
@@ -6618,6 +6617,10 @@ async function initBrowserPanel(bodyEl) {
     };
     _browser.tabs.push(tab);
     _browser.activeId = tab.viewId;
+    // Tear out the welcome placeholder — it lives inside the viewport, so when
+    // the WebContentsView is suspended on blur the user would otherwise see it
+    // peek back through. Once any tab exists, the welcome is forever gone.
+    document.querySelector('#browser-viewport .browser-welcome')?.remove();
     refreshChrome();
     requestAnimationFrame(repositionActive);
     return tab;
