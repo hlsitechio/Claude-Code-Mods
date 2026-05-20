@@ -10847,16 +10847,38 @@ let _streamInterval = setInterval(() => {
     _activityDiv = null;
   }
 
+  // Per-bubble render throttle. Streaming chunks arrive faster than we can
+  // usefully repaint — re-parsing markdown and swapping innerHTML on every
+  // 5-character delta is the largest source of perceived chat lag. Coalesce
+  // updates to at most one per animation frame; on streamDone we force a
+  // final flush so the message ends in its true final state.
+  const _streamPending = new WeakMap();
   function streamToAssistantBubble(div, text) {
-    // Keep the raw markdown on the element so the context menu can serve
-    // "Copy as Markdown" without having to round-trip through the rendered HTML.
     div.dataset.raw = text || '';
-    div.querySelector('.msg__body').innerHTML = mdToHtml(text);
-    if (window.renderIcons) window.renderIcons(div.querySelector('.msg__body'));
+    if (_streamPending.get(div)) return; // a paint is already scheduled
+    _streamPending.set(div, true);
+    requestAnimationFrame(() => {
+      _streamPending.set(div, false);
+      const body = div.querySelector('.msg__body');
+      if (!body) return;
+      body.innerHTML = mdToHtml(div.dataset.raw || '');
+      if (window.renderIcons) window.renderIcons(body);
+      scrollBottom();
+    });
+  }
+  // Forced synchronous render — call at stream end so the final markdown is
+  // guaranteed visible even if the rAF-batched render is still pending.
+  function flushStreamBubble(div) {
+    _streamPending.set(div, false);
+    const body = div.querySelector('.msg__body');
+    if (!body) return;
+    body.innerHTML = mdToHtml(div.dataset.raw || '');
+    if (window.renderIcons) window.renderIcons(body);
     scrollBottom();
   }
 
   function finalizeAssistantBubble(div, stats) {
+    flushStreamBubble(div); // make sure last chunks are painted
     div.classList.remove('msg--streaming');
     const dot  = div.querySelector('.msg__dot');
     const meta = div.querySelector('.msg__meta');

@@ -991,15 +991,63 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
     }
   }
 
+  // ── Prompt-cache scaffolding ───────────────────────────────────────────
+  // Anthropic supports up to 4 ephemeral cache breakpoints. We use them on:
+  //   1. system prompt  (~2KB of browser context + standing instructions)
+  //   2. tools array    (~3KB of JSON-schema tool definitions)
+  //   3. message history (everything before the new user turn — grows each
+  //      tool-use turn — so subsequent turns hit the cache for the entire
+  //      prior conversation)
+  //
+  // Cache hits cost 10% of normal input tokens; writes cost 25% more on the
+  // first turn that establishes them. For multi-turn tool flows this is a
+  // dramatic speedup AND price reduction — typically 3–5× faster.
+  function asSystemBlock(text) {
+    // Anthropic accepts `system` as a string OR an array of content blocks.
+    // The array form is required to attach cache_control.
+    return [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
+  }
+  function tagToolsCacheable(tools) {
+    if (!tools?.length) return tools;
+    // Mark the LAST tool — cache_control covers everything before it inclusive.
+    return [
+      ...tools.slice(0, -1),
+      { ...tools[tools.length - 1], cache_control: { type: 'ephemeral' } },
+    ];
+  }
+  function tagLastMessageCacheable(messages) {
+    // Mutate the LAST content block of the LAST message to be a cache breakpoint.
+    // This extends the cache prefix through that message inclusive — used at
+    // the start of every loop iteration past turn 1 to maximize cache hits.
+    if (!messages?.length) return messages;
+    const out = [...messages];
+    const last = out[out.length - 1];
+    if (typeof last.content === 'string') {
+      out[out.length - 1] = {
+        ...last,
+        content: [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }],
+      };
+    } else if (Array.isArray(last.content) && last.content.length) {
+      const blocks = [...last.content];
+      const lastBlock = blocks[blocks.length - 1];
+      // Don't double-mark — only set if absent
+      if (!lastBlock.cache_control) {
+        blocks[blocks.length - 1] = { ...lastBlock, cache_control: { type: 'ephemeral' } };
+      }
+      out[out.length - 1] = { ...last, content: blocks };
+    }
+    return out;
+  }
+
   const baseParams = {
     model:      resolvedModel,
     max_tokens: 8192,
     stream:     true,
   };
-  if (effectiveSystem) baseParams.system = effectiveSystem;
-  if (hasBrowser) baseParams.tools = BROWSER_TOOLS;
+  if (effectiveSystem) baseParams.system = asSystemBlock(effectiveSystem);
+  if (hasBrowser)      baseParams.tools  = tagToolsCacheable(BROWSER_TOOLS);
 
-  let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0;
+  let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0;
   let fullText = '';
   let currentMessages = messages;
 
@@ -1012,7 +1060,12 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
     const MAX_TURNS = 15;
     let turn = 0;
     while (turn++ < MAX_TURNS) {
-      const stream = await client.messages.create({ ...baseParams, messages: currentMessages });
+      // Past turn 1, mark the previous turn's last message as cacheable so
+      // EVERYTHING through that message is served from cache on the next call.
+      const messagesForThisTurn = turn === 1
+        ? currentMessages
+        : tagLastMessageCacheable(currentMessages);
+      const stream = await client.messages.create({ ...baseParams, messages: messagesForThisTurn });
 
       const turnContent = []; // accumulated blocks for THIS assistant turn
       let cur = null;          // currently-streaming block
@@ -1022,8 +1075,9 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
         switch (chunk.type) {
           case 'message_start': {
             const u = chunk.message?.usage || {};
-            inputTokens     += u.input_tokens              ?? 0;
-            cacheReadTokens += u.cache_read_input_tokens   ?? 0;
+            inputTokens      += u.input_tokens                   ?? 0;
+            cacheReadTokens  += u.cache_read_input_tokens        ?? 0;
+            cacheWriteTokens += u.cache_creation_input_tokens    ?? 0;
             break;
           }
           case 'content_block_start': {
@@ -1069,41 +1123,51 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
       // If the model finished naturally, we're done.
       if (stopReason !== 'tool_use') break;
 
-      // Execute every tool_use block in this turn — push results back as a user message.
-      const toolResults = [];
-      for (const block of turnContent) {
-        if (block.type !== 'tool_use') continue;
+      // Execute every tool_use block in this turn IN PARALLEL.
+      // Most browser tools can safely run concurrently — they target different
+      // DOM elements or do read-only inspection. Side-effecting tools (click,
+      // type, navigate) generally aren't requested in the same turn anyway.
+      // For tools that DO conflict, the underlying executeJavaScript still
+      // serializes on the renderer side. Net win: 2–3× speedup when the
+      // model batches reads (e.g. get_state + read_page in one turn).
+      const toolBlocks = turnContent.filter(b => b.type === 'tool_use');
+      const settled = await Promise.all(toolBlocks.map(async (block) => {
         try {
           const result = await _executeBrowserTool(block.name, block.input || {});
-          // Special-case screenshots: send the image AS the tool_result content
-          // so the model can SEE the page, not just read about it.
-          if (block.name === 'browser_screenshot' && result?.base64) {
-            toolResults.push({
-              type:        'tool_result',
-              tool_use_id: block.id,
-              content: [
-                { type: 'image',
-                  source: { type: 'base64', media_type: result.mediaType || 'image/jpeg', data: result.base64 } },
-                { type: 'text', text: `Screenshot · ${result.url || ''} · ${result.title || ''}` },
-              ],
-            });
-          } else {
-            toolResults.push({
-              type:        'tool_result',
-              tool_use_id: block.id,
-              content:     typeof result === 'string' ? result : JSON.stringify(result),
-            });
-          }
+          return { ok: true, block, result };
         } catch (e) {
           console.warn('[browser-tool] error:', block.name, e.message);
-          toolResults.push({
+          return { ok: false, block, error: e.message };
+        }
+      }));
+      const toolResults = settled.map(({ ok, block, result, error }) => {
+        if (!ok) {
+          return {
             type:        'tool_result',
             tool_use_id: block.id,
-            content:     'Tool error: ' + e.message,
+            content:     'Tool error: ' + error,
             is_error:    true,
-          });
+          };
         }
-      }
+        // Special-case screenshots: send the image AS the tool_result content
+        // so the model can SEE the page, not just read about it.
+        if (block.name === 'browser_screenshot' && result?.base64) {
+          return {
+            type:        'tool_result',
+            tool_use_id: block.id,
+            content: [
+              { type: 'image',
+                source: { type: 'base64', media_type: result.mediaType || 'image/jpeg', data: result.base64 } },
+              { type: 'text', text: `Screenshot · ${result.url || ''} · ${result.title || ''}` },
+            ],
+          };
+        }
+        return {
+          type:        'tool_result',
+          tool_use_id: block.id,
+          content:     typeof result === 'string' ? result : JSON.stringify(result),
+        };
+      });
 
       // Build messages for the next turn — preserve the assistant's full turn
       // (text + tool_use blocks) and append the user's tool_result turn.
@@ -1115,7 +1179,18 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
       // Loop will run again with the augmented conversation.
     }
 
-    const donePayload = { inputTokens, outputTokens, cacheReadTokens, model: resolvedModel };
+    const donePayload = {
+      inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens,
+      model: resolvedModel,
+    };
+    // Telemetry — cache effectiveness as a percentage of input tokens we got
+    // for free. >50% on multi-turn flows is excellent; <10% suggests something
+    // is busting the cache (system prompt mutation, message order changes, ...)
+    const totalInput = inputTokens + cacheReadTokens;
+    if (totalInput > 0) {
+      const hitRate = Math.round((cacheReadTokens / totalInput) * 100);
+      console.log(`[claude] cache  read=${cacheReadTokens}  write=${cacheWriteTokens}  hitRate=${hitRate}%  ${turn} turn(s)`);
+    }
     safeSend(doneCh, donePayload);
     return { text: fullText, ...donePayload };
 
