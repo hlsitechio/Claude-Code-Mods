@@ -827,6 +827,98 @@ const TOOLS = [
   // ── Convenience: open chrome:// internal pages ─────────────────────────
   { name: 'chrome_open_internal', description: 'Open a chrome:// internal page like "settings", "flags", "extensions", "history", "downloads". Allowlisted — crash/kill/hang pages are refused.',
     inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Page name without prefix (e.g. "settings", "flags") or full chrome://name URL' } }, required: ['name'], additionalProperties: false } },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 6 — Extension API bridge (chrome.* APIs CDP cannot reach)
+  // Routed through the auto-loaded MV3 companion extension. Requires Chrome
+  // to be running; the companion auto-loads on chrome_launch.
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── Tab Groups ─────────────────────────────────────────────────────────
+  { name: 'chrome_ext_tabgroups_query', description: 'Query tab groups (visible Chrome groups, with id/title/color/collapsed state).',
+    inputSchema: { type: 'object', properties: { collapsed: { type: 'boolean' }, color: { type: 'string' }, title: { type: 'string' }, windowId: { type: 'integer' } }, additionalProperties: false } },
+  { name: 'chrome_ext_tabgroups_update', description: 'Update tab-group properties: title, color (grey/blue/red/yellow/green/pink/purple/cyan/orange), collapsed.',
+    inputSchema: { type: 'object', properties: { groupId: { type: 'integer' }, updateProps: { type: 'object' } }, required: ['groupId', 'updateProps'], additionalProperties: false } },
+  { name: 'chrome_ext_tabs_group', description: 'Group one or more tabs together. Pass tabIds (array of tab integers) + optional groupId (existing group) OR createProperties.',
+    inputSchema: { type: 'object', properties: { tabIds: { type: 'array', items: { type: 'integer' } }, groupId: { type: 'integer' }, createProperties: { type: 'object' } }, additionalProperties: false } },
+  { name: 'chrome_ext_tabs_ungroup', description: 'Remove tabs from their group(s).',
+    inputSchema: { type: 'object', properties: { tabIds: { type: 'array', items: { type: 'integer' } } }, required: ['tabIds'], additionalProperties: false } },
+
+  // ── Sessions (recently closed, restore) ───────────────────────────────
+  { name: 'chrome_ext_sessions_recent', description: 'List recently closed tabs/windows (Chrome\'s own — separate from Claude profile history).',
+    inputSchema: { type: 'object', properties: { maxResults: { type: 'integer' } }, additionalProperties: false } },
+  { name: 'chrome_ext_sessions_restore', description: 'Restore a closed tab/window by sessionId (from chrome_ext_sessions_recent).',
+    inputSchema: { type: 'object', properties: { sessionId: { type: 'string' } }, additionalProperties: false } },
+
+  // ── Reading List (Chrome\'s built-in) ──────────────────────────────────
+  { name: 'chrome_ext_readlist_query', description: 'Query Chrome\'s native Reading List (has-been-read flag, etc).',
+    inputSchema: { type: 'object', properties: { hasBeenRead: { type: 'boolean' } }, additionalProperties: false } },
+  { name: 'chrome_ext_readlist_add', description: 'Add to Chrome\'s native Reading List.',
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, title: { type: 'string' }, hasBeenRead: { type: 'boolean' } }, required: ['url'], additionalProperties: false } },
+  { name: 'chrome_ext_readlist_remove', description: 'Remove a Reading List entry by URL.',
+    inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false } },
+
+  // ── History (Chrome\'s own — different from Claude profile history) ────
+  { name: 'chrome_ext_history_search', description: 'Search Chrome\'s native history (full DB, much larger than what Claude profile records).',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' }, startTime: { type: 'number' }, endTime: { type: 'number' }, maxResults: { type: 'integer' } }, required: ['text'], additionalProperties: false } },
+  { name: 'chrome_ext_history_del_url', description: 'Delete one URL from Chrome\'s history.',
+    inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false } },
+  { name: 'chrome_ext_history_del_all', description: 'Wipe ALL of Chrome\'s history. Destructive.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+
+  // ── Bookmarks (Chrome\'s native bookmark tree) ─────────────────────────
+  { name: 'chrome_ext_bookmarks_tree', description: 'Get Chrome\'s full bookmark tree.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_ext_bookmarks_search', description: 'Search Chrome\'s bookmarks by query string.',
+    inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
+  { name: 'chrome_ext_bookmarks_create', description: 'Create a bookmark or folder. parentId optional (defaults to bookmarks bar).',
+    inputSchema: { type: 'object', properties: { parentId: { type: 'string' }, title: { type: 'string' }, url: { type: 'string', description: 'Omit to create a folder' } }, additionalProperties: false } },
+  { name: 'chrome_ext_bookmarks_remove', description: 'Remove a bookmark by id (from tree/search).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
+
+  // ── Downloads ──────────────────────────────────────────────────────────
+  { name: 'chrome_ext_downloads_search', description: 'Search Chrome\'s downloads (in-progress + completed).',
+    inputSchema: { type: 'object', properties: { query: { type: 'array', items: { type: 'string' } }, state: { type: 'string', enum: ['in_progress','interrupted','complete'] }, limit: { type: 'integer' } }, additionalProperties: false } },
+  { name: 'chrome_ext_downloads_start', description: 'Start a download from a URL (with optional filename / save-as prompt).',
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, filename: { type: 'string' }, saveAs: { type: 'boolean' } }, required: ['url'], additionalProperties: false } },
+  { name: 'chrome_ext_downloads_cancel', description: 'Cancel an in-progress download.',
+    inputSchema: { type: 'object', properties: { downloadId: { type: 'integer' } }, required: ['downloadId'], additionalProperties: false } },
+  { name: 'chrome_ext_downloads_open', description: 'Open a completed downloaded file.',
+    inputSchema: { type: 'object', properties: { downloadId: { type: 'integer' } }, required: ['downloadId'], additionalProperties: false } },
+
+  // ── Management (control OTHER Chrome extensions) ──────────────────────
+  { name: 'chrome_ext_mgmt_list', description: 'List ALL installed extensions in Claude\'s Chrome (including this companion).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_ext_mgmt_enable', description: 'Enable or disable an extension by id.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, enabled: { type: 'boolean' } }, required: ['id', 'enabled'], additionalProperties: false } },
+  { name: 'chrome_ext_mgmt_uninstall', description: 'Uninstall an extension by id.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, options: { type: 'object', properties: { showConfirmDialog: { type: 'boolean' } } } }, required: ['id'], additionalProperties: false } },
+
+  // ── declarativeNetRequest (fast ad-block-grade rules) ─────────────────
+  { name: 'chrome_ext_dnr_update', description: 'Add/remove dynamic declarativeNetRequest rules — faster than Fetch interception for "block X" / "redirect X to Y" patterns.',
+    inputSchema: { type: 'object', properties: { addRules: { type: 'array' }, removeRuleIds: { type: 'array', items: { type: 'integer' } } }, additionalProperties: false } },
+  { name: 'chrome_ext_dnr_list', description: 'List currently active dynamic DNR rules.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+
+  // ── Search ─────────────────────────────────────────────────────────────
+  { name: 'chrome_ext_search', description: 'Programmatic omnibox search — runs a query through the default search engine.',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' }, disposition: { type: 'string', enum: ['CURRENT_TAB', 'NEW_TAB', 'NEW_WINDOW'] }, tabId: { type: 'integer' } }, required: ['text'], additionalProperties: false } },
+
+  // ── System ─────────────────────────────────────────────────────────────
+  { name: 'chrome_ext_system_cpu', description: 'Get CPU info — model, architecture, per-core usage.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_ext_system_memory', description: 'Get memory info — total / available physical RAM.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_ext_system_display', description: 'Get display info — all monitors, resolution, scale factor.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_ext_system_storage', description: 'Get storage device info — disks, capacity, type.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_ext_top_sites', description: 'Get the user\'s most-visited sites (Chrome\'s "Top Sites" list).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+
+  // ── Notifications ──────────────────────────────────────────────────────
+  { name: 'chrome_ext_notify', description: 'Show a native OS notification (via Chrome) — appears in system tray.',
+    inputSchema: { type: 'object', properties: { notificationId: { type: 'string' }, options: { type: 'object', properties: { type: { type: 'string', enum: ['basic','image','list','progress'] }, iconUrl: { type: 'string' }, title: { type: 'string' }, message: { type: 'string' } }, required: ['type', 'iconUrl', 'title', 'message'] } }, required: ['options'], additionalProperties: false } },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
@@ -985,6 +1077,40 @@ async function execTool(name, args = {}) {
 
     // ── Convenience ─────────────────────────────────────────────
     case 'chrome_open_internal':         return callOp('chrome-open-internal', args);
+
+    // ── Phase 6 · Extension API bridge ──────────────────────────
+    case 'chrome_ext_tabgroups_query':   return callOp('chrome-ext-tabgroups-query', args);
+    case 'chrome_ext_tabgroups_update':  return callOp('chrome-ext-tabgroups-update', args);
+    case 'chrome_ext_tabs_group':        return callOp('chrome-ext-tabs-group', args);
+    case 'chrome_ext_tabs_ungroup':      return callOp('chrome-ext-tabs-ungroup', args);
+    case 'chrome_ext_sessions_recent':   return callOp('chrome-ext-sessions-recent', args);
+    case 'chrome_ext_sessions_restore':  return callOp('chrome-ext-sessions-restore', args);
+    case 'chrome_ext_readlist_query':    return callOp('chrome-ext-readlist-query', args);
+    case 'chrome_ext_readlist_add':      return callOp('chrome-ext-readlist-add', args);
+    case 'chrome_ext_readlist_remove':   return callOp('chrome-ext-readlist-remove', args);
+    case 'chrome_ext_history_search':    return callOp('chrome-ext-history-search', args);
+    case 'chrome_ext_history_del_url':   return callOp('chrome-ext-history-del-url', args);
+    case 'chrome_ext_history_del_all':   return callOp('chrome-ext-history-del-all');
+    case 'chrome_ext_bookmarks_tree':    return callOp('chrome-ext-bookmarks-tree');
+    case 'chrome_ext_bookmarks_search':  return callOp('chrome-ext-bookmarks-search', args);
+    case 'chrome_ext_bookmarks_create':  return callOp('chrome-ext-bookmarks-create', args);
+    case 'chrome_ext_bookmarks_remove':  return callOp('chrome-ext-bookmarks-remove', args);
+    case 'chrome_ext_downloads_search':  return callOp('chrome-ext-downloads-search', args);
+    case 'chrome_ext_downloads_start':   return callOp('chrome-ext-downloads-start', args);
+    case 'chrome_ext_downloads_cancel':  return callOp('chrome-ext-downloads-cancel', args);
+    case 'chrome_ext_downloads_open':    return callOp('chrome-ext-downloads-open', args);
+    case 'chrome_ext_mgmt_list':         return callOp('chrome-ext-mgmt-list');
+    case 'chrome_ext_mgmt_enable':       return callOp('chrome-ext-mgmt-enable', args);
+    case 'chrome_ext_mgmt_uninstall':    return callOp('chrome-ext-mgmt-uninstall', args);
+    case 'chrome_ext_dnr_update':        return callOp('chrome-ext-dnr-update', args);
+    case 'chrome_ext_dnr_list':          return callOp('chrome-ext-dnr-list');
+    case 'chrome_ext_search':            return callOp('chrome-ext-search', args);
+    case 'chrome_ext_system_cpu':        return callOp('chrome-ext-system-cpu');
+    case 'chrome_ext_system_memory':     return callOp('chrome-ext-system-memory');
+    case 'chrome_ext_system_display':    return callOp('chrome-ext-system-display');
+    case 'chrome_ext_system_storage':    return callOp('chrome-ext-system-storage');
+    case 'chrome_ext_top_sites':         return callOp('chrome-ext-top-sites');
+    case 'chrome_ext_notify':            return callOp('chrome-ext-notify', args);
 
     default: throw new Error('Unknown tool: ' + name);
   }

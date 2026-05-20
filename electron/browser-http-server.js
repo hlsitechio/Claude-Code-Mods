@@ -95,6 +95,24 @@ async function _handle(req, res) {
     return _sendJson(res, 200, { ok: true, version: 1, pid: process.pid });
   }
 
+  // ── Extension companion endpoints ──────────────────────────────────────
+  // The MV3 companion extension polls /ext/poll for jobs and POSTs back to
+  // /ext/result. Same bearer auth as the rest.
+  if (req.method === 'POST' && req.url === '/ext/poll') {
+    const chrome = global.ccmChrome;
+    if (!chrome) return _sendJson(res, 503, { error: 'ccmChrome unavailable' });
+    const job = chrome.extPollNext();
+    return _sendJson(res, 200, job || {});
+  }
+  if (req.method === 'POST' && req.url === '/ext/result') {
+    let body;
+    try { body = await _readBody(req); }
+    catch (e) { return _sendJson(res, 400, { error: 'Bad JSON' }); }
+    const chrome = global.ccmChrome;
+    if (chrome) chrome.extReceiveResult(body || {});
+    return _sendJson(res, 200, { ok: true });
+  }
+
   if (req.method !== 'POST' || !req.url.startsWith('/op/')) {
     return _sendJson(res, 404, { error: 'Not found' });
   }
@@ -271,6 +289,52 @@ async function _handle(req, res) {
 
       // ── Convenience ──────────────────────────────────────────
       case 'chrome-open-internal':         result = await chrome.openInternalPage(body); break;
+
+      // ── Phase 6 · Extension API bridge (chrome.* APIs CDP can't reach)
+      // Tab groups
+      case 'chrome-ext-tabgroups-query':   result = await chrome.tabGroupsQuery(body); break;
+      case 'chrome-ext-tabgroups-update':  result = await chrome.tabGroupsUpdate(body); break;
+      case 'chrome-ext-tabs-group':        result = await chrome.tabsGroup(body); break;
+      case 'chrome-ext-tabs-ungroup':      result = await chrome.tabsUngroup(body); break;
+      // Sessions
+      case 'chrome-ext-sessions-recent':   result = await chrome.sessionsRecent(body); break;
+      case 'chrome-ext-sessions-restore':  result = await chrome.sessionsRestore(body); break;
+      // Reading list
+      case 'chrome-ext-readlist-query':    result = await chrome.readingListQuery(body); break;
+      case 'chrome-ext-readlist-add':      result = await chrome.readingListAdd(body); break;
+      case 'chrome-ext-readlist-remove':   result = await chrome.readingListRemove(body); break;
+      // History (Chrome's own)
+      case 'chrome-ext-history-search':    result = await chrome.chromeHistorySearch(body); break;
+      case 'chrome-ext-history-del-url':   result = await chrome.chromeHistoryDeleteUrl(body); break;
+      case 'chrome-ext-history-del-all':   result = await chrome.chromeHistoryDeleteAll(); break;
+      // Bookmarks (Chrome's own)
+      case 'chrome-ext-bookmarks-tree':    result = await chrome.chromeBookmarksTree(); break;
+      case 'chrome-ext-bookmarks-search':  result = await chrome.chromeBookmarksSearch(body); break;
+      case 'chrome-ext-bookmarks-create':  result = await chrome.chromeBookmarksCreate(body); break;
+      case 'chrome-ext-bookmarks-remove':  result = await chrome.chromeBookmarksRemove(body); break;
+      // Downloads
+      case 'chrome-ext-downloads-search':  result = await chrome.downloadsSearch(body); break;
+      case 'chrome-ext-downloads-start':   result = await chrome.downloadsDownload(body); break;
+      case 'chrome-ext-downloads-cancel':  result = await chrome.downloadsCancel(body); break;
+      case 'chrome-ext-downloads-open':    result = await chrome.downloadsOpen(body); break;
+      // Management (other extensions)
+      case 'chrome-ext-mgmt-list':         result = await chrome.managementGetAll(); break;
+      case 'chrome-ext-mgmt-enable':       result = await chrome.managementSetEnabled(body); break;
+      case 'chrome-ext-mgmt-uninstall':    result = await chrome.managementUninstall(body); break;
+      // declarativeNetRequest
+      case 'chrome-ext-dnr-update':        result = await chrome.dnrUpdateDynamic(body); break;
+      case 'chrome-ext-dnr-list':          result = await chrome.dnrGetDynamic(); break;
+      // Search
+      case 'chrome-ext-search':            result = await chrome.searchQuery(body); break;
+      // System
+      case 'chrome-ext-system-cpu':        result = await chrome.systemCpu(); break;
+      case 'chrome-ext-system-memory':     result = await chrome.systemMemory(); break;
+      case 'chrome-ext-system-display':    result = await chrome.systemDisplay(); break;
+      case 'chrome-ext-system-storage':    result = await chrome.systemStorage(); break;
+      // Top sites
+      case 'chrome-ext-top-sites':         result = await chrome.topSites(); break;
+      // Notifications
+      case 'chrome-ext-notify':            result = await chrome.notifyCreate(body); break;
 
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }
