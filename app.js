@@ -5545,6 +5545,7 @@ const rightPanelTabs = [
   { id: 'git',       labelKey: 'rp_git',       icon: 'git-branch',   shortcut: ''         },
   { id: 'github',      labelKey: 'rp_github',      icon: 'github-logo',  shortcut: ''         },
   { id: 'screenshots', labelKey: 'rp_screenshots', icon: 'camera',       shortcut: ''         },
+  { id: 'browser',     labelKey: 'rp_browser',     icon: 'globe',        shortcut: ''         },
   { id: 'context',     labelKey: 'rp_context',     icon: 'gauge',        shortcut: ''         },
 ];
 
@@ -6309,6 +6310,265 @@ async function initTachesPanel() {
     // Only refresh if our panel is still mounted
     if (document.querySelector('[data-kanban-root]')) refresh();
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Browser panel — embedded Chromium tabs via WebContentsView
+// ─────────────────────────────────────────────────────────────────────────────
+// State lives at module scope so it survives panel re-renders within a tab
+// session (e.g. URL bar typing doesn't blow away open tabs).
+
+const _browser = {
+  tabs: [],           // [{ viewId, url, title, favicon, loading, canBack, canFwd }]
+  activeId: null,     // viewId of currently visible tab
+  resizeObserver: null,
+  cleanups: [],       // IPC unsubscribe fns
+  mounted: false,
+};
+
+function _browserActiveTab() {
+  return _browser.tabs.find(t => t.viewId === _browser.activeId) || null;
+}
+
+function renderBrowserPanel() {
+  // The toolbar + tab bar are rendered here. The actual web content is a
+  // native WebContentsView pinned over `#browser-viewport` by the main process.
+  const t = _browserActiveTab();
+  const tabs = _browser.tabs;
+  return `
+    <div class="browser-panel" data-browser-root>
+      <!-- Tab strip -->
+      <div class="browser-tabs" id="browser-tabs">
+        ${tabs.map(tab => {
+          const isActive = tab.viewId === _browser.activeId;
+          const favicon = tab.favicon
+            ? `<img class="browser-tab__icon" src="${escapeHTML(tab.favicon)}" alt="" />`
+            : `<i class="browser-tab__icon" data-phosphor="globe"></i>`;
+          return `<div class="browser-tab${isActive ? ' is-active' : ''}" data-view-id="${tab.viewId}" title="${escapeHTML(tab.title || tab.url || '')}">
+            ${tab.loading ? '<span class="browser-tab__spin"></span>' : favicon}
+            <span class="browser-tab__title">${escapeHTML(tab.title || tab.url || 'New tab')}</span>
+            <button class="browser-tab__close" data-close-view="${tab.viewId}" title="Close tab"><i data-phosphor="x"></i></button>
+          </div>`;
+        }).join('')}
+        <button class="browser-tab__new" id="browser-new-tab" title="New tab (Ctrl+T)"><i data-phosphor="plus"></i></button>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="browser-toolbar">
+        <button class="browser-btn" id="browser-back"    title="Back (Alt+Left)"      ${t?.canBack ? '' : 'disabled'}><i data-phosphor="arrow-left"></i></button>
+        <button class="browser-btn" id="browser-forward" title="Forward (Alt+Right)"  ${t?.canFwd  ? '' : 'disabled'}><i data-phosphor="arrow-right"></i></button>
+        <button class="browser-btn" id="browser-reload"  title="Reload (Ctrl+R)"><i data-phosphor="${t?.loading ? 'x' : 'arrow-clockwise'}"></i></button>
+        <div class="browser-addr">
+          <i class="browser-addr__icon" data-phosphor="${t?.url?.startsWith('https') ? 'lock' : 'globe'}"></i>
+          <input id="browser-url" class="browser-addr__input"
+                 value="${escapeHTML(t?.url && t.url !== 'about:blank' ? t.url : '')}"
+                 placeholder="Search DuckDuckGo or type a URL"
+                 spellcheck="false" autocomplete="off" />
+        </div>
+        <button class="browser-btn" id="browser-devtools" title="DevTools (F12)"><i data-phosphor="bug"></i></button>
+      </div>
+
+      <!-- The viewport — main process positions the WebContentsView over this exact rect -->
+      <div class="browser-viewport" id="browser-viewport">
+        ${tabs.length === 0 ? `
+          <div class="browser-welcome">
+            <i data-phosphor="globe" style="font-size:40px;opacity:.4"></i>
+            <h2>Embedded browser</h2>
+            <p>Open a new tab to start browsing. Each tab is a real Chromium process — isolated from this app.</p>
+            <button class="browser-welcome__btn" id="browser-welcome-newtab">
+              <i data-phosphor="plus"></i><span>New tab</span>
+            </button>
+          </div>` : ''}
+      </div>
+    </div>`;
+}
+
+function _browserPanelCleanup() {
+  // Called when leaving the browser panel — destroy all tabs so we don't leak
+  // Chromium processes. Tabs do NOT survive panel teardown (could add restore later).
+  const api = window.electronAPI?.browser;
+  if (!api) return;
+  for (const t of _browser.tabs) {
+    try { api.close(t.viewId); } catch (_) {}
+  }
+  _browser.tabs = [];
+  _browser.activeId = null;
+  _browser.cleanups.forEach(fn => { try { fn(); } catch (_) {} });
+  _browser.cleanups = [];
+  try { _browser.resizeObserver?.disconnect(); } catch (_) {}
+  _browser.resizeObserver = null;
+  _browser.mounted = false;
+}
+
+async function initBrowserPanel(bodyEl) {
+  const api = window.electronAPI?.browser;
+  if (!api) {
+    bodyEl.querySelector('.browser-viewport')?.insertAdjacentHTML(
+      'beforeend',
+      '<div class="browser-error">Browser API not available — restart the app.</div>'
+    );
+    return;
+  }
+
+  _browser.mounted = true;
+
+  // ── Position the active WebContentsView over the viewport rect ─────────
+  function repositionActive() {
+    const viewport = document.getElementById('browser-viewport');
+    if (!viewport) return;
+    if (!_browser.activeId) return;
+    const r = viewport.getBoundingClientRect();
+    // Convert viewport coords → BrowserWindow content area coords.
+    // window.scrollY is always 0 in Electron, but use defensively.
+    api.setBounds(_browser.activeId,
+      r.left + window.scrollX,
+      r.top  + window.scrollY,
+      r.width, r.height,
+      true,
+    );
+    // Hide all other tabs by parking them off-screen invisibly
+    for (const t of _browser.tabs) {
+      if (t.viewId !== _browser.activeId) {
+        api.setBounds(t.viewId, -10000, -10000, 1, 1, false);
+      }
+    }
+  }
+
+  // ── Re-render only the toolbar + tab strip (DON'T rebuild the viewport
+  //     div — that would trigger a layout shift and confuse the WebContentsView)
+  function refreshChrome() {
+    const root = document.querySelector('[data-browser-root]');
+    if (!root) return;
+    const tabsEl    = root.querySelector('#browser-tabs');
+    const toolbarEl = root.querySelector('.browser-toolbar');
+    if (!tabsEl || !toolbarEl) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = renderBrowserPanel();
+    const newTabs    = tmp.querySelector('#browser-tabs');
+    const newToolbar = tmp.querySelector('.browser-toolbar');
+    if (newTabs)    tabsEl.replaceWith(newTabs);
+    if (newToolbar) toolbarEl.replaceWith(newToolbar);
+    if (window.renderIcons) window.renderIcons(root);
+    wireChrome();
+  }
+
+  // ── Open a new tab ─────────────────────────────────────────────────────
+  async function openTab(url = 'about:blank') {
+    const res = await api.create({ url });
+    if (!res.ok) return null;
+    const tab = {
+      viewId: res.viewId, url, title: 'New tab', favicon: null,
+      loading: false, canBack: false, canFwd: false,
+    };
+    _browser.tabs.push(tab);
+    _browser.activeId = tab.viewId;
+    refreshChrome();
+    requestAnimationFrame(repositionActive);
+    return tab;
+  }
+
+  // ── Close a tab ────────────────────────────────────────────────────────
+  async function closeTab(viewId) {
+    await api.close(viewId);
+    _browser.tabs = _browser.tabs.filter(t => t.viewId !== viewId);
+    if (_browser.activeId === viewId) {
+      _browser.activeId = _browser.tabs[_browser.tabs.length - 1]?.viewId || null;
+    }
+    refreshChrome();
+    if (_browser.activeId) requestAnimationFrame(repositionActive);
+  }
+
+  // ── Switch to a tab ────────────────────────────────────────────────────
+  function activateTab(viewId) {
+    if (_browser.activeId === viewId) return;
+    _browser.activeId = viewId;
+    refreshChrome();
+    requestAnimationFrame(repositionActive);
+  }
+
+  // ── Wire toolbar + tab events (called after every refreshChrome) ───────
+  function wireChrome() {
+    const root = document.querySelector('[data-browser-root]');
+    if (!root) return;
+
+    root.querySelector('#browser-new-tab')?.addEventListener('click', () => openTab('about:blank'));
+    root.querySelector('#browser-welcome-newtab')?.addEventListener('click', () => openTab('https://duckduckgo.com'));
+
+    // Tab click → activate; close-button click → close
+    root.querySelectorAll('.browser-tab').forEach(tabEl => {
+      const id = parseInt(tabEl.dataset.viewId, 10);
+      tabEl.addEventListener('click', e => {
+        if (e.target.closest('[data-close-view]')) return;
+        activateTab(id);
+      });
+    });
+    root.querySelectorAll('[data-close-view]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        closeTab(parseInt(btn.dataset.closeView, 10));
+      });
+    });
+
+    // Nav buttons
+    root.querySelector('#browser-back')?.addEventListener('click',    () => _browser.activeId && api.nav(_browser.activeId, 'back'));
+    root.querySelector('#browser-forward')?.addEventListener('click', () => _browser.activeId && api.nav(_browser.activeId, 'forward'));
+    root.querySelector('#browser-reload')?.addEventListener('click',  () => _browser.activeId && api.nav(_browser.activeId, _browserActiveTab()?.loading ? 'stop' : 'reload'));
+    root.querySelector('#browser-devtools')?.addEventListener('click',() => _browser.activeId && api.devtools(_browser.activeId));
+
+    // URL bar — Enter submits, focus selects all
+    const urlInput = root.querySelector('#browser-url');
+    if (urlInput) {
+      urlInput.addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter') return;
+        const url = urlInput.value.trim();
+        if (!url) return;
+        if (!_browser.activeId) await openTab(url);
+        else                    api.loadUrl(_browser.activeId, url);
+      });
+      urlInput.addEventListener('focus', () => urlInput.select());
+    }
+  }
+
+  wireChrome();
+
+  // ── Listen to page events from the main process ────────────────────────
+  function updateTab(viewId, patch) {
+    const t = _browser.tabs.find(x => x.viewId === viewId);
+    if (!t) return;
+    Object.assign(t, patch);
+    refreshChrome();
+  }
+
+  _browser.cleanups.push(api.onLoading(({ viewId, loading }) => updateTab(viewId, { loading })));
+  _browser.cleanups.push(api.onNav    (({ viewId, url, canBack, canFwd }) => updateTab(viewId, { url, canBack, canFwd })));
+  _browser.cleanups.push(api.onTitle  (({ viewId, title }) => updateTab(viewId, { title })));
+  _browser.cleanups.push(api.onFavicon(({ viewId, favicon }) => updateTab(viewId, { favicon })));
+  _browser.cleanups.push(api.onFail   (({ viewId, code, desc, url }) => {
+    console.warn('[browser] did-fail-load', code, desc, url);
+    window.showToast?.(`Failed: ${desc}`, 'error', 4000);
+  }));
+  _browser.cleanups.push(api.onPopup  (async ({ url }) => {
+    // target=_blank / window.open → open as a new tab in the same browser
+    await openTab(url);
+  }));
+
+  // ── Watch viewport size — reposition the active view on every change ───
+  const viewport = bodyEl.querySelector('#browser-viewport');
+  if (viewport && 'ResizeObserver' in window) {
+    _browser.resizeObserver?.disconnect();
+    _browser.resizeObserver = new ResizeObserver(() => requestAnimationFrame(repositionActive));
+    _browser.resizeObserver.observe(viewport);
+  }
+  // Also reposition on any window resize (covers Electron window resize too)
+  window.addEventListener('resize', repositionActive);
+  _browser.cleanups.push(() => window.removeEventListener('resize', repositionActive));
+
+  // Open a starter tab so the panel isn't empty on first mount
+  if (_browser.tabs.length === 0) {
+    await openTab('https://duckduckgo.com');
+  } else {
+    requestAnimationFrame(repositionActive);
+  }
 }
 
 // ---------- Diff panel ----------
@@ -9004,6 +9264,7 @@ function renderPanelContent(id) {
   else if (id === 'git')       body = renderGitPanel();
   else if (id === 'github')      body = renderGithubPanel();
   else if (id === 'screenshots') body = renderScreenshotsPanel();
+  else if (id === 'browser')     body = renderBrowserPanel();
   else if (id === 'context')     body = renderContextPanel();
   else body = `
     <div class="right-panel__empty">
@@ -9203,6 +9464,7 @@ function setRightPanelTab(id) {
     bodyEl.classList.toggle('rp-body--terminal', id === 'terminal');
     bodyEl.classList.toggle('rp-body--apercu',   id === 'apercu');
     bodyEl.classList.toggle('rp-body--kanban',   id === 'taches');
+    bodyEl.classList.toggle('rp-body--browser',  id === 'browser');
 
     // ── Bug A fix: Plan tab — re-scan chat history if __planTodos is null ──
     // parsePlanBlock runs at stream end. If the user opens the Plan tab later
@@ -9229,6 +9491,9 @@ function setRightPanelTab(id) {
     // Disconnect apercu ResizeObserver before replacing the panel DOM
     if (currentRightPanel === 'apercu') _apercuROCleanup(bodyEl);
 
+    // Tear down browser tabs (close WebContentsViews) when leaving the panel
+    if (currentRightPanel === 'browser') _browserPanelCleanup();
+
     bodyEl.innerHTML = renderPanelContent(id);
     if (window.renderIcons) window.renderIcons(bodyEl);
     wirePlanTabEvents(id, bodyEl);
@@ -9241,6 +9506,7 @@ function setRightPanelTab(id) {
     if (id === 'github')      requestAnimationFrame(() => initGithubPanel(bodyEl));
     if (id === 'screenshots') requestAnimationFrame(() => initScreenshotsPanel(bodyEl));
     if (id === 'taches')      requestAnimationFrame(() => initTachesPanel());
+    if (id === 'browser')     requestAnimationFrame(() => initBrowserPanel(bodyEl));
   }
 
   // Sync context-strip chips

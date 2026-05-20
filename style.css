@@ -6063,6 +6063,259 @@ html[data-theme="light"] .kanban-modal__field select {
 /* Dockview panel (wider) → keep 3 columns side-by-side */
 .dv-panel-body .kanban__board { grid-template-columns: repeat(3, minmax(180px, 1fr)); }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   BROWSER PANEL — embedded Chromium tabs (WebContentsView pinned over viewport)
+   ═══════════════════════════════════════════════════════════════════════════ */
+.right-panel__body.rp-body--browser {
+  padding: 0 !important;
+  overflow: hidden;
+}
+.right-panel__body.rp-body--browser .browser-panel { height: 100%; }
+.dv-panel-body  .browser-panel { height: 100%; }
+
+.browser-panel {
+  display: flex;
+  flex-direction: column;
+  background: #0e0e10;
+  min-height: 0;
+  height: 100%;
+}
+
+/* ── Tab strip ──────────────────────────────────────────────────────────── */
+.browser-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  padding: 4px 6px 0;
+  background: #08080a;
+  border-bottom: 1px solid #1a1a1d;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+}
+.browser-tabs::-webkit-scrollbar { height: 4px; }
+.browser-tabs::-webkit-scrollbar-thumb { background: #2a2a30; border-radius: 99px; }
+
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px 5px 10px;
+  background: #18181c;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  min-width: 110px;
+  max-width: 220px;
+  color: #8a8a92;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11.5px;
+  flex-shrink: 0;
+  transition: background 120ms, color 120ms;
+  position: relative;
+}
+.browser-tab:hover { background: #1f1f23; color: #c4c4ca; }
+.browser-tab.is-active {
+  background: #0e0e10;
+  color: #f0f0f2;
+  border-color: #2a2a30;
+}
+.browser-tab.is-active::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  background: #d97757;
+}
+.browser-tab__icon {
+  width: 14px; height: 14px;
+  flex-shrink: 0;
+  border-radius: 2px;
+  object-fit: contain;
+  font-size: 14px;
+  color: #8a8a92;
+}
+.browser-tab__spin {
+  width: 12px; height: 12px;
+  border: 1.5px solid #2a2a30;
+  border-top-color: #d97757;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: browser-spin 700ms linear infinite;
+}
+@keyframes browser-spin { to { transform: rotate(360deg); } }
+.browser-tab__title {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.browser-tab__close {
+  display: flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  padding: 0;
+  cursor: pointer;
+  color: #6a6a72;
+  opacity: 0;
+  transition: opacity 100ms, background 100ms;
+  flex-shrink: 0;
+}
+.browser-tab__close i { font-size: 11px; }
+.browser-tab:hover .browser-tab__close,
+.browser-tab.is-active .browser-tab__close { opacity: 1; }
+.browser-tab__close:hover { background: #2a2a30; color: #e7e7ea; }
+
+.browser-tab__new {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  margin-left: 2px;
+  margin-bottom: 0;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: #6a6a72;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 100ms, color 100ms;
+}
+.browser-tab__new:hover { background: #1f1f23; color: #d97757; }
+.browser-tab__new i { font-size: 14px; }
+
+/* ── Toolbar (back / fwd / reload / URL bar / devtools) ─────────────────── */
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #0e0e10;
+  border-bottom: 1px solid #1a1a1d;
+  flex-shrink: 0;
+}
+.browser-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #c4c4ca;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 100ms, color 100ms;
+}
+.browser-btn i { font-size: 14px; }
+.browser-btn:hover:not(:disabled) {
+  background: #1f1f23;
+  color: #d97757;
+}
+.browser-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.browser-addr {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  background: #18181c;
+  border: 1px solid #2a2a30;
+  border-radius: 18px;
+  padding: 0 14px;
+  height: 30px;
+  transition: border-color 120ms, background 120ms;
+}
+.browser-addr:focus-within {
+  border-color: rgba(217,119,87,0.5);
+  background: #1c1c20;
+}
+.browser-addr__icon {
+  font-size: 13px;
+  color: #6a6a72;
+  flex-shrink: 0;
+}
+.browser-addr__input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e7e7ea;
+  font-size: 12.5px;
+  font-family: inherit;
+  caret-color: #d97757;
+}
+.browser-addr__input::placeholder { color: #5a5a63; }
+
+/* ── Viewport — the WebContentsView is pinned here by the main process ─── */
+.browser-viewport {
+  flex: 1 1 0;
+  position: relative;
+  min-height: 0;
+  background: #0e0e10;
+  overflow: hidden;
+}
+.browser-welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 40px;
+  text-align: center;
+  color: #6a6a72;
+}
+.browser-welcome h2 {
+  font-size: 18px;
+  font-weight: 500;
+  color: #c4c4ca;
+  margin: 4px 0 0;
+}
+.browser-welcome p {
+  font-size: 13px;
+  max-width: 360px;
+  line-height: 1.5;
+  margin: 0;
+}
+.browser-welcome__btn {
+  display: flex; align-items: center; gap: 7px;
+  margin-top: 10px;
+  padding: 8px 16px;
+  background: #d97757;
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms, transform 100ms;
+}
+.browser-welcome__btn:hover  { background: #e8845f; }
+.browser-welcome__btn:active { transform: scale(0.97); }
+.browser-error {
+  padding: 20px;
+  color: #e06c75;
+  font-size: 13px;
+}
+
+/* ── Light theme ────────────────────────────────────────────────────────── */
+html[data-theme="light"] .browser-panel { background: #fafafb; }
+html[data-theme="light"] .browser-tabs { background: #ececef; border-color: #d4d4d8; }
+html[data-theme="light"] .browser-tab { background: #f5f5f6; color: #6a6a72; }
+html[data-theme="light"] .browser-tab.is-active { background: #fafafb; color: #1a1a1d; border-color: #d4d4d8; }
+html[data-theme="light"] .browser-toolbar { background: #fafafb; border-color: #d4d4d8; }
+html[data-theme="light"] .browser-btn { color: #1a1a1d; }
+html[data-theme="light"] .browser-btn:hover:not(:disabled) { background: #ececef; }
+html[data-theme="light"] .browser-addr { background: #fff; border-color: #d4d4d8; }
+html[data-theme="light"] .browser-addr__input { color: #1a1a1d; }
+html[data-theme="light"] .browser-welcome h2 { color: #1a1a1d; }
+
 /* ===== Overview page v2 ===== */
 .ov-page { padding: 0 !important; }
 
