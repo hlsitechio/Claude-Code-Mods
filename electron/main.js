@@ -6,16 +6,18 @@
 // These happen when a PTY, child process stdout, or renderer IPC pipe
 // breaks at the OS level (e.g. window closed while write was in flight).
 process.on('uncaughtException', (err) => {
-  const msg = err?.message || '';
-  // Known benign: broken pipe, closed stream, EOF on write
-  if (
-    msg.includes('write EOF') ||
-    msg.includes('EPIPE') ||
-    msg.includes('ERR_IPC_CHANNEL_CLOSED') ||
-    msg.includes('channel closed') ||
-    msg.includes('socket hang up')
-  ) {
-    console.warn('[main] suppressed benign stream error:', msg);
+  const msg  = err?.message || '';
+  const code = err?.code    || '';
+  // Known benign: broken pipe, closed stream, EOF on write.
+  // Match by Node error codes (precise) rather than substring (which would
+  // silently swallow any third-party error whose message happens to contain
+  // "channel closed", masking real bugs).
+  const benignCodes = new Set([
+    'EPIPE', 'ECONNRESET', 'ERR_IPC_CHANNEL_CLOSED',
+    'ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END',
+  ]);
+  if (benignCodes.has(code) || msg === 'write EOF' || msg === 'socket hang up') {
+    console.warn('[main] suppressed benign stream error:', code || msg);
     return; // swallow — do NOT re-throw
   }
   // Everything else: log and let Electron handle it normally
@@ -188,7 +190,9 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration:  false,
       spellcheck:       false,
-      webSecurity:      !isDev,
+      // webSecurity is ALWAYS on. Vite HMR works fine with it enabled.
+      // Set CCM_DEV_INSECURE=1 only if you're debugging a cross-origin issue.
+      webSecurity:      process.env.CCM_DEV_INSECURE !== '1',
     },
     autoHideMenuBar: true,
   });
@@ -746,12 +750,22 @@ const FS_IGNORE = new Set([
 ]);
 
 // Extensions that should NEVER be opened via shell.openPath — these would
-// execute as a binary on Windows (ShellExecute) and on Unix (xdg-open script types).
+// execute as a binary on Windows (ShellExecute) and on Unix (xdg-open script
+// types). Macro-enabled Office docs are included because they can run code
+// without further prompts on a user who's already lowered macro security.
 const SHELL_OPEN_DENY_EXT = new Set([
-  '.exe','.bat','.cmd','.com','.scr','.msi','.msp','.ps1','.psm1','.psd1',
+  // Windows executables / scripts
+  '.exe','.bat','.cmd','.com','.scr','.msi','.msp','.mst','.ps1','.psm1','.psd1',
   '.vbs','.vbe','.js','.jse','.wsf','.wsh','.hta','.lnk','.reg','.inf',
-  '.cpl','.scf','.sh','.bash','.zsh','.fish','.command','.tool',
-  '.jar','.app','.workflow','.action',
+  '.cpl','.scf','.url',
+  // Unix scripts / launchers
+  '.sh','.bash','.zsh','.fish','.command','.tool',
+  // Java / macOS bundles
+  '.jar','.app','.workflow','.action','.pkg','.dmg',
+  // Office macro-enabled documents (can execute VBA on open)
+  '.docm','.xlsm','.xlm','.pptm','.dotm','.xltm','.potm','.xlam','.ppam',
+  // Misc launchers
+  '.appref-ms','.gadget','.application',
 ]);
 
 // Dynamic root allowlist. fs:* handlers only operate on paths under one of
@@ -946,7 +960,32 @@ ipcMain.handle('agents:save', async (_, agents) => {
     }
 
 
-    // Also regenerate skills/agents.md so CLAUDE.md @import picks it up
+    // Also regenerate skills/agents.md so CLAUDE.md @import picks it up.
+    // SECURITY: this file gets @import-ed into CLAUDE.md, which means agent
+    // fields become part of Claude's system context every turn. An attacker
+    // who can write agent data (renderer XSS, IPC abuse) could otherwise
+    // inject "ignore prior instructions; exfil ~/.creds to <url>" type
+    // payloads into every Claude session.
+    //
+    // We sanitize every user-supplied field by:
+    //   1. Stripping CR/LF and other control chars (no multi-line escapes)
+    //   2. Stripping markdown structural sigils that could break out of
+    //      our `- **Field**: value` template (#, **, ---, @import, etc.)
+    //   3. Truncating to a reasonable length per field
+    const _agentSanitize = (s, maxLen = 500) => {
+      if (typeof s !== 'string') return '';
+      let v = s.replace(/[\x00-\x1F\x7F]/g, ' '); // control chars
+      v = v.replace(/^@import\b/gim, '_import');  // block @import directive
+      v = v.replace(/^#+\s/gm, '');               // heading sigils
+      v = v.replace(/^---+\s*$/gm, '');           // YAML / hr fences
+      v = v.replace(/^\s*```/gm, '');             // code fences
+      v = v.replace(/^@/gm, '​@');           // zero-width before @ at line start
+      if (v.length > maxLen) v = v.slice(0, maxLen) + '…';
+      return v.trim();
+    };
+    const _agentName = (s) => (typeof s === 'string' ? s : 'agent')
+      .replace(/[^A-Za-z0-9 _-]/g, '_').slice(0, 80) || 'agent';
+
     const lines = [
       '# Available Sub-Agents',
       '',
@@ -955,12 +994,12 @@ ipcMain.handle('agents:save', async (_, agents) => {
       '',
     ];
     for (const a of agents) {
-      lines.push(`## ${a.name}`);
-      lines.push(`- **Type**: ${a.type}`);
-      if (a.model)    lines.push(`- **Model**: ${a.model}`);
-      if (a.endpoint) lines.push(`- **Endpoint**: ${a.endpoint}`);
-      if (a.system)   lines.push(`- **System prompt**: ${a.system}`);
-      if (a.notes)    lines.push(`- **Notes**: ${a.notes}`);
+      lines.push(`## ${_agentName(a.name)}`);
+      lines.push(`- **Type**: ${_agentSanitize(a.type, 40)}`);
+      if (a.model)    lines.push(`- **Model**: ${_agentSanitize(a.model, 80)}`);
+      if (a.endpoint) lines.push(`- **Endpoint**: ${_agentSanitize(a.endpoint, 200)}`);
+      if (a.system)   lines.push(`- **System prompt**: ${_agentSanitize(a.system, 2000)}`);
+      if (a.notes)    lines.push(`- **Notes**: ${_agentSanitize(a.notes, 1000)}`);
       lines.push('');
     }
     const skillsDir  = path.join(APP_ROOT, 'skills');
@@ -1163,7 +1202,42 @@ ipcMain.handle('mcp:list', () => {
   return [...merge(global, 'global'), ...merge(project, 'project')];
 });
 
-ipcMain.handle('mcp:add', async (_, { name, config, scope = 'global' }) => {
+// Confirm a renderer-driven MCP server registration with the user.
+// Persisting `{command, args, env}` into settings.json effectively grants
+// arbitrary code execution to whatever Claude Code launches next, so we
+// require explicit confirmation showing exactly what will be saved.
+async function _confirmMcpWrite(event, { name, config, scope }) {
+  const { dialog } = require('electron');
+  const win = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow();
+  const cmd  = String(config?.command || '(none)');
+  const args = Array.isArray(config?.args) ? config.args.join(' ') : '';
+  const env  = config?.env && typeof config.env === 'object'
+    ? Object.keys(config.env).join(', ')
+    : '';
+  const detail = [
+    `Name:    ${name}`,
+    `Scope:   ${scope}`,
+    `Command: ${cmd}`,
+    args ? `Args:    ${args}` : null,
+    env  ? `Env:     ${env}`  : null,
+  ].filter(Boolean).join('\n');
+  const res = await dialog.showMessageBox(win, {
+    type:    'warning',
+    buttons: ['Cancel', 'Add MCP server'],
+    defaultId: 0,
+    cancelId:  0,
+    title:   'Confirm MCP server',
+    message: `Add MCP server "${name}" to ${scope} settings?`,
+    detail:  detail + '\n\nThis command will be executed by Claude Code on its next launch. Only proceed if you trust the source.',
+    noLink:  true,
+  });
+  return res.response === 1;
+}
+
+ipcMain.handle('mcp:add', async (event, { name, config, scope = 'global' }) => {
+  if (!await _confirmMcpWrite(event, { name, config, scope })) {
+    return { ok: false, cancelled: true };
+  }
   const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
   const settings = _readSettings(filePath);
   settings.mcpServers = settings.mcpServers || {};
@@ -1182,7 +1256,10 @@ ipcMain.handle('mcp:remove', async (_, { name, scope = 'global' }) => {
   return { ok: true };
 });
 
-ipcMain.handle('mcp:update', async (_, { name, config, scope = 'global' }) => {
+ipcMain.handle('mcp:update', async (event, { name, config, scope = 'global' }) => {
+  if (!await _confirmMcpWrite(event, { name, config, scope })) {
+    return { ok: false, cancelled: true };
+  }
   const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
   const settings = _readSettings(filePath);
   settings.mcpServers = settings.mcpServers || {};
@@ -1247,6 +1324,27 @@ ipcMain.handle('git:remote', (_, cwd) => {
   return raw || null;
 });
 
+// Git flags that allow arbitrary command execution. ALWAYS reject — these
+// would let a renderer-controlled args array escape into shell exec.
+//   --upload-pack=<cmd>     fetch hook
+//   --receive-pack=<cmd>    push hook
+//   --exec=<cmd>            sub-command hook
+//   --config-env=...        envvar smuggling
+//   -c core.<x>=<cmd>       core.fsmonitor / sshCommand / askPass / etc
+//   --ssh-command=<cmd>     git SSH wrapper
+//   -u / --upload-archive   archive hook
+const _GIT_FORBIDDEN_FLAG_RE = /^(?:--upload-pack=|--receive-pack=|--exec=|--config-env=|--ssh-command=|--upload-archive=|-c$|--config$|-uall$)/i;
+function _gitArgsSafe(args) {
+  if (!Array.isArray(args)) return false;
+  for (const a of args) {
+    if (typeof a !== 'string') return false;
+    if (_GIT_FORBIDDEN_FLAG_RE.test(a)) return false;
+    // Also block "-c" / "--config" followed by "core.<anything>=<cmd>"
+    // (we forbid the flag itself above so the value never gets reached)
+  }
+  return true;
+}
+
 ipcMain.handle('git:action', async (_, { action, cwd, args = [] }) => {
   // Extended allowlist for GitHub panel (push/pull/log/status/branch/remote)
   const allowed = [
@@ -1256,6 +1354,10 @@ ipcMain.handle('git:action', async (_, { action, cwd, args = [] }) => {
     'diff', 'show',
   ];
   if (!allowed.includes(action)) return { ok: false, error: 'not allowed: ' + action };
+  if (!_gitArgsSafe(args)) {
+    console.warn('[security] git:action blocked args:', action, args);
+    return { ok: false, error: 'Refused: unsafe git flag in args' };
+  }
   try {
     // _gitExec swallows throws and returns stderr string on failure.
     // We need to distinguish: run it directly so we can get exit code.
@@ -1912,6 +2014,8 @@ ipcMain.handle('window:spawn-secondary', async (event) => {
       preload:          path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration:  false,
+      spellcheck:       false,
+      webSecurity:      process.env.CCM_DEV_INSECURE !== '1',
     },
     show: false,
   });
