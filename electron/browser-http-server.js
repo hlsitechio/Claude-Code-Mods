@@ -198,11 +198,18 @@ async function _handle(req, res) {
 
       // Runtime
       case 'chrome-runtime-eval':        result = await chrome.runtimeEval(body); break;
+      case 'chrome-runtime-run':         result = await chrome.runtimeRun(body); break;
 
       // DOM
       case 'chrome-dom-query':           result = await chrome.domQuery(body); break;
       case 'chrome-dom-query-all':       result = await chrome.domQueryAll(body); break;
       case 'chrome-dom-get-text':        result = await chrome.domGetText(body); break;
+      case 'chrome-dom-click':           result = await chrome.domClick(body); break;
+
+      // Phase 8 — CodeMirror primitives
+      case 'chrome-cm-focus':            result = await chrome.cmFocus(); break;
+      case 'chrome-cm-goto-line':        result = await chrome.cmGotoLine(body); break;
+      case 'chrome-cm-replace-line':     result = await chrome.cmReplaceLine(body); break;
 
       // Input
       case 'chrome-input-click':         result = await chrome.inputClick(body); break;

@@ -542,7 +542,7 @@ const TOOLS = [
   // ── Runtime — the swiss army knife ─────────────────────────────────────
   {
     name: 'chrome_runtime_eval',
-    description: 'Evaluate arbitrary JavaScript in Chrome\'s active tab. The most flexible tool in the kit — anything you can do in DevTools console, you can do here. Use sparingly when narrower tools don\'t fit. The expression is wrapped in `(async () => (EXPR))()` so you can `await` directly.',
+    description: 'Evaluate a single JavaScript EXPRESSION in Chrome\'s active tab. The expression is wrapped in `(async () => (EXPR))()` so you can `await`. **For statement blocks** (vars, loops, multiple statements separated by `;`), use `chrome_runtime_run` instead — this one will fail with "Unexpected token \';\'" on top-level statements.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -550,6 +550,16 @@ const TOOLS = [
         awaitPromise: { type: 'boolean', description: 'Await the expression if it resolves to a promise (default true)' },
       },
       required: ['expression'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_runtime_run',
+    description: 'Execute a STATEMENT BLOCK of JavaScript in Chrome\'s active tab (sibling of chrome_runtime_eval but for multi-statement code). Wraps in `(async () => { CODE })()` so you can declare variables, run for-loops, `await` multiple things, and `return` at the end. Use this when chrome_runtime_eval gives you "Unexpected token \';\'".',
+    inputSchema: {
+      type: 'object',
+      properties: { code: { type: 'string', description: 'JS statement block (use `return X` at the end to get a value back)' } },
+      required: ['code'],
       additionalProperties: false,
     },
   },
@@ -585,6 +595,51 @@ const TOOLS = [
       type: 'object',
       properties: { selector: { type: 'string' } },
       required: ['selector'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_dom_click',
+    description: 'Click a CSS selector with AUTO-SCROLL-INTO-VIEW + visible-rect clamping. Prefer this over chrome_input_click when the target may be outside the visible viewport (overflowed in a horizontal split, below the fold, etc) — fixes the "clicked dead air outside the window" silent failure from real-session feedback.',
+    inputSchema: {
+      type: 'object',
+      properties: { selector: { type: 'string' } },
+      required: ['selector'],
+      additionalProperties: false,
+    },
+  },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // CodeMirror 6 primitives (Lovable.dev, CodeSandbox, vscode-web — anywhere
+  // CM6 is the editor). All four tools verify focus, use real keyboard events,
+  // and bypass auto-pairing of brackets/quotes via Input.insertText.
+  // ════════════════════════════════════════════════════════════════════════
+  {
+    name: 'chrome_cm_focus',
+    description: 'Click the CodeMirror editor and VERIFY focus landed on .cm-content (not on a search-result button or toolbar). Solves "focus drifts on every UI interaction". Auto-scrolls the editor into view + clamps the click to the visible viewport for editors that extend past a split-pane.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_cm_goto_line',
+    description: 'Jump the CodeMirror editor caret to a specific line via CM6\'s default Ctrl+G keymap. Focuses the editor first, then opens the goto-line dialog, types N, hits Enter.',
+    inputSchema: {
+      type: 'object',
+      properties: { line: { type: 'integer', description: '1-indexed line number' } },
+      required: ['line'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_cm_replace_line',
+    description: 'ATOMIC line replacement in CodeMirror — the killer combo. Pipeline: focus editor → goto line N → Home + Shift+End (select whole line) → Input.insertText (bypasses CM auto-pairing of brackets/quotes) → optionally Ctrl+S to save. Replaces 30+ keystrokes per surgical edit with one call. Verify via your Lovable MCP read_file afterward — ground truth, no UI scraping.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        line:    { type: 'integer', description: '1-indexed line to replace' },
+        content: { type: 'string',  description: 'New full content for that line (no trailing newline)' },
+        save:    { type: 'boolean', description: 'Send Ctrl+S after editing (default true)' },
+      },
+      required: ['line', 'content'],
       additionalProperties: false,
     },
   },
@@ -1012,11 +1067,18 @@ async function execTool(name, args = {}) {
 
     // ── Chrome · runtime ────────────────────────────────────────
     case 'chrome_runtime_eval':     return callOp('chrome-runtime-eval', args);
+    case 'chrome_runtime_run':      return callOp('chrome-runtime-run', args);
 
     // ── Chrome · DOM ────────────────────────────────────────────
     case 'chrome_dom_query':        return callOp('chrome-dom-query', args);
     case 'chrome_dom_query_all':    return callOp('chrome-dom-query-all', args);
     case 'chrome_dom_get_text':     return callOp('chrome-dom-get-text', args);
+    case 'chrome_dom_click':        return callOp('chrome-dom-click', args);
+
+    // ── Phase 8 · CodeMirror primitives ─────────────────────────
+    case 'chrome_cm_focus':         return callOp('chrome-cm-focus');
+    case 'chrome_cm_goto_line':     return callOp('chrome-cm-goto-line', args);
+    case 'chrome_cm_replace_line':  return callOp('chrome-cm-replace-line', args);
 
     // ── Chrome · input ──────────────────────────────────────────
     case 'chrome_input_click':      return callOp('chrome-input-click', args);
