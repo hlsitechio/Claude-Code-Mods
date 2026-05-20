@@ -6471,25 +6471,45 @@ function _browserResumeViews() {
 // view is parked BEFORE the menu/drop indicator is even drawn — no flicker.
 // Installed once at module load; cheap when no browser is open.
 (function installBrowserGlobalSuspendTriggers() {
-  // Right-click anywhere → suspend BEFORE the menu opens
+  // Right-click pre-suspend — `mousedown` with button=2 fires BEFORE
+  // `contextmenu`, so this is the earliest moment we know a menu is coming.
+  // Skip clicks inside the browser panel itself.
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 2) return;
+    if (e.target?.closest?.('[data-browser-root]')) return;
+    if (_browser.activeId) _browserSuspendViews();
+  }, true);
+
+  // Belt-and-suspenders — also suspend in the contextmenu phase (in case
+  // some other code fires a synthetic contextmenu without a mousedown).
   document.addEventListener('contextmenu', () => {
     if (_browser.activeId) _browserSuspendViews();
-    // Schedule a resume check on the next macrotask — by then the menu is
-    // either visible (modal check keeps it suspended) or not (resume fires).
     setTimeout(() => _browserResumeViews(), 0);
-  }, true); // capture phase
+  }, true);
 
-  // Dockview panel drag → suspend for the WHOLE drag so drop indicators are
-  // visible everywhere on the screen, not just outside the browser rect.
-  document.addEventListener('dragstart', (e) => {
+  // Drag pre-suspend — any drag could move drop indicators over the browser
+  // rect. Cheapest move: suspend on the LEFT-button mousedown of any element
+  // that's draggable (or inside a draggable container). The actual dragstart
+  // (which can take a few hundred ms of movement to fire) then sets the
+  // `_draggingPanel` flag so the resume path stays blocked for the whole drag.
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
     const t = e.target;
     if (!t?.closest) return;
-    // dockview tabs have .dv-tab, the workspace tabs use other patterns —
-    // any dragstart originating from a dockview-managed element triggers.
-    if (t.closest('.dv-tab, .dv-tabs-container, .ws-switcher__tab, [data-tab-id]')) {
-      _browser._draggingPanel = true;
-      _browserSuspendViews();
+    if (t.closest('[data-browser-root]')) return; // own UI is fine
+    if (t.closest(
+      '.dv-tab, .dv-default-tab, .dv-draggable, .dv-tabs-container, ' +
+      '.ws-switcher__tab, [draggable="true"], [data-tab-id]'
+    )) {
+      if (_browser.activeId) _browserSuspendViews();
     }
+  }, true);
+
+  document.addEventListener('dragstart', (e) => {
+    if (e.target?.closest?.('[data-browser-root]')) return;
+    // Any drag originating outside our own panel → suspend for the whole drag
+    _browser._draggingPanel = true;
+    _browserSuspendViews();
   }, true);
 
   document.addEventListener('dragend', () => {
@@ -6498,8 +6518,23 @@ function _browserResumeViews() {
   }, true);
   document.addEventListener('drop', () => {
     _browser._draggingPanel = false;
-    // Give dockview a tick to finish layout, then unsuspend
-    setTimeout(() => _browserResumeViews(), 50);
+    // Give dockview a tick to finish drop animation + layout, then unsuspend
+    setTimeout(() => _browserResumeViews(), 80);
+  }, true);
+
+  // Some drag operations end without `dragend` (e.g. dropped outside, ESC).
+  // Always re-evaluate when the mouse goes back up.
+  document.addEventListener('mouseup', () => {
+    if (_browser._draggingPanel) {
+      // Wait a tick — dragend may still fire after mouseup
+      setTimeout(() => {
+        if (!_browser._draggingPanel) return;
+        _browser._draggingPanel = false;
+        _browserResumeViews();
+      }, 100);
+    }
+    // Also check: maybe a context menu closed via outside click → resume
+    setTimeout(() => _browserResumeViews(), 0);
   }, true);
 })();
 
