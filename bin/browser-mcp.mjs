@@ -413,6 +413,252 @@ const TOOLS = [
     description: 'Quick overview of Claude\'s profile state: counts of bookmarks/history/notes, top folders, open reading-list items. Useful for orientation.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Chrome (REAL Chrome via Chrome DevTools Protocol)
+  // ────────────────────────────────────────────────────────────────────────
+  // The browser_* tools control the EMBEDDED browser (Electron WebContentsView).
+  // The chrome_* tools control the user's REAL Chrome — for things WebContentsView
+  // can't do: Google OAuth, DRM video, Chrome Web Store extensions, the actual
+  // Chrome anti-bot fingerprint. Chrome runs in a dedicated CCM-managed profile
+  // (separate from the user's main Chrome) and persists across sessions.
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────
+  {
+    name: 'chrome_launch',
+    description: 'Start a real Chrome subprocess controlled by CCM. Uses a dedicated profile (NOT the user\'s main Chrome) so cookies/extensions/passwords accumulate in Claude\'s identity. Lazy — most chrome_* tools auto-launch if not running. Call this explicitly to set headless mode or extra flags.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        headless:  { type: 'boolean', description: 'Run without a window (for backend/scrape tasks)' },
+        extraArgs: { type: 'array', items: { type: 'string' }, description: 'Extra Chrome command-line flags' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_close',
+    description: 'Gracefully shut down Claude\'s Chrome subprocess. Profile data persists for next launch.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_status',
+    description: 'Get state of Claude\'s Chrome: running flag, version, PID, profile path, tab count.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+
+  // ── Target / tabs ──────────────────────────────────────────────────────
+  {
+    name: 'chrome_target_list',
+    description: 'List all open tabs in Claude\'s Chrome — id, url, title, type for each.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_target_new_tab',
+    description: 'Open a new Chrome tab. If url is provided, navigates to it before returning.',
+    inputSchema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'Optional URL to load' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_target_close_tab',
+    description: 'Close a Chrome tab by id (from chrome_target_list). Omit id to close the active tab.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_target_activate_tab',
+    description: 'Bring a Chrome tab to the front. Requires id from chrome_target_list.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+
+  // ── Page ────────────────────────────────────────────────────────────────
+  {
+    name: 'chrome_page_navigate',
+    description: 'Navigate Chrome\'s active tab to a URL. Waits for the page to finish loading and returns final URL, title, HTTP status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url:       { type: 'string' },
+        waitUntil: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'], description: 'Default "load"' },
+        timeout:   { type: 'integer', description: 'Max ms to wait (default 30000)' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_page_reload',
+    description: 'Reload Chrome\'s active tab.',
+    inputSchema: {
+      type: 'object',
+      properties: { waitUntil: { type: 'string' }, timeout: { type: 'integer' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_page_screenshot',
+    description: 'Capture Chrome\'s active tab as a JPEG image — visible to Claude as a vision input. Use fullPage=true to capture the whole scrollable page.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fullPage: { type: 'boolean', description: 'Capture entire scrollable page (default false)' },
+        quality:  { type: 'integer', description: 'JPEG quality 1-100 (default 75)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_page_pdf',
+    description: 'Generate a PDF of Chrome\'s active tab. Returns base64-encoded PDF.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        landscape:       { type: 'boolean' },
+        printBackground: { type: 'boolean', description: 'Include background colors/images (default true)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_page_wait_load',
+    description: 'Wait for the next navigation to complete on Chrome\'s active tab. Useful when a click triggers a SPA route change you need to wait out.',
+    inputSchema: {
+      type: 'object',
+      properties: { timeout: { type: 'integer', description: 'Max ms to wait (default 30000)' } },
+      additionalProperties: false,
+    },
+  },
+
+  // ── Runtime — the swiss army knife ─────────────────────────────────────
+  {
+    name: 'chrome_runtime_eval',
+    description: 'Evaluate arbitrary JavaScript in Chrome\'s active tab. The most flexible tool in the kit — anything you can do in DevTools console, you can do here. Use sparingly when narrower tools don\'t fit. The expression is wrapped in `(async () => (EXPR))()` so you can `await` directly.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        expression:   { type: 'string', description: 'JS expression to evaluate' },
+        awaitPromise: { type: 'boolean', description: 'Await the expression if it resolves to a promise (default true)' },
+      },
+      required: ['expression'],
+      additionalProperties: false,
+    },
+  },
+
+  // ── DOM ─────────────────────────────────────────────────────────────────
+  {
+    name: 'chrome_dom_query',
+    description: 'querySelector on Chrome\'s active page. Returns text, bounding rect, and visibility flag. Use this to FIND an element before clicking.',
+    inputSchema: {
+      type: 'object',
+      properties: { selector: { type: 'string' } },
+      required: ['selector'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_dom_query_all',
+    description: 'querySelectorAll on Chrome\'s active page. Returns up to `limit` matching elements with i (index), tag, text, rect.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string' },
+        limit:    { type: 'integer', description: 'Max matches to return (default 50)' },
+      },
+      required: ['selector'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_dom_get_text',
+    description: 'Get the innerText of an element on Chrome\'s active page.',
+    inputSchema: {
+      type: 'object',
+      properties: { selector: { type: 'string' } },
+      required: ['selector'],
+      additionalProperties: false,
+    },
+  },
+
+  // ── Input ───────────────────────────────────────────────────────────────
+  {
+    name: 'chrome_input_click',
+    description: 'Click an element OR a pixel coordinate in Chrome\'s active tab. Provide either selector OR {x, y}.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string' },
+        x:        { type: 'number', description: 'X coord in CSS pixels (if no selector)' },
+        y:        { type: 'number', description: 'Y coord in CSS pixels (if no selector)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_input_type',
+    description: 'Type text in Chrome. If selector is provided, focuses that element first. Uses real keyboard events (defeats anti-automation that sniffs synthetic input).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'Element to focus before typing (optional)' },
+        text:     { type: 'string' },
+        delay:    { type: 'integer', description: 'Per-keystroke delay in ms (default 20)' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_input_key',
+    description: 'Press a single key in Chrome with optional modifiers. Key names follow USB HID (e.g. "Enter", "Tab", "ArrowDown", "F5").',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key:       { type: 'string' },
+        modifiers: { type: 'array', items: { type: 'string', enum: ['Control', 'Shift', 'Alt', 'Meta'] } },
+      },
+      required: ['key'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_input_scroll',
+    description: 'Scroll Chrome\'s active page up or down by amount pixels.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount:    { type: 'integer', description: 'Pixels (default 600)' },
+        direction: { type: 'string', enum: ['up', 'down'] },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  // ── Generic CDP escape hatch ───────────────────────────────────────────
+  {
+    name: 'chrome_cdp_raw',
+    description: 'Call ANY Chrome DevTools Protocol method directly. Reference: https://chromedevtools.github.io/devtools-protocol/. Use when no narrower chrome_* tool fits. Examples: method="Network.getCookies" / "Page.printToPDF" / "Accessibility.getFullAXTree".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        method: { type: 'string', description: 'CDP method like "Domain.action" (e.g. "Page.captureScreenshot")' },
+        params: { type: 'object',  description: 'Method parameters as specified in the CDP docs' },
+      },
+      required: ['method'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
@@ -457,6 +703,41 @@ async function execTool(name, args = {}) {
 
     // ── Profile · summary ───────────────────────────────────────
     case 'profile_summary':         return callOp('profile-summary');
+
+    // ── Chrome · lifecycle ──────────────────────────────────────
+    case 'chrome_launch':           return callOp('chrome-launch', args);
+    case 'chrome_close':            return callOp('chrome-close');
+    case 'chrome_status':           return callOp('chrome-status');
+
+    // ── Chrome · target/tabs ────────────────────────────────────
+    case 'chrome_target_list':         return callOp('chrome-target-list');
+    case 'chrome_target_new_tab':      return callOp('chrome-target-new-tab', args);
+    case 'chrome_target_close_tab':    return callOp('chrome-target-close-tab', args);
+    case 'chrome_target_activate_tab': return callOp('chrome-target-activate-tab', args);
+
+    // ── Chrome · page ───────────────────────────────────────────
+    case 'chrome_page_navigate':    return callOp('chrome-page-navigate', args);
+    case 'chrome_page_reload':      return callOp('chrome-page-reload', args);
+    case 'chrome_page_screenshot':  return callOp('chrome-page-screenshot', args);
+    case 'chrome_page_pdf':         return callOp('chrome-page-pdf', args);
+    case 'chrome_page_wait_load':   return callOp('chrome-page-wait-load', args);
+
+    // ── Chrome · runtime ────────────────────────────────────────
+    case 'chrome_runtime_eval':     return callOp('chrome-runtime-eval', args);
+
+    // ── Chrome · DOM ────────────────────────────────────────────
+    case 'chrome_dom_query':        return callOp('chrome-dom-query', args);
+    case 'chrome_dom_query_all':    return callOp('chrome-dom-query-all', args);
+    case 'chrome_dom_get_text':     return callOp('chrome-dom-get-text', args);
+
+    // ── Chrome · input ──────────────────────────────────────────
+    case 'chrome_input_click':      return callOp('chrome-input-click', args);
+    case 'chrome_input_type':       return callOp('chrome-input-type', args);
+    case 'chrome_input_key':        return callOp('chrome-input-key', args);
+    case 'chrome_input_scroll':     return callOp('chrome-input-scroll', args);
+
+    // ── Chrome · generic CDP escape hatch ───────────────────────
+    case 'chrome_cdp_raw':          return callOp('chrome-cdp-raw', args);
 
     default: throw new Error('Unknown tool: ' + name);
   }
@@ -505,7 +786,8 @@ async function handleRpc(msg) {
     try {
       const result = await execTool(name, args || {});
       // Screenshots → return as MCP image content (Claude SEES it).
-      if (name === 'browser_screenshot' && result?.base64) {
+      // Applies to both the embedded-browser screenshot and the real-Chrome one.
+      if ((name === 'browser_screenshot' || name === 'chrome_page_screenshot') && result?.base64) {
         return respond(id, {
           content: [
             { type: 'image', data: result.base64, mimeType: result.mediaType || 'image/jpeg' },

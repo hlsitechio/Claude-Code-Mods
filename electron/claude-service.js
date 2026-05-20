@@ -1009,11 +1009,12 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
         effectiveSystem += `\n_Profile state: ${sum.bookmarkCount} bookmarks, ${sum.historyCount} history entries, ${sum.notesCount} per-URL notes, ${sum.readlistOpen} items on reading list._\n`;
       }
 
-      effectiveSystem += `\nYou have a full toolkit wired in:
-- **Browser**: \`browser_get_state\`, \`browser_navigate\`, \`browser_read_page\`, \`browser_get_elements\`, \`browser_click\`, \`browser_type\`, \`browser_screenshot\`, \`browser_scroll\`, \`browser_nav\`
-- **Profile**: \`profile_bookmark_*\` (list/add/remove/search), \`profile_history_*\` (recent/search/clear), \`profile_note_*\` (get/set/search), \`profile_pref_*\`, \`profile_readlist_*\`, \`profile_summary\`
+      effectiveSystem += `\nYou have THREE toolkits wired in:
+- **Embedded browser** (\`browser_*\`): controls the in-app Chromium panel above. Fast, in-process. Use for navigation/click/type/screenshot/read-page on the user's current view.
+- **Profile** (\`profile_*\`): persistent identity — bookmarks, history (auto-recorded), per-URL notes, reading list, prefs. State survives across sessions.
+- **Real Chrome via CDP** (\`chrome_*\`): drives the user's actual Chrome subprocess (separate dedicated profile). Use this for Google OAuth, DRM video, Chrome Web Store extensions, sites that detect Electron. Tools: \`chrome_launch\`, \`chrome_status\`, \`chrome_target_*\` (tabs), \`chrome_page_*\` (navigate/screenshot/pdf), \`chrome_runtime_eval\`, \`chrome_dom_*\`, \`chrome_input_*\`, \`chrome_cdp_raw\` (escape hatch for any CDP method).
 
-Use them eagerly. When the user says "save this", "remember this page", "what did we read about X" — these are your tools. Bookmarks/notes/history persist across sessions.`;
+Use them eagerly. Embedded for everyday, real Chrome when you need full Chrome capabilities. \`chrome_*\` lazy-launches on first call.`;
     } else {
       effectiveSystem += (effectiveSystem ? '\n\n' : '')
         + `# Browser operator (idle)\nThe user has an embedded browser panel open but no page is loaded yet. Call \`browser_navigate({url: "..."})\` to open something.\n\nYou also have profile tools (\`profile_bookmark_list\`, \`profile_history_recent\`, \`profile_summary\`, etc.) if the user asks about saved pages.`;

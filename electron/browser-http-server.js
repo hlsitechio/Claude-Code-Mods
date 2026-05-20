@@ -110,6 +110,8 @@ async function _handle(req, res) {
   const t0 = Date.now();
   // Profile ops route through global.ccmBrowserProfile — same auth, same path.
   const profile = global.ccmBrowserProfile;
+  // Chrome (real Chrome via CDP) ops route through global.ccmChrome.
+  const chrome  = global.ccmChrome;
   try {
     let result;
     switch (cmd) {
@@ -152,6 +154,44 @@ async function _handle(req, res) {
 
       // ── Profile · summary ──────────────────────────────────
       case 'profile-summary':         result = profile.summary(); break;
+
+      // ─────────────────────────────────────────────────────────
+      // CHROME (real Chrome via CDP)
+      // ─────────────────────────────────────────────────────────
+      // Lifecycle
+      case 'chrome-launch':              result = await chrome.launch(body); break;
+      case 'chrome-close':               result = await chrome.close(); break;
+      case 'chrome-status':              result = await chrome.status(); break;
+
+      // Target / tabs
+      case 'chrome-target-list':         result = await chrome.targetList(); break;
+      case 'chrome-target-new-tab':      result = await chrome.targetNewTab(body); break;
+      case 'chrome-target-close-tab':    result = await chrome.targetCloseTab(body); break;
+      case 'chrome-target-activate-tab': result = await chrome.targetActivateTab(body); break;
+
+      // Page
+      case 'chrome-page-navigate':       result = await chrome.pageNavigate(body); break;
+      case 'chrome-page-reload':         result = await chrome.pageReload(body); break;
+      case 'chrome-page-screenshot':     result = await chrome.pageScreenshot(body); break;
+      case 'chrome-page-pdf':            result = await chrome.pagePdf(body); break;
+      case 'chrome-page-wait-load':      result = await chrome.pageWaitForLoad(body); break;
+
+      // Runtime
+      case 'chrome-runtime-eval':        result = await chrome.runtimeEval(body); break;
+
+      // DOM
+      case 'chrome-dom-query':           result = await chrome.domQuery(body); break;
+      case 'chrome-dom-query-all':       result = await chrome.domQueryAll(body); break;
+      case 'chrome-dom-get-text':        result = await chrome.domGetText(body); break;
+
+      // Input
+      case 'chrome-input-click':         result = await chrome.inputClick(body); break;
+      case 'chrome-input-type':          result = await chrome.inputType(body); break;
+      case 'chrome-input-key':           result = await chrome.inputKey(body); break;
+      case 'chrome-input-scroll':        result = await chrome.inputScroll(body); break;
+
+      // Generic CDP escape hatch
+      case 'chrome-cdp-raw':             result = await chrome.cdpRaw(body); break;
 
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }
