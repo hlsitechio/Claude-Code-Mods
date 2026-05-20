@@ -6446,9 +6446,48 @@ function _browserSuspendViews() {
 function _browserResumeViews() {
   if (!_browser.suspended) return;
   if (_browserAnyModalVisible()) return; // still blocked
+  if (_browser._draggingPanel) return;   // still in a drag operation
   _browser.suspended = false;
   _browser._repositionActive?.();
 }
+
+// ── Global synchronous triggers ─────────────────────────────────────────────
+// The MutationObserver-based approach (in initBrowserPanel) has a 1-frame lag.
+// These handlers fire on the input events themselves (capture phase) so the
+// view is parked BEFORE the menu/drop indicator is even drawn — no flicker.
+// Installed once at module load; cheap when no browser is open.
+(function installBrowserGlobalSuspendTriggers() {
+  // Right-click anywhere → suspend BEFORE the menu opens
+  document.addEventListener('contextmenu', () => {
+    if (_browser.activeId) _browserSuspendViews();
+    // Schedule a resume check on the next macrotask — by then the menu is
+    // either visible (modal check keeps it suspended) or not (resume fires).
+    setTimeout(() => _browserResumeViews(), 0);
+  }, true); // capture phase
+
+  // Dockview panel drag → suspend for the WHOLE drag so drop indicators are
+  // visible everywhere on the screen, not just outside the browser rect.
+  document.addEventListener('dragstart', (e) => {
+    const t = e.target;
+    if (!t?.closest) return;
+    // dockview tabs have .dv-tab, the workspace tabs use other patterns —
+    // any dragstart originating from a dockview-managed element triggers.
+    if (t.closest('.dv-tab, .dv-tabs-container, .ws-switcher__tab, [data-tab-id]')) {
+      _browser._draggingPanel = true;
+      _browserSuspendViews();
+    }
+  }, true);
+
+  document.addEventListener('dragend', () => {
+    _browser._draggingPanel = false;
+    _browserResumeViews();
+  }, true);
+  document.addEventListener('drop', () => {
+    _browser._draggingPanel = false;
+    // Give dockview a tick to finish layout, then unsuspend
+    setTimeout(() => _browserResumeViews(), 50);
+  }, true);
+})();
 
 async function initBrowserPanel(bodyEl) {
   const api = window.electronAPI?.browser;

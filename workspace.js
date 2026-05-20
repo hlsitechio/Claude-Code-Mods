@@ -963,7 +963,8 @@
       if (e.target.closest(
         '.msg, #composer-input, .chat-conversation, ' +
         '.xterm, .xterm-helpers, .xterm-screen, ' +
-        '.kanban-modal, .kanban__cards, .task-card'
+        '.kanban-modal, .kanban__cards, .task-card, ' +
+        '.browser-panel, [data-browser-root]'
       )) {
         // Let the surface-specific handler take it; bail without showing the dock menu.
         return;
