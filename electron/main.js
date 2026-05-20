@@ -462,6 +462,10 @@ app.on('will-quit', () => {
   // Tear down the browser MCP HTTP bridge + delete the endpoint file so any
   // MCP child spawned while we're not running fails fast and clearly.
   try { require('./browser-http-server').stopBrowserHttpServer(); } catch (_) {}
+  // Kill the Chrome subprocess (if running) so we don't leak browser windows
+  // / zombie processes on app close. ccmChrome.close() is safe to call when
+  // Chrome isn't running.
+  try { ccmChrome.close(); } catch (_) {}
 });
 
 // ── IPC: app info ────────────────────────────────────────────────────────────
@@ -765,7 +769,9 @@ ipcMain.handle('kanban:summary', () => {
 
 const { WebContentsView, session: electronSession } = require('electron');
 const ccmBrowserProfile = require('./browser-profile');
+const ccmChrome         = require('./chrome-controller');
 global.ccmBrowserProfile = ccmBrowserProfile;
+global.ccmChrome         = ccmChrome;
 
 const _browserViews = new Map(); // viewId → { view, win, ownerWebContentsId }
 let _nextBrowserViewId = 1;
