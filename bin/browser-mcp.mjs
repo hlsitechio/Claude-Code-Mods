@@ -1,0 +1,315 @@
+#!/usr/bin/env node
+/**
+ * browser-mcp.mjs — MCP bridge for the CCM embedded browser
+ * ──────────────────────────────────────────────────────────
+ * Spawned by Claude Code CLI per session (registered in
+ * ~/.claude/settings.json under `mcpServers.ccm-browser`).
+ *
+ * Speaks the MCP JSON-RPC 2.0 protocol on stdin/stdout to Claude, and
+ * forwards each `tools/call` request to the CCM Electron app's HTTP
+ * control server (which is implemented in electron/browser-http-server.js).
+ *
+ * The endpoint URL + bearer token are persisted by Electron on every boot
+ * to `~/.claude/ccm-browser-endpoint.json` (mode 0600). If the file is
+ * missing (CCM not running), every tool call returns a clear error so the
+ * model knows to ask the user to launch the app.
+ *
+ * Tool schemas match the SDK-side tools in electron/claude-service.js so
+ * Claude has IDENTICAL capabilities in both CLI mode (via this MCP server)
+ * and Direct API mode (via the SDK).
+ */
+
+import fs   from 'node:fs';
+import path from 'node:path';
+import os   from 'node:os';
+import http from 'node:http';
+import { URL } from 'node:url';
+
+// ── Endpoint discovery ──────────────────────────────────────────────────────
+function endpointFilePath() {
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  const dir  = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+  return path.join(dir, 'ccm-browser-endpoint.json');
+}
+
+function readEndpoint() {
+  try {
+    const txt = fs.readFileSync(endpointFilePath(), 'utf8');
+    const env = JSON.parse(txt);
+    if (!env.url || !env.token) return null;
+    return env;
+  } catch (_) {
+    return null;
+  }
+}
+
+// ── HTTP client ─────────────────────────────────────────────────────────────
+async function callOp(cmd, body = {}) {
+  const env = readEndpoint();
+  if (!env) {
+    throw new Error(
+      'Claude Code Mods is not running. Launch the CCM desktop app, ' +
+      'open the Browser panel, then retry.'
+    );
+  }
+  const u = new URL(env.url + '/op/' + cmd);
+  const data = JSON.stringify(body || {});
+
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: u.hostname,
+      port:     u.port,
+      path:     u.pathname,
+      method:   'POST',
+      headers: {
+        'Content-Type':   'application/json',
+        'Authorization':  'Bearer ' + env.token,
+        'Content-Length': Buffer.byteLength(data),
+      },
+      timeout: 30000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        try {
+          const parsed = JSON.parse(text);
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+            return;
+          }
+          if (parsed.ok === false) {
+            reject(new Error(parsed.error || 'Unknown error'));
+            return;
+          }
+          resolve(parsed.result);
+        } catch (e) {
+          reject(new Error('Bad JSON from CCM: ' + e.message));
+        }
+      });
+    });
+    req.on('error', err => {
+      if (err.code === 'ECONNREFUSED') {
+        reject(new Error('Cannot reach Claude Code Mods (connection refused). Is the app running?'));
+      } else {
+        reject(err);
+      }
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error('Request timed out after 30s'));
+    });
+    req.write(data);
+    req.end();
+  });
+}
+
+// ── Tool schemas (mirror electron/claude-service.js BROWSER_TOOLS) ─────────
+const TOOLS = [
+  {
+    name: 'browser_get_state',
+    description: 'Get the current state of the embedded browser — URL, page title, and loading status. Use this to check what page the user is currently looking at.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'browser_navigate',
+    description: 'Navigate the embedded browser to a URL. Waits for the page to finish loading and returns the final URL and title.',
+    inputSchema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'URL to navigate to (https:// auto-added if missing)' } },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_read_page',
+    description: 'Read the visible text content of the current page. Returns cleaned innerText with the page title and URL.',
+    inputSchema: {
+      type: 'object',
+      properties: { max_chars: { type: 'integer', description: 'Max characters to return (default 8000, max 50000)' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_get_elements',
+    description: 'List interactable elements on the page (links, buttons, inputs, selects). Each element gets an integer "i" you can pass back to browser_click. Use this BEFORE clicking when you do not know the exact selector.',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', description: 'Max elements (default 60, max 200)' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_click',
+    description: 'Click an element on the page. Provide ONE of: index (from browser_get_elements), selector (CSS), or text (substring match against link/button text).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        index:    { type: 'integer', description: 'Element index from browser_get_elements' },
+        selector: { type: 'string',  description: 'CSS selector to click' },
+        text:     { type: 'string',  description: 'Visible text of the link/button to click (case-insensitive substring)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_type',
+    description: 'Type text into an input field. Set submit=true to also submit the surrounding form (or press Enter on the input).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string',  description: 'CSS selector of the input element' },
+        text:     { type: 'string',  description: 'Text to type into the field' },
+        submit:   { type: 'boolean', description: 'Submit the form after typing' },
+      },
+      required: ['selector', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_screenshot',
+    description: 'Capture the current page as a JPEG image. You will see the screenshot as a visual input. Use this when reading text is not enough (e.g. understanding layout, recognizing icons, debugging visual issues).',
+    inputSchema: {
+      type: 'object',
+      properties: { quality: { type: 'integer', description: 'JPEG quality 20-95 (default 75)' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_scroll',
+    description: 'Scroll the page. Useful when content is below the fold.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (default down)' },
+        amount:    { type: 'integer', description: 'Pixels to scroll (default 600)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser_nav',
+    description: 'Browser history navigation: back, forward, or reload.',
+    inputSchema: {
+      type: 'object',
+      properties: { action: { type: 'string', enum: ['back', 'forward', 'reload'] } },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+];
+
+// Map MCP tool name → HTTP op + arg shape
+async function execTool(name, args = {}) {
+  switch (name) {
+    case 'browser_get_state':    return callOp('get-state');
+    case 'browser_navigate':     return callOp('navigate',    { url: args.url });
+    case 'browser_read_page':    return callOp('read-page',   { max_chars: args.max_chars });
+    case 'browser_get_elements': return callOp('get-elements',{ limit: args.limit });
+    case 'browser_click':        return callOp('click',       args);
+    case 'browser_type':         return callOp('type',        args);
+    case 'browser_screenshot':   return callOp('screenshot',  { quality: args.quality });
+    case 'browser_scroll':       return callOp('scroll',      args);
+    case 'browser_nav':          return callOp('nav',         { action: args.action });
+    default: throw new Error('Unknown tool: ' + name);
+  }
+}
+
+// ── MCP JSON-RPC server over stdio ──────────────────────────────────────────
+// Each line on stdin is one JSON-RPC message. We respond on stdout with one
+// line per message. No batching, no notifications from server (yet).
+const SERVER_INFO = {
+  name:    'ccm-browser',
+  version: '1.0.0',
+};
+const PROTOCOL_VERSION = '2024-11-05';
+
+function respond(id, result) {
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
+}
+function respondError(id, code, message) {
+  process.stdout.write(JSON.stringify({
+    jsonrpc: '2.0', id,
+    error: { code, message },
+  }) + '\n');
+}
+
+async function handleRpc(msg) {
+  const { id, method, params } = msg;
+
+  if (method === 'initialize') {
+    return respond(id, {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities:    { tools: {} },
+      serverInfo:      SERVER_INFO,
+    });
+  }
+  if (method === 'initialized' || method === 'notifications/initialized') {
+    return; // notification — no response
+  }
+  if (method === 'ping') {
+    return respond(id, {});
+  }
+  if (method === 'tools/list') {
+    return respond(id, { tools: TOOLS });
+  }
+  if (method === 'tools/call') {
+    const { name, arguments: args } = params || {};
+    try {
+      const result = await execTool(name, args || {});
+      // Screenshots → return as MCP image content (Claude SEES it).
+      if (name === 'browser_screenshot' && result?.base64) {
+        return respond(id, {
+          content: [
+            { type: 'image', data: result.base64, mimeType: result.mediaType || 'image/jpeg' },
+            { type: 'text',  text: `Screenshot · ${result.url || ''} · ${result.title || ''}` },
+          ],
+        });
+      }
+      // Everything else → serialise as text. Compact JSON keeps Claude's
+      // token count low while preserving the structured data.
+      const text = typeof result === 'string'
+        ? result
+        : JSON.stringify(result, null, 2);
+      return respond(id, { content: [{ type: 'text', text }] });
+    } catch (e) {
+      return respond(id, {
+        content: [{ type: 'text', text: 'Tool error: ' + e.message }],
+        isError: true,
+      });
+    }
+  }
+  // Unknown method → -32601 per JSON-RPC spec
+  respondError(id, -32601, 'Method not found: ' + method);
+}
+
+// ── stdin line parser ───────────────────────────────────────────────────────
+process.stdin.setEncoding('utf8');
+let _buf = '';
+process.stdin.on('data', chunk => {
+  _buf += chunk;
+  let i;
+  while ((i = _buf.indexOf('\n')) !== -1) {
+    const line = _buf.slice(0, i).trim();
+    _buf = _buf.slice(i + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); }
+    catch (e) {
+      respondError(null, -32700, 'Parse error: ' + e.message);
+      continue;
+    }
+    handleRpc(msg).catch(err => {
+      respondError(msg?.id ?? null, -32603, 'Internal error: ' + err.message);
+    });
+  }
+});
+
+process.stdin.on('end', () => process.exit(0));
+
+// Fail loud on uncaught errors — they go to Claude Code's MCP log.
+process.on('uncaughtException', err => {
+  console.error('[browser-mcp] uncaughtException:', err);
+});
+process.on('unhandledRejection', err => {
+  console.error('[browser-mcp] unhandledRejection:', err);
+});
