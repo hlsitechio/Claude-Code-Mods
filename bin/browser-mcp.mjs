@@ -659,6 +659,174 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 2 — Network · Storage · Emulation
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── Network ────────────────────────────────────────────────────────────
+  { name: 'chrome_net_cookies_get', description: 'List cookies in Chrome. Optionally filter by urls.',
+    inputSchema: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, additionalProperties: false } },
+  { name: 'chrome_net_cookie_set', description: 'Set a cookie in Chrome (Network.setCookie). Either domain+path OR url is required.',
+    inputSchema: { type: 'object', properties: {
+      name: { type: 'string' }, value: { type: 'string' },
+      domain: { type: 'string' }, path: { type: 'string' }, url: { type: 'string' },
+      secure: { type: 'boolean' }, httpOnly: { type: 'boolean' },
+      sameSite: { type: 'string', enum: ['Strict','Lax','None'] },
+      expires: { type: 'number', description: 'Unix seconds' },
+    }, required: ['name'], additionalProperties: false } },
+  { name: 'chrome_net_cookies_delete', description: 'Delete cookies matching name + (domain|path|url).',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' }, domain: { type: 'string' }, path: { type: 'string' }, url: { type: 'string' } }, required: ['name'], additionalProperties: false } },
+  { name: 'chrome_net_cookies_clear_all', description: 'Wipe ALL cookies in this Chrome profile. Big hammer — destroys all logins.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_net_extra_headers', description: 'Inject extra HTTP headers into every Chrome request (e.g. {"X-Debug":"1"}).',
+    inputSchema: { type: 'object', properties: { headers: { type: 'object', additionalProperties: { type: 'string' } } }, required: ['headers'], additionalProperties: false } },
+  { name: 'chrome_net_block_urls', description: 'Block requests matching any URL pattern (wildcards OK, e.g. "*.doubleclick.net/*"). Pass empty array to clear.',
+    inputSchema: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } } }, additionalProperties: false } },
+  { name: 'chrome_net_user_agent', description: 'Override the User-Agent for ALL Chrome requests (deeper than Emulation — covers worker traffic too).',
+    inputSchema: { type: 'object', properties: { userAgent: { type: 'string' }, acceptLanguage: { type: 'string' }, platform: { type: 'string' } }, required: ['userAgent'], additionalProperties: false } },
+
+  // ── Storage ────────────────────────────────────────────────────────────
+  { name: 'chrome_storage_clear_origin', description: 'Clear ALL storage for one origin (cookies/localStorage/IndexedDB/cache/SW). storageTypes is "all" or csv subset.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' }, storageTypes: { type: 'string' } }, required: ['origin'], additionalProperties: false } },
+  { name: 'chrome_storage_usage', description: 'Get storage usage + quota breakdown for an origin (bytes per category).',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' } }, required: ['origin'], additionalProperties: false } },
+  { name: 'chrome_storage_cookies', description: 'List all cookies in the active browser context (alternative to chrome_net_cookies_get).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_domstorage_get', description: 'Read all localStorage (or sessionStorage) entries for one origin.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' }, isLocalStorage: { type: 'boolean', description: 'true = localStorage (default), false = sessionStorage' } }, required: ['origin'], additionalProperties: false } },
+  { name: 'chrome_domstorage_set', description: 'Set one localStorage (or sessionStorage) key/value for an origin.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' }, key: { type: 'string' }, value: { type: 'string' }, isLocalStorage: { type: 'boolean' } }, required: ['origin', 'key'], additionalProperties: false } },
+  { name: 'chrome_domstorage_remove', description: 'Remove one localStorage key for an origin.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' }, key: { type: 'string' }, isLocalStorage: { type: 'boolean' } }, required: ['origin', 'key'], additionalProperties: false } },
+  { name: 'chrome_domstorage_clear', description: 'Clear all localStorage (or sessionStorage) for an origin.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' }, isLocalStorage: { type: 'boolean' } }, required: ['origin'], additionalProperties: false } },
+  { name: 'chrome_idb_list', description: 'List IndexedDB database names for an origin.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' } }, required: ['origin'], additionalProperties: false } },
+  { name: 'chrome_idb_delete', description: 'Delete one IndexedDB database for an origin.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' }, databaseName: { type: 'string' } }, required: ['origin', 'databaseName'], additionalProperties: false } },
+  { name: 'chrome_cache_list', description: 'List Service Worker / Cache API cache names for an origin.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' } }, required: ['origin'], additionalProperties: false } },
+  { name: 'chrome_cache_delete', description: 'Delete a cache by cacheId (from chrome_cache_list).',
+    inputSchema: { type: 'object', properties: { cacheId: { type: 'string' } }, required: ['cacheId'], additionalProperties: false } },
+
+  // ── Emulation ──────────────────────────────────────────────────────────
+  { name: 'chrome_emulate_ua', description: 'Emulation-level UA override (per-tab; ephemeral). Use chrome_net_user_agent for a persistent network-level override.',
+    inputSchema: { type: 'object', properties: { userAgent: { type: 'string' }, acceptLanguage: { type: 'string' }, platform: { type: 'string' } }, required: ['userAgent'], additionalProperties: false } },
+  { name: 'chrome_emulate_geo', description: 'Fake the user\'s geolocation. Sites using navigator.geolocation will see these coordinates.',
+    inputSchema: { type: 'object', properties: { latitude: { type: 'number' }, longitude: { type: 'number' }, accuracy: { type: 'number', description: 'meters (default 50)' } }, required: ['latitude', 'longitude'], additionalProperties: false } },
+  { name: 'chrome_emulate_geo_clear', description: 'Clear the geolocation override.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_emulate_timezone', description: 'Override the page\'s timezone (e.g. "America/Tokyo", "Europe/Berlin").',
+    inputSchema: { type: 'object', properties: { timezoneId: { type: 'string' } }, required: ['timezoneId'], additionalProperties: false } },
+  { name: 'chrome_emulate_locale', description: 'Override the page\'s locale (e.g. "ja-JP", "fr-FR").',
+    inputSchema: { type: 'object', properties: { locale: { type: 'string' } }, required: ['locale'], additionalProperties: false } },
+  { name: 'chrome_emulate_device', description: 'Set device metrics (viewport, pixel ratio, mobile flag) — emulate phone/tablet.',
+    inputSchema: { type: 'object', properties: { width: { type: 'integer' }, height: { type: 'integer' }, deviceScaleFactor: { type: 'number' }, mobile: { type: 'boolean' } }, required: ['width', 'height'], additionalProperties: false } },
+  { name: 'chrome_emulate_device_clear', description: 'Clear device metrics override (return to real viewport).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_emulate_color_scheme', description: 'Force the page\'s color scheme to light/dark/no-preference (tests prefers-color-scheme).',
+    inputSchema: { type: 'object', properties: { scheme: { type: 'string', enum: ['light', 'dark', 'no-preference'] } }, additionalProperties: false } },
+  { name: 'chrome_emulate_network', description: 'Throttle network — offline, slow 3G, etc. latency in ms; throughput in bytes/sec (-1 = no limit).',
+    inputSchema: { type: 'object', properties: { offline: { type: 'boolean' }, latency: { type: 'integer' }, downloadThroughput: { type: 'integer' }, uploadThroughput: { type: 'integer' } }, additionalProperties: false } },
+  { name: 'chrome_emulate_cpu', description: 'CPU throttling. rate=1 normal, rate=4 = 4x slowdown.',
+    inputSchema: { type: 'object', properties: { rate: { type: 'number' } }, additionalProperties: false } },
+  { name: 'chrome_emulate_vision', description: 'Simulate vision deficiency — accessibility testing.',
+    inputSchema: { type: 'object', properties: { type: { type: 'string', enum: ['none', 'achromatopsia', 'blurredVision', 'deuteranopia', 'protanopia', 'tritanopia'] } }, additionalProperties: false } },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 3 — Extensions · Autofill · WebAuthn (the gems)
+  // ════════════════════════════════════════════════════════════════════════
+
+  { name: 'chrome_ext_load_unpacked', description: 'Load an unpacked Chrome extension from a folder. CDP method — works WITHOUT going through the Web Store. Returns the new extension id.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to extension folder (containing manifest.json)' } }, required: ['path'], additionalProperties: false } },
+  { name: 'chrome_ext_uninstall', description: 'Uninstall a Chrome extension by id.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
+  { name: 'chrome_autofill_trigger', description: 'Programmatically trigger autofill on a form field (by DOM nodeId).',
+    inputSchema: { type: 'object', properties: { fieldId: { type: 'integer' }, frameId: { type: 'string' }, card: { type: 'object' } }, required: ['fieldId'], additionalProperties: false } },
+  { name: 'chrome_autofill_set_addresses', description: 'Set autofill addresses (CDP Autofill.setAddresses).',
+    inputSchema: { type: 'object', properties: { addresses: { type: 'array' } }, additionalProperties: false } },
+  { name: 'chrome_webauthn_enable', description: 'Enable the WebAuthn virtual authenticator subsystem (required before chrome_webauthn_add).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_webauthn_add', description: 'Add a virtual passkey authenticator. Lets sites that use WebAuthn (passkey sign-in) work without hardware. Returns authenticatorId.',
+    inputSchema: { type: 'object', properties: {
+      protocol: { type: 'string', enum: ['u2f', 'ctap2'] },
+      transport: { type: 'string', enum: ['usb', 'nfc', 'ble', 'internal', 'hybrid'] },
+      hasResidentKey: { type: 'boolean' },
+      hasUserVerification: { type: 'boolean' },
+    }, additionalProperties: false } },
+  { name: 'chrome_webauthn_remove', description: 'Remove a virtual authenticator.',
+    inputSchema: { type: 'object', properties: { authenticatorId: { type: 'string' } }, required: ['authenticatorId'], additionalProperties: false } },
+  { name: 'chrome_webauthn_creds', description: 'List credentials stored in a virtual authenticator.',
+    inputSchema: { type: 'object', properties: { authenticatorId: { type: 'string' } }, required: ['authenticatorId'], additionalProperties: false } },
+  { name: 'chrome_webauthn_clear_creds', description: 'Wipe all credentials from a virtual authenticator.',
+    inputSchema: { type: 'object', properties: { authenticatorId: { type: 'string' } }, required: ['authenticatorId'], additionalProperties: false } },
+  { name: 'chrome_webauthn_verify', description: 'Set the user-verified flag on a virtual authenticator (simulates a biometric prompt success).',
+    inputSchema: { type: 'object', properties: { authenticatorId: { type: 'string' }, isUserVerified: { type: 'boolean' } }, required: ['authenticatorId'], additionalProperties: false } },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 4 — Fetch interception · Console · Accessibility · CSS
+  // ════════════════════════════════════════════════════════════════════════
+
+  { name: 'chrome_fetch_enable', description: 'Enable request interception. Each matching request is PAUSED until you call chrome_fetch_continue / fail / fulfill. Auto-continue fires after 10s if you forget.',
+    inputSchema: { type: 'object', properties: { patterns: { type: 'array', description: 'CDP Fetch.RequestPattern array; default = match all' } }, additionalProperties: false } },
+  { name: 'chrome_fetch_disable', description: 'Disable request interception. Any paused requests are released.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_fetch_pending', description: 'List requests currently paused waiting for a continue/fail/fulfill decision.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_fetch_continue', description: 'Release a paused request. Optionally rewrite url/method/postData/headers before forwarding.',
+    inputSchema: { type: 'object', properties: { requestId: { type: 'string' }, url: { type: 'string' }, method: { type: 'string' }, postData: { type: 'string' }, headers: { type: 'array' } }, required: ['requestId'], additionalProperties: false } },
+  { name: 'chrome_fetch_fail', description: 'Fail a paused request with an error reason (BlockedByClient, Aborted, AccessDenied, etc).',
+    inputSchema: { type: 'object', properties: { requestId: { type: 'string' }, errorReason: { type: 'string' } }, required: ['requestId'], additionalProperties: false } },
+  { name: 'chrome_fetch_fulfill', description: 'Return a fake response for a paused request — mock APIs without touching the network.',
+    inputSchema: { type: 'object', properties: { requestId: { type: 'string' }, responseCode: { type: 'integer' }, responseHeaders: { type: 'array' }, body: { type: 'string', description: 'Plain text or stringified JSON; we base64-encode for you' } }, required: ['requestId'], additionalProperties: false } },
+  { name: 'chrome_console_subscribe', description: 'Start capturing console.log / pageerror messages on the active tab (circular buffer of 500). Auto-on after first chrome_console_recent call.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_console_recent', description: 'Get the most recent N console messages from the active tab. Set clear=true to flush after reading.',
+    inputSchema: { type: 'object', properties: { limit: { type: 'integer', description: 'Default 100, max 500' }, clear: { type: 'boolean' } }, additionalProperties: false } },
+  { name: 'chrome_a11y_enable', description: 'Enable accessibility tree generation for the active tab.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_a11y_tree', description: 'Get the FULL accessibility tree — often a better page representation for LLMs than raw DOM (labeled, pruned to interactive content).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_a11y_query', description: 'Get accessibility nodes matching a role (e.g. "button", "link", "textbox", "heading").',
+    inputSchema: { type: 'object', properties: { role: { type: 'string' } }, required: ['role'], additionalProperties: false } },
+  { name: 'chrome_css_computed', description: 'Get the FULL computed CSS for an element. Returns flat name→value object.',
+    inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'], additionalProperties: false } },
+  { name: 'chrome_css_matched', description: 'Get matched style rules + inheritance chain for an element — exactly what DevTools shows in the Styles panel.',
+    inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'], additionalProperties: false } },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 5 — Performance · Security · ServiceWorker · Browser
+  // ════════════════════════════════════════════════════════════════════════
+
+  { name: 'chrome_perf_metrics', description: 'Snapshot of performance metrics — JS heap, layout/paint counts, frame stats, etc.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_perf_cpu_start', description: 'Start CPU profiling on the active tab.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_perf_cpu_stop', description: 'Stop CPU profiling and return the profile object.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_perf_trace_start', description: 'Start a full Chrome perf trace (chrome://tracing format). Pass categories like "*" or "blink.*,v8.*".',
+    inputSchema: { type: 'object', properties: { categories: { type: 'string' } }, additionalProperties: false } },
+  { name: 'chrome_perf_trace_stop', description: 'Stop the in-progress trace. (Full event collection requires chrome_cdp_raw on Tracing.dataCollected events.)',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_security_status', description: 'Get TLS/security isolation status for the active tab — cross-origin isolation, certificate state.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_sw_enable', description: 'Enable ServiceWorker domain so chrome_sw_* operations can target workers.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_sw_unregister', description: 'Unregister a service worker by scope URL.',
+    inputSchema: { type: 'object', properties: { scopeURL: { type: 'string' } }, required: ['scopeURL'], additionalProperties: false } },
+  { name: 'chrome_sw_stop', description: 'Stop a running service worker by version id (from CDP ServiceWorker events).',
+    inputSchema: { type: 'object', properties: { versionId: { type: 'string' } }, required: ['versionId'], additionalProperties: false } },
+  { name: 'chrome_browser_grant_perms', description: 'Grant permissions (geolocation, notifications, camera, etc.) to a specific origin without showing the prompt.',
+    inputSchema: { type: 'object', properties: { origin: { type: 'string' }, permissions: { type: 'array', items: { type: 'string' }, description: 'e.g. ["geolocation","notifications","camera","microphone"]' } }, additionalProperties: false } },
+  { name: 'chrome_browser_reset_perms', description: 'Reset all permission grants back to default (prompt).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_browser_downloads', description: 'Configure download behavior: allow + path, or deny.',
+    inputSchema: { type: 'object', properties: { behavior: { type: 'string', enum: ['deny', 'allow', 'allowAndName', 'default'] }, downloadPath: { type: 'string' } }, additionalProperties: false } },
+
+  // ── Convenience: open chrome:// internal pages ─────────────────────────
+  { name: 'chrome_open_internal', description: 'Open a chrome:// internal page like "settings", "flags", "extensions", "history", "downloads". Allowlisted — crash/kill/hang pages are refused.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Page name without prefix (e.g. "settings", "flags") or full chrome://name URL' } }, required: ['name'], additionalProperties: false } },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
@@ -738,6 +906,85 @@ async function execTool(name, args = {}) {
 
     // ── Chrome · generic CDP escape hatch ───────────────────────
     case 'chrome_cdp_raw':          return callOp('chrome-cdp-raw', args);
+
+    // ── Phase 2 · Network ───────────────────────────────────────
+    case 'chrome_net_cookies_get':       return callOp('chrome-net-cookies-get', args);
+    case 'chrome_net_cookie_set':        return callOp('chrome-net-cookie-set', args);
+    case 'chrome_net_cookies_delete':    return callOp('chrome-net-cookies-delete', args);
+    case 'chrome_net_cookies_clear_all': return callOp('chrome-net-cookies-clear-all');
+    case 'chrome_net_extra_headers':     return callOp('chrome-net-extra-headers', args);
+    case 'chrome_net_block_urls':        return callOp('chrome-net-block-urls', args);
+    case 'chrome_net_user_agent':        return callOp('chrome-net-user-agent', args);
+
+    // ── Phase 2 · Storage ───────────────────────────────────────
+    case 'chrome_storage_clear_origin':  return callOp('chrome-storage-clear-origin', args);
+    case 'chrome_storage_usage':         return callOp('chrome-storage-usage', args);
+    case 'chrome_storage_cookies':       return callOp('chrome-storage-cookies', args);
+    case 'chrome_domstorage_get':        return callOp('chrome-domstorage-get', args);
+    case 'chrome_domstorage_set':        return callOp('chrome-domstorage-set', args);
+    case 'chrome_domstorage_remove':     return callOp('chrome-domstorage-remove', args);
+    case 'chrome_domstorage_clear':      return callOp('chrome-domstorage-clear', args);
+    case 'chrome_idb_list':              return callOp('chrome-idb-list', args);
+    case 'chrome_idb_delete':            return callOp('chrome-idb-delete', args);
+    case 'chrome_cache_list':            return callOp('chrome-cache-list', args);
+    case 'chrome_cache_delete':          return callOp('chrome-cache-delete', args);
+
+    // ── Phase 2 · Emulation ─────────────────────────────────────
+    case 'chrome_emulate_ua':            return callOp('chrome-emulate-ua', args);
+    case 'chrome_emulate_geo':           return callOp('chrome-emulate-geo', args);
+    case 'chrome_emulate_geo_clear':     return callOp('chrome-emulate-geo-clear');
+    case 'chrome_emulate_timezone':      return callOp('chrome-emulate-timezone', args);
+    case 'chrome_emulate_locale':        return callOp('chrome-emulate-locale', args);
+    case 'chrome_emulate_device':        return callOp('chrome-emulate-device', args);
+    case 'chrome_emulate_device_clear':  return callOp('chrome-emulate-device-clear');
+    case 'chrome_emulate_color_scheme':  return callOp('chrome-emulate-color-scheme', args);
+    case 'chrome_emulate_network':       return callOp('chrome-emulate-network', args);
+    case 'chrome_emulate_cpu':           return callOp('chrome-emulate-cpu', args);
+    case 'chrome_emulate_vision':        return callOp('chrome-emulate-vision', args);
+
+    // ── Phase 3 · Extensions / Autofill / WebAuthn ──────────────
+    case 'chrome_ext_load_unpacked':     return callOp('chrome-ext-load-unpacked', args);
+    case 'chrome_ext_uninstall':         return callOp('chrome-ext-uninstall', args);
+    case 'chrome_autofill_trigger':      return callOp('chrome-autofill-trigger', args);
+    case 'chrome_autofill_set_addresses':return callOp('chrome-autofill-set-addr', args);
+    case 'chrome_webauthn_enable':       return callOp('chrome-webauthn-enable');
+    case 'chrome_webauthn_add':          return callOp('chrome-webauthn-add', args);
+    case 'chrome_webauthn_remove':       return callOp('chrome-webauthn-remove', args);
+    case 'chrome_webauthn_creds':        return callOp('chrome-webauthn-creds', args);
+    case 'chrome_webauthn_clear_creds':  return callOp('chrome-webauthn-clear-creds', args);
+    case 'chrome_webauthn_verify':       return callOp('chrome-webauthn-verify', args);
+
+    // ── Phase 4 · Fetch / Console / A11y / CSS ──────────────────
+    case 'chrome_fetch_enable':          return callOp('chrome-fetch-enable', args);
+    case 'chrome_fetch_disable':         return callOp('chrome-fetch-disable');
+    case 'chrome_fetch_pending':         return callOp('chrome-fetch-pending');
+    case 'chrome_fetch_continue':        return callOp('chrome-fetch-continue', args);
+    case 'chrome_fetch_fail':            return callOp('chrome-fetch-fail', args);
+    case 'chrome_fetch_fulfill':         return callOp('chrome-fetch-fulfill', args);
+    case 'chrome_console_subscribe':     return callOp('chrome-console-subscribe');
+    case 'chrome_console_recent':        return callOp('chrome-console-recent', args);
+    case 'chrome_a11y_enable':           return callOp('chrome-a11y-enable');
+    case 'chrome_a11y_tree':             return callOp('chrome-a11y-tree');
+    case 'chrome_a11y_query':            return callOp('chrome-a11y-query', args);
+    case 'chrome_css_computed':          return callOp('chrome-css-computed', args);
+    case 'chrome_css_matched':           return callOp('chrome-css-matched', args);
+
+    // ── Phase 5 · Perf / Security / SW / Browser ────────────────
+    case 'chrome_perf_metrics':          return callOp('chrome-perf-metrics');
+    case 'chrome_perf_cpu_start':        return callOp('chrome-perf-cpu-start');
+    case 'chrome_perf_cpu_stop':         return callOp('chrome-perf-cpu-stop');
+    case 'chrome_perf_trace_start':      return callOp('chrome-perf-trace-start', args);
+    case 'chrome_perf_trace_stop':       return callOp('chrome-perf-trace-stop');
+    case 'chrome_security_status':       return callOp('chrome-security-status');
+    case 'chrome_sw_enable':              return callOp('chrome-sw-enable');
+    case 'chrome_sw_unregister':         return callOp('chrome-sw-unregister', args);
+    case 'chrome_sw_stop':               return callOp('chrome-sw-stop', args);
+    case 'chrome_browser_grant_perms':   return callOp('chrome-browser-grant-perms', args);
+    case 'chrome_browser_reset_perms':   return callOp('chrome-browser-reset-perms', args);
+    case 'chrome_browser_downloads':     return callOp('chrome-browser-downloads', args);
+
+    // ── Convenience ─────────────────────────────────────────────
+    case 'chrome_open_internal':         return callOp('chrome-open-internal', args);
 
     default: throw new Error('Unknown tool: ' + name);
   }
