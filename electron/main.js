@@ -48,6 +48,20 @@ const { spawn } = require('child_process');
 // Dev: not packaged AND not explicitly forced to production
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production';
 
+// ── Chrome DevTools Protocol — enable the embedded Chromium for control ────
+// This makes the WebContentsView (and the rest of Electron's webContents)
+// reachable via http://127.0.0.1:9222 — the standard CDP endpoint. The
+// chrome-controller.js module connects here via puppeteer-core to drive the
+// SAME browser the user sees in the panel. One browser, two control surfaces:
+//   - in-process IPC via electronAPI.browser.* (the `browser_*` MCP tools)
+//   - external CDP over localhost:9222 (the `chrome_*` MCP tools)
+//
+// MUST be set BEFORE app is ready. The port is localhost-only by default,
+// so we're not exposing anything to the network. Anyone on the local box
+// CAN connect though — for stricter isolation we could use a random port
+// (port 0) + read it from Electron's DevToolsActivePort file.
+app.commandLine.appendSwitch('remote-debugging-port', '9222');
+
 // ── Single-instance lock ────────────────────────────────────────────────────
 // Prevents multiple Electron processes from sharing the same userData/Cache
 // directory, which causes "Unable to move the cache: Access denied" on Windows
@@ -873,6 +887,20 @@ ipcMain.handle('browser:create', (event, opts = {}) => {
   if (!ownerWin) return { ok: false, error: 'No owner window' };
 
   const sess = electronSession.fromPartition(BROWSER_PARTITION);
+
+  // ── Load CCM companion extension (Phase 6) into the embedded browser ────
+  // The companion exposes chrome.tabGroups/sessions/history/bookmarks/etc to
+  // the chrome_ext_* MCP tools. NOTE: Electron supports a SUBSET of chrome.*
+  // APIs — most tabs/storage/runtime ones work; some (chrome.management,
+  // chrome.search) may fail at runtime with "API not supported in Electron".
+  // The tool surface stays the same — failures surface as a clean error.
+  if (!sess._ccmExtLoaded) {
+    sess._ccmExtLoaded = true;
+    const extPath = path.join(__dirname, 'chrome-companion-ext');
+    sess.loadExtension(extPath, { allowFileAccess: true })
+      .then(ext => console.log('[ccm-companion] loaded extension', ext.id, '→', extPath))
+      .catch(e => console.warn('[ccm-companion] loadExtension failed:', e.message));
+  }
 
   // ── Indistinguishability from real Chrome ───────────────────────────────
   // Many sites (Google OAuth, banks, ad platforms) sniff the UA for "Electron"
