@@ -919,6 +919,36 @@ const TOOLS = [
   // ── Notifications ──────────────────────────────────────────────────────
   { name: 'chrome_ext_notify', description: 'Show a native OS notification (via Chrome) — appears in system tray.',
     inputSchema: { type: 'object', properties: { notificationId: { type: 'string' }, options: { type: 'object', properties: { type: { type: 'string', enum: ['basic','image','list','progress'] }, iconUrl: { type: 'string' }, title: { type: 'string' }, message: { type: 'string' } }, required: ['type', 'iconUrl', 'title', 'message'] } }, required: ['options'], additionalProperties: false } },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 7 — Closed-Chrome file/registry editors
+  // The ~5% of Chrome settings that have NO CDP and NO extension-API
+  // surface. Requires Chrome to be CLOSED (auto-asserts; clean error if
+  // it's running). Every write creates a sibling .bak.<timestamp>.
+  // ════════════════════════════════════════════════════════════════════════
+
+  { name: 'chrome_files_info', description: 'Get paths to Claude\'s Chrome profile files (Local State, Preferences, Bookmarks JSON) + running state. Use this to understand the layout before editing.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_flags_list', description: 'List the contents of browser.enabled_labs_experiments from Local State (each entry like "enable-quic@1"). This is the file-level chrome://flags state.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_flags_set', description: 'Overwrite the full list of enabled labs experiments (chrome://flags). Auto-backups Local State first. Chrome MUST be closed. Format: ["flag-name@1", "another-flag@2"].',
+    inputSchema: { type: 'object', properties: { flags: { type: 'array', items: { type: 'string' } } }, required: ['flags'], additionalProperties: false } },
+  { name: 'chrome_prefs_get', description: 'Read one preference value by dotted path (e.g. "browser.show_home_button", "homepage", "session.startup_urls"). Chrome can be running for reads.',
+    inputSchema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'], additionalProperties: false } },
+  { name: 'chrome_prefs_set', description: 'Set or delete one preference by dotted path. value=null deletes the key. Auto-backups Preferences first. Chrome MUST be closed.',
+    inputSchema: { type: 'object', properties: { key: { type: 'string' }, value: {} }, required: ['key'], additionalProperties: false } },
+  { name: 'chrome_prefs_list', description: 'List top-level Preferences keys (browser, profile, session, extensions, sync, ...) for orientation.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_bookmarks_json_read', description: 'Read Chrome\'s raw Bookmarks JSON (full bookmark tree). Read-safe while Chrome runs.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_bookmarks_json_write', description: 'Overwrite Chrome\'s Bookmarks JSON with a new tree. Auto-backups first. Chrome MUST be closed. Pass the full tree object as data.',
+    inputSchema: { type: 'object', properties: { data: { type: 'object' } }, required: ['data'], additionalProperties: false } },
+  { name: 'chrome_policy_list', description: 'Enumerate Chrome group policies set under HKCU\\Software\\Policies\\Google\\Chrome (Windows-only). Read-only.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'chrome_policy_set', description: 'Set a Chrome group policy in HKCU (Windows-only). Examples: HomepageLocation, DefaultSearchProviderEnabled, RestoreOnStartup. Restart required.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' }, value: {}, type: { type: 'string', enum: ['REG_SZ', 'REG_DWORD', 'REG_MULTI_SZ', 'REG_BINARY'] } }, required: ['name', 'value'], additionalProperties: false } },
+  { name: 'chrome_policy_delete', description: 'Delete a Chrome group policy from HKCU (Windows-only).',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'], additionalProperties: false } },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
@@ -1111,6 +1141,19 @@ async function execTool(name, args = {}) {
     case 'chrome_ext_system_storage':    return callOp('chrome-ext-system-storage');
     case 'chrome_ext_top_sites':         return callOp('chrome-ext-top-sites');
     case 'chrome_ext_notify':            return callOp('chrome-ext-notify', args);
+
+    // ── Phase 7 · Closed-Chrome file/registry editors ───────────
+    case 'chrome_files_info':            return callOp('chrome-files-info');
+    case 'chrome_flags_list':            return callOp('chrome-flags-list');
+    case 'chrome_flags_set':             return callOp('chrome-flags-set', args);
+    case 'chrome_prefs_get':             return callOp('chrome-prefs-get', args);
+    case 'chrome_prefs_set':             return callOp('chrome-prefs-set', args);
+    case 'chrome_prefs_list':            return callOp('chrome-prefs-list');
+    case 'chrome_bookmarks_json_read':   return callOp('chrome-bookmarks-json-read');
+    case 'chrome_bookmarks_json_write':  return callOp('chrome-bookmarks-json-write', args);
+    case 'chrome_policy_list':           return callOp('chrome-policy-list');
+    case 'chrome_policy_set':            return callOp('chrome-policy-set', args);
+    case 'chrome_policy_delete':         return callOp('chrome-policy-delete', args);
 
     default: throw new Error('Unknown tool: ' + name);
   }
