@@ -193,6 +193,85 @@ async function _handle(req, res) {
       // Generic CDP escape hatch
       case 'chrome-cdp-raw':             result = await chrome.cdpRaw(body); break;
 
+      // ── Phase 2 · Network ────────────────────────────────────
+      case 'chrome-net-cookies-get':       result = await chrome.networkGetCookies(body); break;
+      case 'chrome-net-cookie-set':        result = await chrome.networkSetCookie(body); break;
+      case 'chrome-net-cookies-delete':    result = await chrome.networkDeleteCookies(body); break;
+      case 'chrome-net-cookies-clear-all': result = await chrome.networkClearAllCookies(); break;
+      case 'chrome-net-extra-headers':     result = await chrome.networkSetExtraHeaders(body); break;
+      case 'chrome-net-block-urls':        result = await chrome.networkSetBlockedURLs(body); break;
+      case 'chrome-net-user-agent':        result = await chrome.networkSetUserAgent(body); break;
+
+      // ── Phase 2 · Storage ────────────────────────────────────
+      case 'chrome-storage-clear-origin':  result = await chrome.storageClearForOrigin(body); break;
+      case 'chrome-storage-usage':         result = await chrome.storageGetUsage(body); break;
+      case 'chrome-storage-cookies':       result = await chrome.storageGetCookies(body); break;
+      case 'chrome-domstorage-get':        result = await chrome.domStorageGetItems(body); break;
+      case 'chrome-domstorage-set':        result = await chrome.domStorageSetItem(body); break;
+      case 'chrome-domstorage-remove':     result = await chrome.domStorageRemoveItem(body); break;
+      case 'chrome-domstorage-clear':      result = await chrome.domStorageClear(body); break;
+      case 'chrome-idb-list':              result = await chrome.indexedDbList(body); break;
+      case 'chrome-idb-delete':            result = await chrome.indexedDbDelete(body); break;
+      case 'chrome-cache-list':            result = await chrome.cacheList(body); break;
+      case 'chrome-cache-delete':          result = await chrome.cacheDelete(body); break;
+
+      // ── Phase 2 · Emulation ──────────────────────────────────
+      case 'chrome-emulate-ua':            result = await chrome.emulateUserAgent(body); break;
+      case 'chrome-emulate-geo':           result = await chrome.emulateGeolocation(body); break;
+      case 'chrome-emulate-geo-clear':     result = await chrome.emulateClearGeolocation(); break;
+      case 'chrome-emulate-timezone':      result = await chrome.emulateTimezone(body); break;
+      case 'chrome-emulate-locale':        result = await chrome.emulateLocale(body); break;
+      case 'chrome-emulate-device':        result = await chrome.emulateDevice(body); break;
+      case 'chrome-emulate-device-clear':  result = await chrome.emulateClearDevice(); break;
+      case 'chrome-emulate-color-scheme':  result = await chrome.emulateColorScheme(body); break;
+      case 'chrome-emulate-network':       result = await chrome.emulateNetwork(body); break;
+      case 'chrome-emulate-cpu':           result = await chrome.emulateCpuThrottle(body); break;
+      case 'chrome-emulate-vision':        result = await chrome.emulateVisionDeficiency(body); break;
+
+      // ── Phase 3 · Extensions / Autofill / WebAuthn ───────────
+      case 'chrome-ext-load-unpacked':     result = await chrome.extensionsLoadUnpacked(body); break;
+      case 'chrome-ext-uninstall':         result = await chrome.extensionsUninstall(body); break;
+      case 'chrome-autofill-trigger':      result = await chrome.autofillTrigger(body); break;
+      case 'chrome-autofill-set-addr':     result = await chrome.autofillSetAddresses(body); break;
+      case 'chrome-webauthn-enable':       result = await chrome.webauthnEnable(); break;
+      case 'chrome-webauthn-add':          result = await chrome.webauthnAddAuthenticator(body); break;
+      case 'chrome-webauthn-remove':       result = await chrome.webauthnRemoveAuthenticator(body); break;
+      case 'chrome-webauthn-creds':        result = await chrome.webauthnGetCredentials(body); break;
+      case 'chrome-webauthn-clear-creds':  result = await chrome.webauthnClearCredentials(body); break;
+      case 'chrome-webauthn-verify':       result = await chrome.webauthnSetUserVerified(body); break;
+
+      // ── Phase 4 · Fetch / Console / A11y / CSS ───────────────
+      case 'chrome-fetch-enable':          result = await chrome.fetchEnable(body); break;
+      case 'chrome-fetch-disable':         result = await chrome.fetchDisable(); break;
+      case 'chrome-fetch-pending':         result = await chrome.fetchListPending(); break;
+      case 'chrome-fetch-continue':        result = await chrome.fetchContinue(body); break;
+      case 'chrome-fetch-fail':            result = await chrome.fetchFail(body); break;
+      case 'chrome-fetch-fulfill':         result = await chrome.fetchFulfill(body); break;
+      case 'chrome-console-subscribe':     result = await chrome.consoleSubscribe(); break;
+      case 'chrome-console-recent':        result = await chrome.consoleGetRecent(body); break;
+      case 'chrome-a11y-enable':           result = await chrome.a11yEnable(); break;
+      case 'chrome-a11y-tree':             result = await chrome.a11yGetFullTree(); break;
+      case 'chrome-a11y-query':            result = await chrome.a11yQueryByRole(body); break;
+      case 'chrome-css-computed':          result = await chrome.cssGetComputed(body); break;
+      case 'chrome-css-matched':           result = await chrome.cssGetMatched(body); break;
+
+      // ── Phase 5 · Perf / Security / SW / Browser ─────────────
+      case 'chrome-perf-metrics':          result = await chrome.perfGetMetrics(); break;
+      case 'chrome-perf-cpu-start':        result = await chrome.perfStartCpuProfile(); break;
+      case 'chrome-perf-cpu-stop':         result = await chrome.perfStopCpuProfile(); break;
+      case 'chrome-perf-trace-start':      result = await chrome.perfStartTrace(body); break;
+      case 'chrome-perf-trace-stop':       result = await chrome.perfStopTrace(); break;
+      case 'chrome-security-status':       result = await chrome.securityGetStatus(); break;
+      case 'chrome-sw-enable':             result = await chrome.swEnable(); break;
+      case 'chrome-sw-unregister':         result = await chrome.swUnregister(body); break;
+      case 'chrome-sw-stop':               result = await chrome.swStop(body); break;
+      case 'chrome-browser-grant-perms':   result = await chrome.browserGrantPermissions(body); break;
+      case 'chrome-browser-reset-perms':   result = await chrome.browserResetPermissions(body); break;
+      case 'chrome-browser-downloads':     result = await chrome.browserSetDownloadBehavior(body); break;
+
+      // ── Convenience ──────────────────────────────────────────
+      case 'chrome-open-internal':         result = await chrome.openInternalPage(body); break;
+
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }
     const ms = Date.now() - t0;
