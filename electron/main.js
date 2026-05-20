@@ -287,9 +287,20 @@ function createWindow() {
     }
   });
 
-  // External links → default browser
+  // External links → default browser. Allowlist URL schemes to prevent
+  // ms-msdt:, vscode:, file:, javascript:, etc. driving shell.openExternal from
+  // any iframe or XSS context. Only http(s) and mailto are user-visible web links.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:') {
+        shell.openExternal(url);
+      } else {
+        console.warn('[security] setWindowOpenHandler blocked scheme:', u.protocol, url);
+      }
+    } catch (_) {
+      // malformed URL — ignore
+    }
     return { action: 'deny' };
   });
 
@@ -734,11 +745,52 @@ const FS_IGNORE = new Set([
   'coverage', '__pycache__', '.pytest_cache', '.parcel-cache',
 ]);
 
+// Extensions that should NEVER be opened via shell.openPath — these would
+// execute as a binary on Windows (ShellExecute) and on Unix (xdg-open script types).
+const SHELL_OPEN_DENY_EXT = new Set([
+  '.exe','.bat','.cmd','.com','.scr','.msi','.msp','.ps1','.psm1','.psd1',
+  '.vbs','.vbe','.js','.jse','.wsf','.wsh','.hta','.lnk','.reg','.inf',
+  '.cpl','.scf','.sh','.bash','.zsh','.fish','.command','.tool',
+  '.jar','.app','.workflow','.action',
+]);
+
+// Dynamic root allowlist. fs:* handlers only operate on paths under one of
+// these roots. Updated when the user changes project cwd or starts apercu server.
+function _fsRoots() {
+  const roots = [FS_ROOT];
+  if (global._projectCwd) roots.push(path.resolve(global._projectCwd));
+  if (_apercuServingDir)  roots.push(path.resolve(_apercuServingDir));
+  return roots;
+}
+
+// Returns the canonical resolved path if `p` (resolved + realpath) is contained
+// within one of the allowed roots, or null if outside.
+function _safeFsPath(p, { allowMissing = false } = {}) {
+  try {
+    const lex = path.resolve(p);
+    // If the file exists, realpath to defeat symlink escapes. Otherwise fall
+    // back to lex (used by fs:writeText creating a new file).
+    let real;
+    try { real = fs.realpathSync(lex); }
+    catch (e) {
+      if (!allowMissing) return null;
+      real = lex; // file doesn't exist yet — check lexical only
+    }
+    for (const r of _fsRoots()) {
+      const realRoot = (() => { try { return fs.realpathSync(r); } catch { return r; } })();
+      if (real === realRoot || real.startsWith(realRoot + path.sep)) return real;
+    }
+    return null;
+  } catch (_) { return null; }
+}
+
 ipcMain.handle('fs:root', () => FS_ROOT);
 
 ipcMain.handle('fs:mkdir', async (_, dirPath) => {
+  const safe = _safeFsPath(dirPath, { allowMissing: true });
+  if (!safe) return { ok: false, error: 'Forbidden: path outside allowed roots' };
   try {
-    fs.mkdirSync(path.resolve(dirPath), { recursive: true });
+    fs.mkdirSync(safe, { recursive: true });
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -746,43 +798,46 @@ ipcMain.handle('fs:mkdir', async (_, dirPath) => {
 });
 
 ipcMain.handle('fs:list', async (_, dirPath) => {
-  const resolved = path.resolve(dirPath || FS_ROOT);
+  const safe = _safeFsPath(dirPath || FS_ROOT);
+  if (!safe) return { ok: false, error: 'Forbidden: path outside allowed roots' };
   try {
-    const raw = await fs.promises.readdir(resolved, { withFileTypes: true });
+    const raw = await fs.promises.readdir(safe, { withFileTypes: true });
     const entries = raw
       .filter(e => !FS_IGNORE.has(e.name))
       .map(e => ({
         name: e.name,
         type: e.isDirectory() ? 'dir' : 'file',
-        path: path.join(resolved, e.name),
+        path: path.join(safe, e.name),
       }))
       .sort((a, b) => {
         if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
         return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
       });
-    return { ok: true, entries, dir: resolved };
+    return { ok: true, entries, dir: safe };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 });
 
 ipcMain.handle('fs:read', async (_, filePath) => {
-  const resolved = path.resolve(filePath);
+  const safe = _safeFsPath(filePath);
+  if (!safe) return { ok: false, error: 'Forbidden: path outside allowed roots' };
   try {
-    const stat = await fs.promises.stat(resolved);
+    const stat = await fs.promises.stat(safe);
     if (stat.size > 2 * 1024 * 1024) return { ok: false, error: 'File too large (>2 MB)' };
-    const content = await fs.promises.readFile(resolved, 'utf8');
-    return { ok: true, content, path: resolved };
+    const content = await fs.promises.readFile(safe, 'utf8');
+    return { ok: true, content, path: safe };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 });
 
 ipcMain.handle('fs:writeText', async (_, filePath, content) => {
-  const resolved = path.resolve(filePath);
+  const safe = _safeFsPath(filePath, { allowMissing: true });
+  if (!safe) return { ok: false, error: 'Forbidden: path outside allowed roots' };
   try {
-    fs.mkdirSync(path.dirname(resolved), { recursive: true });
-    await fs.promises.writeFile(resolved, content, 'utf8');
+    fs.mkdirSync(path.dirname(safe), { recursive: true });
+    await fs.promises.writeFile(safe, content, 'utf8');
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -790,8 +845,10 @@ ipcMain.handle('fs:writeText', async (_, filePath, content) => {
 });
 
 ipcMain.handle('fs:exists', async (_, filePath) => {
+  const safe = _safeFsPath(filePath, { allowMissing: true });
+  if (!safe) return { exists: false };
   try {
-    const stat = await fs.promises.stat(path.resolve(filePath));
+    const stat = await fs.promises.stat(safe);
     return { exists: true, isDir: stat.isDirectory(), isFile: stat.isFile() };
   } catch {
     return { exists: false };
@@ -799,9 +856,14 @@ ipcMain.handle('fs:exists', async (_, filePath) => {
 });
 
 ipcMain.handle('shell:open', async (_, filePath) => {
+  const safe = _safeFsPath(filePath);
+  if (!safe) return { ok: false, error: 'Forbidden: path outside allowed roots' };
+  const ext = path.extname(safe).toLowerCase();
+  if (SHELL_OPEN_DENY_EXT.has(ext)) {
+    return { ok: false, error: `Refused: ${ext} is an executable type` };
+  }
   try {
-    const resolved = path.resolve(filePath);
-    await shell.openPath(resolved);
+    await shell.openPath(safe);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -809,8 +871,17 @@ ipcMain.handle('shell:open', async (_, filePath) => {
 });
 
 ipcMain.handle('shell:open-url', async (_, url) => {
-  try { await shell.openExternal(url); return { ok: true }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  // Allowlist URL schemes — no ms-msdt:, vscode:, file:, javascript:, etc.
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:' && u.protocol !== 'mailto:') {
+      return { ok: false, error: `Refused: ${u.protocol} scheme not allowed` };
+    }
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 
 // Native folder picker — returns the selected path or null if cancelled
@@ -931,16 +1002,29 @@ ipcMain.handle('sessions:save-meta', async (_, meta) => {
   }
 });
 
+// Session IDs must be safe — no path separators, no traversal, no weird chars.
+// Anything outside this character class is rejected before touching the FS.
+const _SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+function _safeSessionPath(id) {
+  if (typeof id !== 'string' || !_SESSION_ID_RE.test(id)) return null;
+  const base = path.basename(id) + '.json';
+  const filePath = path.resolve(path.join(SESSIONS_ROOT, base));
+  if (!filePath.startsWith(path.resolve(SESSIONS_ROOT) + path.sep)) return null;
+  return filePath;
+}
+
 ipcMain.handle('sessions:load-msgs', (_, id) => {
   sessEnsureRoot();
-  const filePath = path.join(SESSIONS_ROOT, `${id}.json`);
+  const filePath = _safeSessionPath(id);
+  if (!filePath) return [];
   try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); }
   catch { return []; }
 });
 
 ipcMain.handle('sessions:save-msgs', async (_, id, msgs) => {
   sessEnsureRoot();
-  const filePath = path.join(SESSIONS_ROOT, `${id}.json`);
+  const filePath = _safeSessionPath(id);
+  if (!filePath) return { ok: false, error: 'Invalid session id' };
   try {
     fs.writeFileSync(filePath, JSON.stringify(msgs), 'utf8');
     return { ok: true };
@@ -951,7 +1035,8 @@ ipcMain.handle('sessions:save-msgs', async (_, id, msgs) => {
 
 ipcMain.handle('sessions:delete-msgs', async (_, id) => {
   sessEnsureRoot();
-  const filePath = path.join(SESSIONS_ROOT, `${id}.json`);
+  const filePath = _safeSessionPath(id);
+  if (!filePath) return { ok: false, error: 'Invalid session id' };
   try { fs.unlinkSync(filePath); } catch {}
   return { ok: true };
 });
@@ -1191,6 +1276,42 @@ ipcMain.handle('git:action', async (_, { action, cwd, args = [] }) => {
 /* ── GitHub OAuth ──────────────────────────────────────────────────────────── */
 // Device Flow client ID for Claude Code Mods
 const GH_CLIENT_ID = process.env.GH_OAUTH_CLIENT_ID || '178c6fc778ccc68e1d6a'; // gh-cli public id as default
+
+// ── GitHub PAT storage (safeStorage-encrypted, lives in userData) ───────────
+// Stored in main only — never sent to renderer at rest. Decrypted on demand.
+const { safeStorage } = require('electron');
+const GH_PAT_FILE = path.join(app.getPath('userData'), 'gh-pat.enc');
+
+function _ghReadToken() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return '';
+    if (!fs.existsSync(GH_PAT_FILE)) return '';
+    const enc = fs.readFileSync(GH_PAT_FILE);
+    return safeStorage.decryptString(enc) || '';
+  } catch (_) { return ''; }
+}
+
+ipcMain.handle('github:token-has', () => !!_ghReadToken());
+ipcMain.handle('github:token-get', () => _ghReadToken());
+ipcMain.handle('github:token-set', (_, tok) => {
+  try {
+    if (typeof tok !== 'string' || !tok.length) return { ok: false, error: 'Empty token' };
+    if (!safeStorage.isEncryptionAvailable()) {
+      // Encryption unavailable — write plaintext (Linux without keyring, etc.)
+      fs.writeFileSync(GH_PAT_FILE, tok, 'utf8');
+      return { ok: true, encrypted: false };
+    }
+    const enc = safeStorage.encryptString(tok);
+    fs.writeFileSync(GH_PAT_FILE, enc);
+    return { ok: true, encrypted: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+ipcMain.handle('github:token-clear', () => {
+  try { if (fs.existsSync(GH_PAT_FILE)) fs.unlinkSync(GH_PAT_FILE); } catch (_) {}
+  return { ok: true };
+});
 
 ipcMain.handle('github:auth', async (_, action) => {
   const { execFileSync } = require('child_process');
@@ -1455,7 +1576,15 @@ ipcMain.handle('screenshots:capture-region', () => {
       frame: false, transparent: true,
       alwaysOnTop: true, skipTaskbar: true,
       fullscreen: false, resizable: false,
-      webPreferences: { nodeIntegration: true, contextIsolation: false },
+      // SECURITY: contextIsolation:true + minimal preload exposing only the
+      // two whitelisted IPC channels. If the overlay HTML/JS is ever tampered
+      // with, the attacker cannot reach Node or the broader IPC bus.
+      webPreferences: {
+        nodeIntegration:   false,
+        contextIsolation:  true,
+        sandbox:           true,
+        preload:           path.join(__dirname, 'screenshot-overlay-preload.js'),
+      },
     });
     _overlayWin.loadFile(path.join(__dirname, 'screenshot-overlay.html'));
     _overlayWin.setAlwaysOnTop(true, 'screen-saver');
@@ -1648,29 +1777,35 @@ ipcMain.handle('apercu:serve', async (event, folderPath) => {
   const path = require('path');
   const fs   = require('fs');
 
-  // If no folder given, open a system folder picker
-  if (!folderPath) {
-    const win = BrowserWindow.fromWebContents(event.sender);
-    const res = await dialog.showOpenDialog(win, {
-      title:      'Select folder to serve in Preview',
-      properties: ['openDirectory'],
-    });
-    if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true };
-    folderPath = res.filePaths[0];
-  }
+  // SECURITY: never trust a renderer-supplied folder path. The renderer can
+  // ASK to open a picker, but the actual folder must be confirmed by the user.
+  // This blocks XSS chains from silently exposing arbitrary host paths.
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const res = await dialog.showOpenDialog(win, {
+    title:       'Select folder to serve in Preview',
+    defaultPath: folderPath || undefined, // pre-select if renderer suggested one
+    properties:  ['openDirectory'],
+  });
+  if (res.canceled || !res.filePaths.length) return { ok: false, canceled: true };
+  folderPath = res.filePaths[0];
 
   _apercuStopServer();
+
+  // Realpath the base now so we can compare against realpaths of requested
+  // files. This defeats symlink-escape attacks where a symlink inside the
+  // served folder points outside it.
+  let baseReal;
+  try { baseReal = fs.realpathSync(path.resolve(folderPath)); }
+  catch (e) { return { ok: false, error: 'Folder not accessible: ' + e.message }; }
 
   return new Promise(resolve => {
     const server = http.createServer((req, res) => {
       let urlPath = decodeURIComponent(req.url.split('?')[0]);
       if (urlPath === '/') urlPath = '/index.html';
 
-      // Resolve & guard against path traversal.
-      // Must add path.sep so "base-evil/foo" doesn't pass startsWith("base") check.
-      const base     = path.resolve(folderPath);
-      const filePath = path.resolve(base, '.' + urlPath);
-      if (filePath !== base && !filePath.startsWith(base + path.sep)) {
+      // Lexical containment check first (cheap)
+      const filePath = path.resolve(baseReal, '.' + urlPath);
+      if (filePath !== baseReal && !filePath.startsWith(baseReal + path.sep)) {
         res.writeHead(403); res.end('Forbidden'); return;
       }
 
@@ -1678,7 +1813,14 @@ ipcMain.handle('apercu:serve', async (event, folderPath) => {
         fs.stat(fp, (err, stat) => {
           if (err)            { cb(null); return; }
           if (stat.isDirectory()) { tryFile(path.join(fp, 'index.html'), cb); return; }
-          fs.readFile(fp, (e, data) => cb(e ? null : { data, fp }));
+          // Realpath check to follow symlinks — fail if target leaves base
+          fs.realpath(fp, (e2, real) => {
+            if (e2) { cb(null); return; }
+            if (real !== baseReal && !real.startsWith(baseReal + path.sep)) {
+              cb(null); return;
+            }
+            fs.readFile(real, (e3, data) => cb(e3 ? null : { data, fp: real }));
+          });
         });
       };
 
@@ -1686,9 +1828,11 @@ ipcMain.handle('apercu:serve', async (event, folderPath) => {
         if (!result) { res.writeHead(404, {'Content-Type':'text/plain'}); res.end('Not found'); return; }
         const ext  = path.extname(result.fp).toLowerCase();
         const mime = _MIME[ext] || 'application/octet-stream';
+        // No CORS wildcard — only the Aperçu iframe (same loopback origin)
+        // should be able to fetch resources. Other browser tabs cannot read.
         res.writeHead(200, {
           'Content-Type':                mime,
-          'Access-Control-Allow-Origin': '*',
+          'X-Content-Type-Options':      'nosniff',
           'Cache-Control':               'no-cache',
         });
         res.end(result.data);

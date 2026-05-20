@@ -3,6 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <!-- Content-Security-Policy: blocks inline event handlers (onclick=, onerror=)
+       injected via XSS, blocks remote script loading, and restricts where the
+       renderer can connect / load iframes from. 'unsafe-inline' for style is
+       required by Tailwind + dynamic inline styles in the app. -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob: https:;
+    font-src 'self' data:;
+    connect-src 'self' https: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;
+    frame-src 'self' http://localhost:* http://127.0.0.1:* https:;
+    object-src 'none';
+    base-uri 'self';
+    form-action 'none';
+  " />
   <title>Claude Code — Sidebar Redesign</title>
   <!-- Tailwind built locally by Vite + PostCSS — no CDN fetch on launch -->
   <link rel="stylesheet" href="./tailwind.css" />
@@ -399,11 +415,8 @@
     </div>
   </div>
 
-  <!-- Error capture -->
-  <script>
-    window.__errs = [];
-    window.addEventListener('error', e => window.__errs.push({msg: e.message, src: e.filename, line: e.lineno, col: e.colno}));
-  </script>
+  <!-- Error capture (CSP-friendly: external script, no inline JS) -->
+  <script src="./error-capture.js"></script>
   <script src="./icons.js"></script>
   <script src="./toast.js"></script>
   <script src="./xterm.js"></script>

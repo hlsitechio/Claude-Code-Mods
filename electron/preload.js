@@ -232,6 +232,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     auth:        (action)      => ipcRenderer.invoke('github:auth',        action),
     devicePoll:  (deviceCode)  => ipcRenderer.invoke('github:device-poll', { deviceCode }),
     openUrl:     (url)         => ipcRenderer.invoke('shell:open-url',     url),
+    // PAT storage — token encrypted via safeStorage in main process
+    token: {
+      has:    () => ipcRenderer.invoke('github:token-has'),
+      get:    () => ipcRenderer.invoke('github:token-get'),
+      set:    (tok) => ipcRenderer.invoke('github:token-set', tok),
+      clear:  () => ipcRenderer.invoke('github:token-clear'),
+    },
   },
 
   screenshots: {
