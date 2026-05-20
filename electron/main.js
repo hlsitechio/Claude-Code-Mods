@@ -379,54 +379,74 @@ app.whenReady().then(async () => {
   });
 });
 
-// Register our MCP server in ~/.claude/settings.json so Claude Code picks it
-// up automatically. We MERGE — never overwrite — the user's existing config.
+// Register our MCP server in the CONFIG FILE Claude Code 2.x actually reads.
+// Despite the naming, that's `~/.claude.json` (singular file in the home
+// directory, NOT `~/.claude/settings.json` which is the older format /
+// permissions config). We MERGE — never overwrite — the user's existing
+// config (~/.claude.json typically has 40KB+ of Claude Code internal state).
+//
+// We write to BOTH locations: the new `~/.claude.json` (where `/mcp` reads)
+// AND the legacy `~/.claude/settings.json` (for older CLI versions). The
+// permissions file is preserved untouched if it has no mcpServers entry.
 function _registerBrowserMcp() {
+  const home = process.env.HOME || process.env.USERPROFILE || require('os').homedir();
+  const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+  const mcpScript = path.resolve(__dirname, '..', 'bin', 'browser-mcp.mjs');
+
+  // Resolve `node` binary so the entry survives Electron upgrades.
+  // `process.execPath` inside Electron points at the electron binary which
+  // can also run .mjs, but plain `node` is more portable and matches what
+  // the user expects when they read the config.
+  let nodeBin = process.execPath;
   try {
-    const home = process.env.HOME || process.env.USERPROFILE || require('os').homedir();
-    const dir  = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-    const settingsPath = path.join(dir, 'settings.json');
-    const mcpScript    = path.resolve(__dirname, '..', 'bin', 'browser-mcp.mjs');
+    const which = require('child_process')
+      .execFileSync(process.platform === 'win32' ? 'where' : 'which', ['node'], { encoding: 'utf8' })
+      .split(/\r?\n/)[0].trim();
+    if (which) nodeBin = which;
+  } catch (_) { /* keep process.execPath as fallback */ }
 
-    let settings = {};
-    if (fs.existsSync(settingsPath)) {
-      try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); }
-      catch (e) {
-        console.warn('[browser-mcp] settings.json is malformed; refusing to clobber it.');
-        return;
+  const desired = {
+    command: nodeBin,
+    args:    [mcpScript],
+    env:     {},
+  };
+
+  // Targets to keep in sync. The primary is `~/.claude.json` — that's what
+  // Claude Code 2.x reads. The secondary is `~/.claude/settings.json` for
+  // older versions / project tooling that still looks there.
+  const targets = [
+    path.join(home, '.claude.json'),
+    path.join(claudeDir, 'settings.json'),
+  ];
+
+  for (const target of targets) {
+    try {
+      let cfg = {};
+      if (fs.existsSync(target)) {
+        try { cfg = JSON.parse(fs.readFileSync(target, 'utf8')); }
+        catch (e) {
+          console.warn(`[browser-mcp] ${target} is malformed; refusing to clobber it.`);
+          continue;
+        }
       }
+      cfg.mcpServers = cfg.mcpServers || {};
+      const existing = cfg.mcpServers['ccm-browser'];
+      const isCurrent =
+        existing &&
+        Array.isArray(existing.args) &&
+        existing.args[0] === mcpScript &&
+        existing.command === desired.command;
+      if (isCurrent) {
+        console.log(`[browser-mcp] entry already current in ${target}`);
+        continue;
+      }
+      cfg.mcpServers['ccm-browser'] = desired;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, JSON.stringify(cfg, null, 2), 'utf8');
+      console.log(`[browser-mcp] registered in ${target}`);
+    } catch (e) {
+      console.warn(`[browser-mcp] could not write ${target}:`, e.message);
     }
-    settings.mcpServers = settings.mcpServers || {};
-    const existing = settings.mcpServers['ccm-browser'];
-    const desired = {
-      command: process.execPath, // node binary OR Electron exec — both can run plain .mjs
-      args:    [mcpScript],
-      env:     {},
-    };
-    // Only rewrite if the script path changed (e.g. user moved CCM)
-    if (
-      !existing ||
-      !Array.isArray(existing.args) ||
-      existing.args[0] !== mcpScript ||
-      existing.command !== desired.command
-    ) {
-      // Prefer plain `node` if available — keeps the entry portable across
-      // CCM upgrades (process.execPath inside Electron points at the
-      // electron binary). Fall back to electron's exec if node isn't found.
-      try {
-        const which = require('child_process').execFileSync(process.platform === 'win32' ? 'where' : 'which', ['node'], { encoding: 'utf8' }).split(/\r?\n/)[0].trim();
-        if (which) desired.command = which;
-      } catch (_) { /* keep process.execPath as fallback */ }
-
-      settings.mcpServers['ccm-browser'] = desired;
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
-      console.log(`[browser-mcp] registered MCP server in ${settingsPath}`);
-    } else {
-      console.log('[browser-mcp] MCP entry already current');
-    }
-  } catch (e) {
-    console.warn('[browser-mcp] registration error:', e.message);
   }
 }
 
