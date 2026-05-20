@@ -117,6 +117,7 @@ async function launch(opts = {}) {
   const pup = _puppeteer();
   // Pipe transport beats port — only the parent process (us) can drive Chrome.
   // Headless: default false for interactive use; opts.headless = 'new' for backend tasks.
+  const companionExtPath = path.join(__dirname, 'chrome-companion-ext');
   _browser = await pup.launch({
     executablePath:    process.env.CCM_CHROME_PATH || chromePath,
     headless:          opts.headless === true ? 'new' : false,
@@ -129,6 +130,13 @@ async function launch(opts = {}) {
       '--no-default-browser-check',
       '--disable-blink-features=AutomationControlled', // hide navigator.webdriver
       '--disable-features=Translate', // avoid the Google Translate side panel
+      // Auto-load the companion MV3 extension — gives Claude access to
+      // chrome.tabGroups / sessions / history / bookmarks / downloads /
+      // management / declarativeNetRequest / search / system.* — APIs
+      // that CDP cannot reach. We deliberately DON'T pass
+      // --disable-extensions-except so the user can still install other
+      // extensions in Claude's profile (uBlock, Vimium, etc).
+      `--load-extension=${companionExtPath}`,
       ...(opts.extraArgs || []),
     ],
   });
@@ -888,6 +896,156 @@ const _ALLOWED_CHROME_PAGES = new Set([
   'bookmarks-side-panel.top-chrome', 'history-side-panel.top-chrome',
   'read-later.top-chrome', 'customize-chrome-side-panel.top-chrome',
 ]);
+// ═══════════════════════════════════════════════════════════════════════════
+// Extension-API bridge — for chrome.* APIs that CDP cannot reach
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The companion extension polls our HTTP server for jobs. Each chrome_ext_*
+// tool enqueues a job here; the extension picks it up, calls chrome.<api>,
+// and POSTs the result back. We wake the caller's promise when the result
+// arrives.
+//
+// Timeout: 15s per call. If the extension is slow / disabled / Chrome closed,
+// the call fails cleanly with "extension did not respond".
+//
+// To set up endpoint in the extension: when Chrome is up and our companion
+// is loaded, we push the endpoint info via chrome.storage.local.set() over
+// CDP (Runtime.evaluate in the extension's service worker context).
+
+const _extJobQueue   = [];                // FIFO of pending jobs awaiting the extension's poll
+const _extJobWaiters = new Map();         // jobId → { resolve, reject, timer }
+let   _extJobSeq     = 1;
+let   _extPushedEndpoint = false;
+
+async function _extPushEndpoint() {
+  // One-shot: tell the companion where to find us. Run Runtime.evaluate
+  // against the extension's service worker so the storage write happens
+  // inside the extension's storage scope.
+  if (_extPushedEndpoint || !_browser) return;
+  try {
+    const sess = await _browser.target().createCDPSession();
+    try {
+      // Find the extension service-worker target
+      await sess.send('Target.setDiscoverTargets', { discover: true });
+      const { targetInfos } = await sess.send('Target.getTargets');
+      const sw = targetInfos.find(t => t.type === 'service_worker' && t.url.includes('chrome-extension://'));
+      if (!sw) return;
+      const { sessionId } = await sess.send('Target.attachToTarget', { targetId: sw.targetId, flatten: true });
+
+      // Read endpoint info from disk (same file the MCP child reads)
+      const endpointPath = require('path').join(
+        process.env.CLAUDE_CONFIG_DIR || require('path').join(require('os').homedir(), '.claude'),
+        'ccm-browser-endpoint.json'
+      );
+      const env = JSON.parse(require('fs').readFileSync(endpointPath, 'utf8'));
+      const url   = env.url;
+      const token = env.token;
+
+      await sess.send('Runtime.evaluate', {
+        expression: `chrome.storage.local.set({ ccmEndpoint: ${JSON.stringify({ url, token })} })`,
+        awaitPromise: true,
+      }, sessionId);
+
+      _extPushedEndpoint = true;
+      console.log('[chrome-companion] pushed endpoint to extension');
+    } finally { try { await sess.detach(); } catch (_) {} }
+  } catch (e) {
+    console.warn('[chrome-companion] could not push endpoint:', e.message);
+  }
+}
+
+// Called by HTTP server when the extension polls /ext/poll
+function extPollNext() {
+  // Ensure the extension knows our endpoint (fire-and-forget; idempotent)
+  _extPushEndpoint().catch(() => {});
+  return _extJobQueue.shift() || null;
+}
+
+// Called by HTTP server when the extension POSTs /ext/result
+function extReceiveResult({ id, result }) {
+  const waiter = _extJobWaiters.get(id);
+  if (!waiter) return false;
+  _extJobWaiters.delete(id);
+  clearTimeout(waiter.timer);
+  if (result?.error) waiter.reject(new Error(result.error));
+  else waiter.resolve(result);
+  return true;
+}
+
+// Queue a job and await the extension's response
+async function _extCall(method, params = {}) {
+  if (!_browser || !_browser.isConnected()) {
+    throw new Error('Chrome is not running. Call chrome_launch first.');
+  }
+  const id = 'j-' + (_extJobSeq++);
+  _extJobQueue.push({ id, method, params });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      _extJobWaiters.delete(id);
+      reject(new Error('Companion extension did not respond within 15s (is it loaded?)'));
+    }, 15_000);
+    _extJobWaiters.set(id, { resolve, reject, timer });
+  });
+}
+
+// ── Extension-API wrappers (Phase 6) ──────────────────────────────────────
+
+// Tab groups
+async function tabGroupsQuery(opts = {})      { return _extCall('tabGroups.query', opts); }
+async function tabGroupsUpdate(opts = {})     { return _extCall('tabGroups.update', opts); }
+async function tabsGroup(opts = {})           { return _extCall('tabs.group', opts); }
+async function tabsUngroup({ tabIds } = {})   { return _extCall('tabs.ungroup', { tabIds }); }
+
+// Sessions (recently closed, restore)
+async function sessionsRecent(opts = {})      { return _extCall('sessions.getRecentlyClosed', opts); }
+async function sessionsRestore({ sessionId } = {}) { return _extCall('sessions.restore', { sessionId }); }
+
+// Reading list
+async function readingListQuery(opts = {})    { return _extCall('readingList.query', opts); }
+async function readingListAdd(opts = {})      { return _extCall('readingList.addEntry', opts); }
+async function readingListRemove(opts = {})   { return _extCall('readingList.removeEntry', opts); }
+
+// History (Chrome's own — not our profile)
+async function chromeHistorySearch(opts = {})   { return _extCall('history.search', opts); }
+async function chromeHistoryDeleteUrl(opts = {}){ return _extCall('history.deleteUrl', opts); }
+async function chromeHistoryDeleteAll()         { return _extCall('history.deleteAll', {}); }
+
+// Bookmarks (Chrome's own — not our profile)
+async function chromeBookmarksTree()           { return _extCall('bookmarks.getTree', {}); }
+async function chromeBookmarksSearch(opts = {}){ return _extCall('bookmarks.search', opts); }
+async function chromeBookmarksCreate(opts = {}){ return _extCall('bookmarks.create', opts); }
+async function chromeBookmarksRemove(opts = {}){ return _extCall('bookmarks.remove', opts); }
+
+// Downloads
+async function downloadsSearch(opts = {})       { return _extCall('downloads.search', opts); }
+async function downloadsDownload(opts = {})     { return _extCall('downloads.download', opts); }
+async function downloadsCancel(opts = {})       { return _extCall('downloads.cancel', opts); }
+async function downloadsOpen(opts = {})         { return _extCall('downloads.open', opts); }
+
+// Management (OTHER extensions)
+async function managementGetAll()               { return _extCall('management.getAll', {}); }
+async function managementSetEnabled(opts = {})  { return _extCall('management.setEnabled', opts); }
+async function managementUninstall(opts = {})   { return _extCall('management.uninstall', opts); }
+
+// declarativeNetRequest (faster than Fetch interception for "block X")
+async function dnrUpdateDynamic(opts = {})      { return _extCall('dnr.updateDynamic', opts); }
+async function dnrGetDynamic()                  { return _extCall('dnr.getDynamic', {}); }
+
+// Search
+async function searchQuery(opts = {})           { return _extCall('search.query', opts); }
+
+// System info
+async function systemCpu()                      { return _extCall('system.cpu.getInfo', {}); }
+async function systemMemory()                   { return _extCall('system.memory.getInfo', {}); }
+async function systemDisplay()                  { return _extCall('system.display.getInfo', {}); }
+async function systemStorage()                  { return _extCall('system.storage.getInfo', {}); }
+
+// Top sites
+async function topSites()                       { return _extCall('topSites.get', {}); }
+
+// Notifications (OS-level)
+async function notifyCreate(opts = {})          { return _extCall('notifications.create', opts); }
+
 async function openInternalPage({ name } = {}) {
   if (!name) throw new Error('name required (e.g. "settings", "flags", "extensions")');
   // Strip "chrome://" prefix if the caller included it
@@ -947,4 +1105,21 @@ module.exports = {
 
   // Convenience
   openInternalPage,
+
+  // Phase 6 — Extension API bridge
+  // Internal — called by HTTP server when the companion polls / posts:
+  extPollNext, extReceiveResult,
+  // Tools:
+  tabGroupsQuery, tabGroupsUpdate, tabsGroup, tabsUngroup,
+  sessionsRecent, sessionsRestore,
+  readingListQuery, readingListAdd, readingListRemove,
+  chromeHistorySearch, chromeHistoryDeleteUrl, chromeHistoryDeleteAll,
+  chromeBookmarksTree, chromeBookmarksSearch, chromeBookmarksCreate, chromeBookmarksRemove,
+  downloadsSearch, downloadsDownload, downloadsCancel, downloadsOpen,
+  managementGetAll, managementSetEnabled, managementUninstall,
+  dnrUpdateDynamic, dnrGetDynamic,
+  searchQuery,
+  systemCpu, systemMemory, systemDisplay, systemStorage,
+  topSites,
+  notifyCreate,
 };
