@@ -1555,6 +1555,25 @@ document.addEventListener('click', e => {
     if (block) openCodePreview(block.lang, block.code);
     return;
   }
+  // ── Delegated handlers for CSP-safe (no inline onclick) UI elements ──
+  // Project-badge × button — clears the active project
+  if (e.target.closest('.proj-badge__clear')) {
+    try { localStorage.removeItem('ccmod.filesRoot'); } catch (_) {}
+    window._activeProjectPath = null;
+    window.electronAPI?.project?.setCwd?.(null);
+    document.getElementById('active-project-badge')?.remove();
+    return;
+  }
+  // Extra-dir chip × button — removes one entry from __addDirs
+  const xBtn = e.target.closest('.ft-extra-dir-chip__rm');
+  if (xBtn) {
+    const i = parseInt(xBtn.dataset.extraI, 10);
+    if (!Number.isNaN(i)) {
+      window.__addDirs = (window.__addDirs || []).filter((_, j) => j !== i);
+      if (typeof _renderExtraDirs === 'function') _renderExtraDirs();
+    }
+    return;
+  }
 });
 
 // Sidebar collapse toggle (icon-only mode)
@@ -5679,6 +5698,8 @@ function renderApercuPanel() {
         <div id="apercu-vp-wrap" style="flex:1;position:relative;overflow:hidden;min-height:0">
           <iframe id="apercu-iframe"
                   src="${escapeHTML(externalUrl)}"
+                  sandbox="allow-scripts allow-forms allow-same-origin"
+                  referrerpolicy="no-referrer"
                   style="position:absolute;top:0;left:0;width:1920px;height:1080px;border:none;transform-origin:0 0;background:#0b0b0c">
           </iframe>
         </div>
@@ -6189,10 +6210,7 @@ function _renderExtraDirs() {
     ${dirs.map((d, i) => `
       <span class="ft-extra-dir-chip">
         <span title="${escapeHTML(d)}">${escapeHTML(d.split(/[/\\]/).slice(-1)[0] || d)}</span>
-        <button onclick="
-          window.__addDirs = (window.__addDirs||[]).filter((_,j)=>j!==${i});
-          if(typeof _renderExtraDirs==='function')_renderExtraDirs();
-        " title="Remove">×</button>
+        <button class="ft-extra-dir-chip__rm" data-extra-i="${i}" title="Remove">×</button>
       </span>`).join('')}
   </div>`;
 }
@@ -6251,12 +6269,7 @@ async function initFilesPanel() {
       </svg>
       <span class="proj-badge__name">${escapeHTML(projName)}</span>
       <span class="proj-badge__path">${escapeHTML(projPath)}</span>
-      <button class="proj-badge__clear" title="Clear project" onclick="
-        localStorage.removeItem('ccmod.filesRoot');
-        window._activeProjectPath=null;
-        window.electronAPI?.project?.setCwd?.(null);
-        document.getElementById('active-project-badge')?.remove();
-      ">×</button>`;
+      <button class="proj-badge__clear" title="Clear project">×</button>`;
   }
 
   await setRoot(rootPath);
@@ -7608,10 +7621,37 @@ async function initScreenshotsPanel(container) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 const GH_API = 'https://api.github.com';
-const GH_PAT_KEY = 'gh_panel_pat';
-const GH_REPO_KEY = 'gh_panel_repo';
+const GH_REPO_KEY = 'gh_panel_repo'; // repo name only — no secrets
 
-function _ghToken() { return localStorage.getItem(GH_PAT_KEY) || ''; }
+// PAT cache. Token is stored encrypted via safeStorage in the main process;
+// _ghTokenLoad() pulls it once into this cache at panel init.
+let _ghTokenCache = '';
+function _ghToken() { return _ghTokenCache; }
+async function _ghTokenLoad() {
+  try { _ghTokenCache = await window.electronAPI?.github?.token?.get?.() || ''; }
+  catch (_) { _ghTokenCache = ''; }
+  return _ghTokenCache;
+}
+async function _ghTokenSave(tok) {
+  _ghTokenCache = tok || '';
+  try { await window.electronAPI?.github?.token?.set?.(tok); } catch (_) {}
+}
+async function _ghTokenClear() {
+  _ghTokenCache = '';
+  try { await window.electronAPI?.github?.token?.clear?.(); } catch (_) {}
+}
+// One-time migration: lift any legacy plaintext PAT out of localStorage
+// into the encrypted store, then erase the plaintext copy.
+(async () => {
+  try {
+    const legacy = localStorage.getItem('gh_panel_pat');
+    if (legacy && window.electronAPI?.github?.token?.set) {
+      await window.electronAPI.github.token.set(legacy);
+      localStorage.removeItem('gh_panel_pat');
+      _ghTokenCache = legacy;
+    }
+  } catch (_) {}
+})();
 function _ghRepo()  { return localStorage.getItem(GH_REPO_KEY) || ''; }
 
 async function _ghFetch(path, opts = {}) {
@@ -7750,6 +7790,8 @@ function renderGithubPanel() {
 async function initGithubPanel(container) {
   const $ = sel => container.querySelector(sel);
   const git = window.electronAPI?.git;
+  // Load encrypted PAT from main process into the renderer cache before rendering
+  await _ghTokenLoad();
   const token = _ghToken();
   let _repo   = _ghRepo();  // 'owner/repo'
   let _branches = [];
@@ -7760,8 +7802,8 @@ async function initGithubPanel(container) {
   // ── OAuth / PAT auth wiring ───────────────────────────────────────────────
   const ghAPI = window.electronAPI?.github;
 
-  function _setConnected(tok, username) {
-    localStorage.setItem(GH_PAT_KEY, tok);
+  async function _setConnected(tok, username) {
+    await _ghTokenSave(tok);
     const tr = $('#gh-token-row');
     if (tr) {
       tr.innerHTML = `
@@ -7817,8 +7859,8 @@ async function initGithubPanel(container) {
 
   function _wireTokenClear() {
     const clrBtn = $('#gh-clear-token');
-    if (clrBtn) clrBtn.addEventListener('click', () => {
-      localStorage.removeItem(GH_PAT_KEY);
+    if (clrBtn) clrBtn.addEventListener('click', async () => {
+      await _ghTokenClear();
       window.showToast?.('Signed out of GitHub', 'info');
       setRightPanelTab('github');
     });
@@ -9767,11 +9809,14 @@ let _streamInterval = setInterval(() => {
       // (Legacy guard kept for safety — should never trigger now)
       if (raw.startsWith('<div class="code-block"')) { flushPara(); blocks.push(raw); continue; }
 
-      let line = raw;
-      // Inline code  `...`
-      line = line.replace(/`([^`]+)`/g, (_, c) => `<code>${escapeHTML(c)}</code>`);
-      // Already-escaped HTML from code-block pass-through is safe here
-      // Bold **text**
+      // SECURITY: escape HTML in the raw line FIRST so any `<img onerror>`,
+      // `<script>`, etc. from streamed Claude / tool output is rendered as
+      // text, not parsed as DOM. Markdown sigils (*, _, `, #, -) survive
+      // escapeHTML untouched, so the substitutions below still work.
+      let line = escapeHTML(raw);
+      // Inline code  `...` — content is already escaped
+      line = line.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Bold **text** — capture is already escaped
       line = line.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
       // Italic *text*  (not inside **)
       line = line.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
@@ -11589,12 +11634,7 @@ let _streamInterval = setInterval(() => {
       </svg>
       <span class="proj-badge__name">${escapeHTML(projName)}</span>
       <span class="proj-badge__path">${escapeHTML(saved)}</span>
-      <button class="proj-badge__clear" title="Clear project" onclick="
-        localStorage.removeItem('ccmod.filesRoot');
-        window._activeProjectPath=null;
-        window.electronAPI?.project?.setCwd?.(null);
-        document.getElementById('active-project-badge')?.remove();
-      ">×</button>`;
+      <button class="proj-badge__clear" title="Clear project">×</button>`;
   };
   requestAnimationFrame(tryBadge);
 })();
