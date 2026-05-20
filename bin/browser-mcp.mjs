@@ -219,11 +219,206 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Claude's Browser Profile — persistent identity online
+  // bookmarks, history, per-URL notes, preferences, reading list
+  // All data lives in %APPDATA%\claude-code-desktop\browser-profile\
+  // ════════════════════════════════════════════════════════════════════════
+
+  // ── Bookmarks ──────────────────────────────────────────────────────────
+  {
+    name: 'profile_bookmark_list',
+    description: 'List all bookmarks in Claude\'s profile. Optionally filter by folder.',
+    inputSchema: {
+      type: 'object',
+      properties: { folder: { type: 'string', description: 'Filter to a specific folder' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_bookmark_add',
+    description: 'Bookmark a URL in Claude\'s profile. If the URL is already bookmarked, updates the title/folder/tags. Use this when the user says "save this", "bookmark that", or when you find a useful page worth remembering.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url:    { type: 'string', description: 'Full URL to bookmark' },
+        title:  { type: 'string', description: 'Page title (auto-filled from page if missing)' },
+        folder: { type: 'string', description: 'Optional folder name (e.g. "Research", "Tools")' },
+        tags:   { type: 'array', items: { type: 'string' }, description: 'Optional tags' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_bookmark_remove',
+    description: 'Remove a bookmark from Claude\'s profile. Provide either url or id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string' },
+        id:  { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_bookmark_search',
+    description: 'Search bookmarks by title, URL, or tag (case-insensitive substring).',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+
+  // ── History ─────────────────────────────────────────────────────────────
+  {
+    name: 'profile_history_recent',
+    description: 'List the most recent pages Claude\'s profile has visited (newest first).',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', description: 'Max entries (default 30)' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_history_search',
+    description: 'Search Claude\'s browsing history by URL or page title. Useful for "find that article we read about X".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        since: { type: 'integer', description: 'Unix ms — only return visits after this time' },
+        limit: { type: 'integer', description: 'Max results (default 50)' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_history_clear',
+    description: 'Clear browsing history. Pass {all: true} to wipe everything, or {domain: "..."} to clear a specific domain.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        all:    { type: 'boolean' },
+        domain: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  // ── Per-URL Notes ───────────────────────────────────────────────────────
+  {
+    name: 'profile_note_get',
+    description: 'Get Claude\'s saved note for a specific URL. Returns null if no note exists.',
+    inputSchema: {
+      type: 'object',
+      properties: { url: { type: 'string' } },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_note_set',
+    description: 'Save Claude\'s note for a specific URL — overwrites any existing note. Pass empty content to delete. Use this to remember context about a page (login flow, important section, where the action button is, etc).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url:     { type: 'string' },
+        content: { type: 'string', description: 'Note content (max 8000 chars, empty deletes)' },
+      },
+      required: ['url', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_note_search',
+    description: 'Search all per-URL notes by content or URL substring.',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'Empty query returns all notes' } },
+      additionalProperties: false,
+    },
+  },
+
+  // ── Preferences ─────────────────────────────────────────────────────────
+  {
+    name: 'profile_pref_get',
+    description: 'Read a single preference value. Examples: "homepage", "search_engine", "theme".',
+    inputSchema: {
+      type: 'object',
+      properties: { key: { type: 'string' } },
+      required: ['key'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_pref_set',
+    description: 'Set or delete a preference. Pass value=null to delete the key.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        key:   { type: 'string' },
+        value: { description: 'Any JSON value, or null to delete' },
+      },
+      required: ['key'],
+      additionalProperties: false,
+    },
+  },
+
+  // ── Reading list ────────────────────────────────────────────────────────
+  {
+    name: 'profile_readlist_add',
+    description: 'Save a URL to the "for later" reading list. Use when the user says "read this later" or when you find something worth a follow-up.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url:   { type: 'string' },
+        title: { type: 'string' },
+        notes: { type: 'string', description: 'Why this is worth reading' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_readlist_list',
+    description: 'List items in the reading list. Pass {includeDone: true} to see completed items too.',
+    inputSchema: {
+      type: 'object',
+      properties: { includeDone: { type: 'boolean' } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'profile_readlist_done',
+    description: 'Mark a reading-list item as completed. Provide either id or url.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id:  { type: 'string' },
+        url: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  // ── Aggregate summary ───────────────────────────────────────────────────
+  {
+    name: 'profile_summary',
+    description: 'Quick overview of Claude\'s profile state: counts of bookmarks/history/notes, top folders, open reading-list items. Useful for orientation.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
 async function execTool(name, args = {}) {
   switch (name) {
+    // ── Browser ─────────────────────────────────────────────────
     case 'browser_get_state':    return callOp('get-state');
     case 'browser_navigate':     return callOp('navigate',    { url: args.url });
     case 'browser_read_page':    return callOp('read-page',   { max_chars: args.max_chars });
@@ -233,6 +428,36 @@ async function execTool(name, args = {}) {
     case 'browser_screenshot':   return callOp('screenshot',  { quality: args.quality });
     case 'browser_scroll':       return callOp('scroll',      args);
     case 'browser_nav':          return callOp('nav',         { action: args.action });
+
+    // ── Profile · bookmarks ─────────────────────────────────────
+    case 'profile_bookmark_list':   return callOp('profile-bookmark-list',   args);
+    case 'profile_bookmark_add':    return callOp('profile-bookmark-add',    args);
+    case 'profile_bookmark_remove': return callOp('profile-bookmark-remove', args);
+    case 'profile_bookmark_search': return callOp('profile-bookmark-search', { query: args.query });
+
+    // ── Profile · history ───────────────────────────────────────
+    case 'profile_history_recent':  return callOp('profile-history-recent',  { limit: args.limit });
+    case 'profile_history_search':  return callOp('profile-history-search',  args);
+    case 'profile_history_clear':   return callOp('profile-history-clear',   args);
+
+    // ── Profile · notes ─────────────────────────────────────────
+    case 'profile_note_get':        return callOp('profile-note-get',        { url: args.url });
+    case 'profile_note_set':        return callOp('profile-note-set',        args);
+    case 'profile_note_search':     return callOp('profile-note-search',     { query: args.query });
+
+    // ── Profile · prefs ─────────────────────────────────────────
+    case 'profile_pref_get':        return callOp('profile-pref-get',        { key: args.key });
+    case 'profile_pref_set':        return callOp('profile-pref-set',        args);
+    case 'profile_pref_list':       return callOp('profile-pref-list');
+
+    // ── Profile · readlist ──────────────────────────────────────
+    case 'profile_readlist_add':    return callOp('profile-readlist-add',    args);
+    case 'profile_readlist_list':   return callOp('profile-readlist-list',   args);
+    case 'profile_readlist_done':   return callOp('profile-readlist-done',   args);
+
+    // ── Profile · summary ───────────────────────────────────────
+    case 'profile_summary':         return callOp('profile-summary');
+
     default: throw new Error('Unknown tool: ' + name);
   }
 }

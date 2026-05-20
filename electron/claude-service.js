@@ -976,6 +976,7 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
   // are actually wired into this request.
   let effectiveSystem = systemPrompt || '';
   const hasBrowser = !!(global.ccmBrowser?.isAvailable());
+  const profile    = global.ccmBrowserProfile;
   if (hasBrowser) {
     const tab = global.ccmBrowser.getActiveTab();
     if (tab?.url && tab.url !== 'about:blank') {
@@ -983,11 +984,39 @@ async function streamMessageViaSDK(event, messages, modelId, systemPrompt, reque
         + `# Browser operator (active)\n`
         + `The user has an embedded Chromium browser open. Current page:\n`
         + `- **URL:**   ${tab.url}\n`
-        + `- **Title:** ${tab.title || '(untitled)'}\n\n`
-        + `You have a full toolkit wired in: \`browser_get_state\`, \`browser_navigate\`, \`browser_read_page\`, \`browser_get_elements\`, \`browser_click\`, \`browser_type\`, \`browser_screenshot\`, \`browser_scroll\`, \`browser_nav\`. Use them eagerly — you don't need to ask permission to read or screenshot the current page. When the user asks about a website, navigate there and read it. When they ask about layout, screenshot it.`;
+        + `- **Title:** ${tab.title || '(untitled)'}\n`;
+
+      // ── Profile awareness for the current page ─────────────────────────
+      // The whole point of "Claude's profile" — every turn includes Claude's
+      // existing knowledge of this specific URL + recent context. No tool
+      // calls needed for basic awareness; Claude can drill in with profile_*
+      // tools when it needs more.
+      if (profile) {
+        const note = profile.getNote(tab.url);
+        const bookmarked = profile.isBookmarked(tab.url);
+        if (note?.content) {
+          effectiveSystem += `\n**Your note on this page** (from last visit):\n> ${note.content.replace(/\n/g, '\n> ')}\n`;
+        }
+        if (bookmarked) effectiveSystem += `\n_(This page is bookmarked.)_\n`;
+
+        const recent = profile.historyRecent(8).filter(h => h.url !== tab.url).slice(0, 5);
+        if (recent.length) {
+          effectiveSystem += `\n**Recent profile visits:**\n` +
+            recent.map(h => `- ${h.title || h.url}`).join('\n') + '\n';
+        }
+
+        const sum = profile.summary();
+        effectiveSystem += `\n_Profile state: ${sum.bookmarkCount} bookmarks, ${sum.historyCount} history entries, ${sum.notesCount} per-URL notes, ${sum.readlistOpen} items on reading list._\n`;
+      }
+
+      effectiveSystem += `\nYou have a full toolkit wired in:
+- **Browser**: \`browser_get_state\`, \`browser_navigate\`, \`browser_read_page\`, \`browser_get_elements\`, \`browser_click\`, \`browser_type\`, \`browser_screenshot\`, \`browser_scroll\`, \`browser_nav\`
+- **Profile**: \`profile_bookmark_*\` (list/add/remove/search), \`profile_history_*\` (recent/search/clear), \`profile_note_*\` (get/set/search), \`profile_pref_*\`, \`profile_readlist_*\`, \`profile_summary\`
+
+Use them eagerly. When the user says "save this", "remember this page", "what did we read about X" — these are your tools. Bookmarks/notes/history persist across sessions.`;
     } else {
       effectiveSystem += (effectiveSystem ? '\n\n' : '')
-        + `# Browser operator (idle)\nThe user has an embedded browser panel open but no page is loaded yet. Call \`browser_navigate({url: "..."})\` to open something.`;
+        + `# Browser operator (idle)\nThe user has an embedded browser panel open but no page is loaded yet. Call \`browser_navigate({url: "..."})\` to open something.\n\nYou also have profile tools (\`profile_bookmark_list\`, \`profile_history_recent\`, \`profile_summary\`, etc.) if the user asks about saved pages.`;
     }
   }
 

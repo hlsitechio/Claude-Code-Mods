@@ -108,9 +108,12 @@ async function _handle(req, res) {
 
   const cmd = req.url.slice(4); // strip "/op/"
   const t0 = Date.now();
+  // Profile ops route through global.ccmBrowserProfile — same auth, same path.
+  const profile = global.ccmBrowserProfile;
   try {
     let result;
     switch (cmd) {
+      // ── Browser ────────────────────────────────────────────
       case 'get-state':     result = op.getActiveTab() || { error: 'No browser tab is open' }; break;
       case 'navigate':      result = await op.navigate(body.url); break;
       case 'read-page':     result = await op.readPage({ maxChars: body.max_chars }); break;
@@ -120,6 +123,36 @@ async function _handle(req, res) {
       case 'screenshot':    result = await op.screenshot({ quality: body.quality }); break;
       case 'scroll':        result = await op.scroll(body); break;
       case 'nav':           result = await op.nav(body.action); break;
+
+      // ── Profile · bookmarks ────────────────────────────────
+      case 'profile-bookmark-list':   result = profile.listBookmarks(body); break;
+      case 'profile-bookmark-add':    result = profile.addBookmark(body); break;
+      case 'profile-bookmark-remove': result = profile.removeBookmark(body); break;
+      case 'profile-bookmark-search': result = profile.searchBookmarks(body.query); break;
+
+      // ── Profile · history ──────────────────────────────────
+      case 'profile-history-recent':  result = profile.historyRecent(body.limit); break;
+      case 'profile-history-search':  result = profile.searchHistory(body.query, body); break;
+      case 'profile-history-clear':   result = profile.clearHistory(body); break;
+
+      // ── Profile · notes (per-URL) ──────────────────────────
+      case 'profile-note-get':        result = profile.getNote(body.url); break;
+      case 'profile-note-set':        result = profile.setNote(body); break;
+      case 'profile-note-search':     result = profile.searchNotes(body.query); break;
+
+      // ── Profile · prefs ────────────────────────────────────
+      case 'profile-pref-get':        result = profile.getPref(body.key); break;
+      case 'profile-pref-set':        result = profile.setPref(body.key, body.value); break;
+      case 'profile-pref-list':       result = profile.listPrefs(); break;
+
+      // ── Profile · readlist ─────────────────────────────────
+      case 'profile-readlist-add':    result = profile.readlistAdd(body); break;
+      case 'profile-readlist-list':   result = profile.readlistList(body); break;
+      case 'profile-readlist-done':   result = profile.readlistDone(body); break;
+
+      // ── Profile · summary ──────────────────────────────────
+      case 'profile-summary':         result = profile.summary(); break;
+
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }
     const ms = Date.now() - t0;

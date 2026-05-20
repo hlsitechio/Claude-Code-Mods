@@ -764,6 +764,8 @@ ipcMain.handle('kanban:summary', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const { WebContentsView, session: electronSession } = require('electron');
+const ccmBrowserProfile = require('./browser-profile');
+global.ccmBrowserProfile = ccmBrowserProfile;
 
 const _browserViews = new Map(); // viewId → { view, win, ownerWebContentsId }
 let _nextBrowserViewId = 1;
@@ -807,9 +809,38 @@ function _attachBrowserViewListeners(viewId, view) {
 
   wc.on('did-start-loading',  ()                 => send('browser:loading', { loading: true }));
   wc.on('did-stop-loading',   ()                 => send('browser:loading', { loading: false }));
-  wc.on('did-navigate',       (_e, url)          => { _invalidateActiveTabCache(); send('browser:nav', { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }); });
+  // Debounced history recorder: `did-navigate` fires before the page title
+  // has loaded (so we'd get URL-as-title), and `page-title-updated` often
+  // fires multiple times as the page settles. We schedule a record 1.5s
+  // after the LAST title change, ensuring one entry per nav with the
+  // final title.
+  let _lastRecordedUrl = null;
+  let _titleDebounce   = null;
+  function _scheduleProfileRecord() {
+    clearTimeout(_titleDebounce);
+    _titleDebounce = setTimeout(() => {
+      const url = wc.getURL();
+      if (!url || !/^https?:/i.test(url)) return;
+      if (url === _lastRecordedUrl) return;
+      try { ccmBrowserProfile.recordVisit({ url, title: wc.getTitle() }); } catch (_) {}
+      _lastRecordedUrl = url;
+    }, 1500);
+  }
+
+  wc.on('did-start-loading',  ()                 => send('browser:loading', { loading: true }));
+  wc.on('did-stop-loading',   ()                 => send('browser:loading', { loading: false }));
+  wc.on('did-navigate',       (_e, url)          => {
+    _invalidateActiveTabCache();
+    _lastRecordedUrl = null;        // new URL, reset debounce target
+    _scheduleProfileRecord();
+    send('browser:nav', { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() });
+  });
   wc.on('did-navigate-in-page',(_e, url)         => { _invalidateActiveTabCache(); send('browser:nav', { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }); });
-  wc.on('page-title-updated', (_e, title)        => { _invalidateActiveTabCache(); send('browser:title', { title }); });
+  wc.on('page-title-updated', (_e, title)        => {
+    _invalidateActiveTabCache();
+    _scheduleProfileRecord();      // reschedule with the latest title
+    send('browser:title', { title });
+  });
   wc.on('page-favicon-updated', (_e, favicons)   => send('browser:favicon', { favicon: favicons?.[0] || null }));
   wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
     if (isMain && code !== -3) send('browser:fail', { code, desc, url });
