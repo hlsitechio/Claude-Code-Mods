@@ -219,6 +219,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getCwd: ()            => ipcRenderer.invoke('project:get-cwd'),
   },
 
+  // ── Kanban / Tasks ───────────────────────────────────────────────────────
+  // Per-project task board (kanban.json in the active project cwd).
+  // Same file is used by the CLI tool (bin/kanban.mjs) so terminals + chat + UI stay in sync.
+  kanban: {
+    read:       ()              => ipcRenderer.invoke('kanban:read'),
+    write:      (data)          => ipcRenderer.invoke('kanban:write', data),
+    add:        (task)          => ipcRenderer.invoke('kanban:add', task),
+    update:     (id, patch)     => ipcRenderer.invoke('kanban:update', { id, patch }),
+    move:       (id, col, order)=> ipcRenderer.invoke('kanban:move', { id, col, order }),
+    delete:     (id)            => ipcRenderer.invoke('kanban:delete', id),
+    clearDone:  ()              => ipcRenderer.invoke('kanban:clear-done'),
+    path:       ()              => ipcRenderer.invoke('kanban:path'),
+    summary:    ()              => ipcRenderer.invoke('kanban:summary'),
+    onChanged: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('kanban:changed', handler);
+      return () => ipcRenderer.removeListener('kanban:changed', handler);
+    },
+  },
+
   // ── Git integration ───────────────────────────────────────────────────────
   git: {
     status:   (cwd)                    => ipcRenderer.invoke('git:status',    cwd),

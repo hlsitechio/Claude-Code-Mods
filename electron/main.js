@@ -270,14 +270,12 @@ function createWindow() {
   // Forward renderer console messages to terminal (errors & warnings visible in npm run output).
   // Suppress harmless DevTools Protocol noise (Autofill CDP commands unsupported in Electron).
   // Electron 36+ uses a single Event arg with .level as a STRING ('warning'/'error'/etc).
-  // Older signature was (event, levelNumber, msg, line, sourceId) — we keep both paths for safety.
-  win.webContents.on('console-message', (eventOrLevel, maybeMsg) => {
-    const isObj  = typeof eventOrLevel === 'object' && eventOrLevel !== null;
-    const msg    = isObj ? (eventOrLevel.message || '') : (typeof maybeMsg === 'string' ? maybeMsg : '');
-    // New API: level is string. Legacy API: level is number (1=info, 2=warn, 3=error).
-    const rawLevel = isObj ? eventOrLevel.level : eventOrLevel;
-    const isError  = rawLevel === 'error'   || rawLevel === 3;
-    const isWarn   = rawLevel === 'warning' || rawLevel === 'warn' || rawLevel === 2;
+  // Declaring exactly ONE param avoids the legacy-signature deprecation warning.
+  win.webContents.on('console-message', (event) => {
+    const msg     = event?.message || '';
+    const level   = event?.level   || '';
+    const isError = level === 'error';
+    const isWarn  = level === 'warning' || level === 'warn';
     if (msg.includes('Autofill.enable') || msg.includes('Autofill.setAddresses')) return;
     if (isError || isWarn) {
       const prefix = isError ? '[RENDERER ERROR]' : '[RENDERER WARN]';
@@ -481,6 +479,170 @@ ipcMain.handle('project:get-cwd', () => {
 
 ipcMain.handle('claude:abort', (_, requestId) => {
   return getClaudeService().abortCurrentStream(requestId);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── IPC: Kanban / Tasks ──────────────────────────────────────────────────────
+// Per-project task board persisted as `kanban.json` in the active project cwd,
+// or in userData if no project is set. Same schema readable by the CLI tool
+// (bin/kanban.mjs) so terminals + the renderer + AI agents share one source.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const KANBAN_DEFAULT = () => ({
+  version: 1,
+  updated: Date.now(),
+  columns: [
+    { id: 'todo',  name: 'To do',       color: '#6e88c3' },
+    { id: 'doing', name: 'In progress', color: '#d97757' },
+    { id: 'done',  name: 'Done',        color: '#7ab389' },
+  ],
+  tasks: [], // { id, col, title, body, tags, priority, created, updated, order }
+});
+
+function _kanbanPath() {
+  // 1) Active project cwd (if set) — kanban lives alongside the project
+  if (global._projectCwd) {
+    try {
+      const stat = fs.statSync(global._projectCwd);
+      if (stat.isDirectory()) return path.join(global._projectCwd, 'kanban.json');
+    } catch (_) {}
+  }
+  // 2) Fallback — global kanban in userData
+  return path.join(app.getPath('userData'), 'kanban.json');
+}
+
+function _kanbanRead() {
+  const file = _kanbanPath();
+  try {
+    if (!fs.existsSync(file)) return KANBAN_DEFAULT();
+    const raw = fs.readFileSync(file, 'utf8');
+    const data = JSON.parse(raw);
+    // Schema migration / safety
+    if (!data.columns || !Array.isArray(data.columns)) data.columns = KANBAN_DEFAULT().columns;
+    if (!data.tasks   || !Array.isArray(data.tasks))   data.tasks   = [];
+    return data;
+  } catch (e) {
+    console.error('[kanban] read error:', e.message);
+    return KANBAN_DEFAULT();
+  }
+}
+
+function _kanbanWrite(data) {
+  data.updated = Date.now();
+  const file = _kanbanPath();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+    // Broadcast to all windows so other panels stay in sync
+    BrowserWindow.getAllWindows().forEach(w => {
+      if (!w.isDestroyed()) w.webContents.send('kanban:changed', { path: file, updated: data.updated });
+    });
+    return { ok: true, path: file };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+function _kanbanTaskId() {
+  return 'k-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+}
+
+function _kanbanSanitizeTask(t) {
+  // Trim and length-bound every user-supplied field
+  const s = (v, max = 500) => typeof v === 'string'
+    ? v.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, ' ').slice(0, max).trim()
+    : '';
+  const tagsArr = Array.isArray(t.tags) ? t.tags.slice(0, 8).map(x => s(x, 24)).filter(Boolean) : [];
+  const pri = ['low','med','high'].includes(t.priority) ? t.priority : 'med';
+  return {
+    id:       typeof t.id === 'string' ? t.id : _kanbanTaskId(),
+    col:      typeof t.col === 'string' ? t.col : 'todo',
+    title:    s(t.title, 200) || 'Untitled task',
+    body:     s(t.body, 4000),
+    tags:     tagsArr,
+    priority: pri,
+    created:  typeof t.created === 'number' ? t.created : Date.now(),
+    updated:  Date.now(),
+    order:    typeof t.order === 'number' ? t.order : 0,
+  };
+}
+
+ipcMain.handle('kanban:read', () => _kanbanRead());
+
+ipcMain.handle('kanban:write', (_, data) => {
+  if (!data || typeof data !== 'object') return { ok: false, error: 'Invalid data' };
+  // Re-sanitize all tasks before writing
+  data.tasks = (data.tasks || []).map(_kanbanSanitizeTask);
+  return _kanbanWrite(data);
+});
+
+ipcMain.handle('kanban:add', (_, partial) => {
+  const data = _kanbanRead();
+  const task = _kanbanSanitizeTask({ ...partial, id: _kanbanTaskId() });
+  // Place at end of its column
+  const sameCol = data.tasks.filter(t => t.col === task.col);
+  task.order = sameCol.length ? Math.max(...sameCol.map(t => t.order || 0)) + 1 : 0;
+  data.tasks.push(task);
+  const res = _kanbanWrite(data);
+  return { ...res, task };
+});
+
+ipcMain.handle('kanban:update', (_, { id, patch }) => {
+  const data = _kanbanRead();
+  const idx = data.tasks.findIndex(t => t.id === id);
+  if (idx < 0) return { ok: false, error: 'Not found' };
+  data.tasks[idx] = _kanbanSanitizeTask({ ...data.tasks[idx], ...patch, id, created: data.tasks[idx].created });
+  return _kanbanWrite(data);
+});
+
+ipcMain.handle('kanban:move', (_, { id, col, order }) => {
+  const data = _kanbanRead();
+  const idx = data.tasks.findIndex(t => t.id === id);
+  if (idx < 0) return { ok: false, error: 'Not found' };
+  if (typeof col === 'string') data.tasks[idx].col = col;
+  if (typeof order === 'number') data.tasks[idx].order = order;
+  data.tasks[idx].updated = Date.now();
+  return _kanbanWrite(data);
+});
+
+ipcMain.handle('kanban:delete', (_, id) => {
+  const data = _kanbanRead();
+  const before = data.tasks.length;
+  data.tasks = data.tasks.filter(t => t.id !== id);
+  if (data.tasks.length === before) return { ok: false, error: 'Not found' };
+  return _kanbanWrite(data);
+});
+
+ipcMain.handle('kanban:clear-done', () => {
+  const data = _kanbanRead();
+  data.tasks = data.tasks.filter(t => t.col !== 'done');
+  return _kanbanWrite(data);
+});
+
+ipcMain.handle('kanban:path', () => _kanbanPath());
+
+// Plain-text markdown summary — used by the chat-inject button and the CLI tool.
+ipcMain.handle('kanban:summary', () => {
+  const data = _kanbanRead();
+  const lines = ['# Kanban'];
+  lines.push(`*${path.basename(_kanbanPath())}* · updated ${new Date(data.updated).toLocaleString()}`, '');
+  for (const col of data.columns) {
+    const tasks = data.tasks
+      .filter(t => t.col === col.id)
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+    lines.push(`## ${col.name} (${tasks.length})`);
+    if (!tasks.length) { lines.push('_— empty —_', ''); continue; }
+    for (const t of tasks) {
+      const pri = t.priority === 'high' ? ' 🔴' : t.priority === 'low' ? ' 🟢' : ' 🟡';
+      const tags = t.tags?.length ? ` [${t.tags.join(', ')}]` : '';
+      lines.push(`- **${t.title}**${pri}${tags}`);
+      if (t.body) {
+        for (const bl of t.body.split('\n')) lines.push(`  > ${bl}`);
+      }
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
 });
 
 // ── IPC: knowledge-base file editor ──────────────────────────────────────────
