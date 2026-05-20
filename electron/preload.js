@@ -23,6 +23,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hideToTray:   () => ipcRenderer.send('window:hide'),
   isMaximized:  () => ipcRenderer.invoke('window:is-maximized'),
 
+  // ── Cross-window panel drag ───────────────────────────────────────────────
+  panelDrag: {
+    start:  (panelId) => ipcRenderer.invoke('panel:drag-start', panelId),
+    end:    ()        => ipcRenderer.invoke('panel:drag-end'),
+    accept: ()        => ipcRenderer.invoke('panel:drag-accept'),  // called from receiving window
+    cancel: ()        => ipcRenderer.invoke('panel:drag-cancel'),
+    onCursor: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('panel:drag-cursor', handler);
+      return () => ipcRenderer.removeListener('panel:drag-cursor', handler);
+    },
+    onReceive: (cb) => {
+      const handler = (_, panelId) => cb(panelId);
+      ipcRenderer.on('panel:receive', handler);
+      return () => ipcRenderer.removeListener('panel:receive', handler);
+    },
+  },
+
+  // ── Dual-window ──────────────────────────────────────────────────────────
+  getWindowRole:     ()  => ipcRenderer.invoke('window:get-role'),
+  spawnSecondary:    ()  => ipcRenderer.invoke('window:spawn-secondary'),
+  makePrimary:       ()  => ipcRenderer.invoke('window:make-primary'),
+  closeSecondary:    ()  => ipcRenderer.invoke('window:close-secondary'),
+  hasSecondary:      ()  => ipcRenderer.invoke('window:has-secondary'),
+
+  onRoleChanged: (cb) => {
+    const handler = (_, role) => cb(role);
+    ipcRenderer.on('window:role-changed', handler);
+    return () => ipcRenderer.removeListener('window:role-changed', handler);
+  },
+
   onMaximizeChange: (cb) => {
     const mHandler = () => cb(true);
     const uHandler = () => cb(false);
@@ -62,12 +93,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Streaming chat ────────────────────────────────────────────────────────
   // Legacy (main chat — no requestId, uses 'claude:chunk' / 'claude:done')
-  sendMessage: (messages, model, system, cliSessionId, permMode) =>
-    ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId, permMode }),
+  // opts: { effort, sessionName, addDirs, maxBudget }
+  sendMessage: (messages, model, system, cliSessionId, permMode, opts) =>
+    ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId, permMode, ...(opts || {}) }),
 
   // Per-stream (split chats) — each call gets its own scoped IPC channels
-  sendMessageFor: (messages, model, system, cliSessionId, permMode, requestId) =>
-    ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId, permMode, requestId }),
+  sendMessageFor: (messages, model, system, cliSessionId, permMode, requestId, opts) =>
+    ipcRenderer.invoke('claude:send', { messages, model, system, cliSessionId, permMode, requestId, ...(opts || {}) }),
 
   abort: (requestId) => ipcRenderer.invoke('claude:abort', requestId),
 
@@ -196,6 +228,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
     action:   (action, cwd, args)      => ipcRenderer.invoke('git:action',    { action, cwd, args }),
   },
 
+  github: {
+    auth:        (action)      => ipcRenderer.invoke('github:auth',        action),
+    devicePoll:  (deviceCode)  => ipcRenderer.invoke('github:device-poll', { deviceCode }),
+    openUrl:     (url)         => ipcRenderer.invoke('shell:open-url',     url),
+  },
+
+  screenshots: {
+    list:              ()              => ipcRenderer.invoke('screenshots:list'),
+    save:              (dataUrl, name) => ipcRenderer.invoke('screenshots:save',             { dataUrl, name }),
+    delete:            (id)            => ipcRenderer.invoke('screenshots:delete',            id),
+    deleteAll:         ()              => ipcRenderer.invoke('screenshots:delete-all'),
+    capture:           ()              => ipcRenderer.invoke('screenshots:capture'),
+    captureFullscreen: ()              => ipcRenderer.invoke('screenshots:capture-fullscreen'),
+    captureRegion:     ()              => ipcRenderer.invoke('screenshots:capture-region'),
+    fromClipboard:     ()              => ipcRenderer.invoke('screenshots:from-clipboard'),
+    copyToClipboard:   (dataUrl)       => ipcRenderer.invoke('screenshots:copy-to-clipboard', { dataUrl }),
+    openFile:          (id)            => ipcRenderer.invoke('screenshots:open-file',         id),
+  },
+
   // ── MCP servers ───────────────────────────────────────────────────────────
   mcp: {
     list:   ()                          => ipcRenderer.invoke('mcp:list'),
@@ -218,6 +269,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const handler = (_, dirPath) => cb(dirPath);
       ipcRenderer.on('fs:changed', handler);
       return () => ipcRenderer.removeListener('fs:changed', handler);
+    },
+  },
+
+  // ── Apercu local static server ─────────────────────────────────────────────
+  // Serves a local folder on a random localhost port for the Preview iframe.
+  // URL is broadcast to all windows via 'apercu:server-changed'.
+  apercu: {
+    serve:  (folderPath) => ipcRenderer.invoke('apercu:serve', folderPath || null),
+    stop:   ()           => ipcRenderer.invoke('apercu:stop'),
+    status: ()           => ipcRenderer.invoke('apercu:status'),
+    onServerChanged: (cb) => {
+      const handler = (_, data) => cb(data); // { url, dir } or { url: null, dir: null }
+      ipcRenderer.on('apercu:server-changed', handler);
+      return () => ipcRenderer.removeListener('apercu:server-changed', handler);
     },
   },
 });

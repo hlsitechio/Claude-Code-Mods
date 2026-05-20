@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    width: 100vw; height: 100vh;
+    background: rgba(0,0,0,0.35);
+    cursor: crosshair;
+    user-select: none;
+    overflow: hidden;
+    font-family: system-ui, sans-serif;
+  }
+  #hint {
+    position: fixed; top: 18px; left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15,15,17,0.9);
+    color: #e7e7ea; font-size: 12px;
+    padding: 6px 16px; border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.1);
+    pointer-events: none; white-space: nowrap;
+  }
+  #sel {
+    position: fixed;
+    border: 2px solid #d97757;
+    background: rgba(217,119,87,0.08);
+    display: none;
+    pointer-events: none;
+  }
+  #sel::before {
+    content: attr(data-size);
+    position: absolute; bottom: calc(100% + 5px); left: 0;
+    background: rgba(217,119,87,0.9);
+    color: #fff; font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 4px;
+    white-space: nowrap;
+  }
+  /* Corner handles */
+  #sel::after {
+    content: '';
+    position: absolute; inset: -1px;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.25) inset,
+      0 0 0 9999px rgba(0,0,0,0.0);
+  }
+</style>
+</head>
+<body>
+<div id="hint">Click and drag to select a region &nbsp;·&nbsp; Esc to cancel</div>
+<div id="sel"></div>
+<script>
+const { ipcRenderer } = require('electron');
+
+const sel = document.getElementById('sel');
+let sx = 0, sy = 0, dragging = false;
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') ipcRenderer.send('screenshot-overlay:cancel');
+});
+
+document.addEventListener('mousedown', e => {
+  dragging = true;
+  sx = e.clientX; sy = e.clientY;
+  sel.style.display = 'block';
+  sel.style.left   = sx + 'px';
+  sel.style.top    = sy + 'px';
+  sel.style.width  = '0px';
+  sel.style.height = '0px';
+  e.preventDefault();
+});
+
+document.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const x = Math.min(e.clientX, sx);
+  const y = Math.min(e.clientY, sy);
+  const w = Math.abs(e.clientX - sx);
+  const h = Math.abs(e.clientY - sy);
+  sel.style.left   = x + 'px';
+  sel.style.top    = y + 'px';
+  sel.style.width  = w + 'px';
+  sel.style.height = h + 'px';
+  sel.dataset.size = w + ' × ' + h;
+});
+
+document.addEventListener('mouseup', e => {
+  if (!dragging) return;
+  dragging = false;
+  const x = Math.min(e.clientX, sx);
+  const y = Math.min(e.clientY, sy);
+  const w = Math.abs(e.clientX - sx);
+  const h = Math.abs(e.clientY - sy);
+  if (w < 5 || h < 5) {
+    // Too small — reset
+    sel.style.display = 'none';
+    return;
+  }
+  // Pass screen-relative coordinates (window is at 0,0 full-screen)
+  ipcRenderer.send('screenshot-overlay:select', { x, y, width: w, height: h });
+});
+</script>
+</body>
+</html>
