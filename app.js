@@ -6015,72 +6015,300 @@ function getLastAnyCodeBlock() {
 }
 
 // ---------- Tâches (Tasks) panel — Kanban board ----------
-function renderTachesPanel() {
-  const cols = [
-    {
-      id: 'backlog', label: 'Backlog', color: '#5a5a63',
-      tasks: [
-        { id: 'T-08', title: 'Add keyboard navigation to sidebar', tags: ['a11y'], pri: 'low' },
-        { id: 'T-09', title: 'Dark/light theme auto-detection from OS', tags: ['ui'], pri: 'low' },
-        { id: 'T-10', title: 'Persist open panels across sessions', tags: ['ux'], pri: 'med' },
-        { id: 'T-11', title: 'Export conversation as Markdown', tags: ['export'], pri: 'low' },
-      ],
-    },
-    {
-      id: 'inprogress', label: 'In Progress', color: '#c9a96e',
-      tasks: [
-        { id: 'T-04', title: 'Split panel — vertical resize handle', tags: ['ui'], pri: 'high', who: 'Claude' },
-        { id: 'T-05', title: 'Terminal panel edge-to-edge layout', tags: ['terminal'], pri: 'high', who: 'Claude' },
-        { id: 'T-06', title: 'Context strip chip active-state sync', tags: ['ui'], pri: 'med', who: 'Claude' },
-        { id: 'T-07', title: 'Electron desktop packaging', tags: ['build'], pri: 'high', who: 'Claude' },
-      ],
-    },
-    {
-      id: 'done', label: 'Done', color: '#7ab389',
-      tasks: [
-        { id: 'T-01', title: 'Sub-task tree with CSS grid expand', tags: ['ui'], pri: 'med' },
-        { id: 'T-02', title: 'Streaming state shimmer animations (9 variants)', tags: ['anim'], pri: 'med' },
-        { id: 'T-03', title: 'Context strip chips — MCP, Git, Context, Plan', tags: ['ui'], pri: 'high' },
-      ],
-    },
-  ];
+// ── Kanban / Tasks panel ─────────────────────────────────────────────────────
+// Backed by kanban.json (per-project). The CLI tool bin/kanban.mjs reads/writes
+// the same file, so terminal + chat + UI stay in sync.
 
-  const priBadge = p => {
-    const map = { high: ['#c96442','H'], med: ['#c9a96e','M'], low: ['#5a5a63','L'] };
-    const [col, lbl] = map[p] || map.low;
-    return `<span class="task-card__pri" style="background:${col}22;color:${col}">${lbl}</span>`;
-  };
-  const tagBadge = t => `<span class="task-card__tag">${escapeHTML(t)}</span>`;
+let _kanbanState = null;       // cached board; null until first load
+let _kanbanCleanup = null;     // onChanged listener disposer
+
+function _kanbanPriBadge(p) {
+  const map = { high: ['#d97757','H'], med: ['#c9a96e','M'], low: ['#7ab389','L'] };
+  const [col, lbl] = map[p] || map.med;
+  return `<span class="task-card__pri" style="background:${col}22;color:${col}" title="Priority: ${p}">${lbl}</span>`;
+}
+function _kanbanTagBadge(t) { return `<span class="task-card__tag">${escapeHTML(t)}</span>`; }
+
+function renderTachesPanel() {
+  const data = _kanbanState || { columns: [
+    { id:'todo',  name:'To do',       color:'#6e88c3' },
+    { id:'doing', name:'In progress', color:'#d97757' },
+    { id:'done',  name:'Done',        color:'#7ab389' },
+  ], tasks: [] };
+  const total = data.tasks.length;
+  const doneCount = data.tasks.filter(t => t.col === 'done').length;
 
   return `
-    <div class="kanban">
+    <div class="kanban" data-kanban-root>
       <div class="kanban__header">
-        <span class="kanban__title">Session tasks</span>
-        <span class="kanban__meta">${cols.reduce((s,c) => s+c.tasks.length, 0)} total · ${cols.find(c=>c.id==='done').tasks.length} done</span>
+        <span class="kanban__title">
+          <i data-phosphor="kanban"></i>
+          <span>Kanban</span>
+        </span>
+        <span class="kanban__meta">${total} total · ${doneCount} done</span>
+        <span class="kanban__actions">
+          <button class="icon-btn icon-btn--sm" id="kanban-add-btn" title="Add task (n)"><i data-phosphor="plus"></i></button>
+          <button class="icon-btn icon-btn--sm" id="kanban-inject-btn" title="Inject summary into chat"><i data-phosphor="chat-text"></i></button>
+          <button class="icon-btn icon-btn--sm" id="kanban-open-file-btn" title="Open kanban.json"><i data-phosphor="file-text"></i></button>
+          <button class="icon-btn icon-btn--sm" id="kanban-clear-done-btn" title="Clear all Done"><i data-phosphor="broom"></i></button>
+          <button class="icon-btn icon-btn--sm" id="kanban-reload-btn" title="Reload from disk"><i data-phosphor="arrow-clockwise"></i></button>
+        </span>
       </div>
-      <div class="kanban__board">
-        ${cols.map(col => `
-          <div class="kanban__col">
+      <div class="kanban__board" id="kanban-board">
+        ${data.columns.map(col => {
+          const colTasks = data.tasks
+            .filter(t => t.col === col.id)
+            .sort((a,b) => (a.order||0) - (b.order||0));
+          return `
+          <div class="kanban__col" data-col-id="${col.id}">
             <div class="kanban__col-head">
               <span class="kanban__col-dot" style="background:${col.color}"></span>
-              <span class="kanban__col-label">${escapeHTML(col.label)}</span>
-              <span class="kanban__col-count">${col.tasks.length}</span>
+              <span class="kanban__col-label">${escapeHTML(col.name)}</span>
+              <span class="kanban__col-count">${colTasks.length}</span>
+              <button class="icon-btn icon-btn--xs kanban__col-add" data-col="${col.id}" title="Add to ${escapeHTML(col.name)}">
+                <i data-phosphor="plus"></i>
+              </button>
             </div>
-            <div class="kanban__cards">
-              ${col.tasks.map(t => `
-                <div class="task-card${col.id === 'done' ? ' task-card--done' : ''}">
+            <div class="kanban__cards" data-drop-col="${col.id}">
+              ${colTasks.map(t => `
+                <div class="task-card${col.id === 'done' ? ' task-card--done' : ''}"
+                     draggable="true"
+                     data-task-id="${escapeHTML(t.id)}"
+                     data-task-col="${escapeHTML(t.col)}">
                   <div class="task-card__top">
-                    <span class="task-card__id">${escapeHTML(t.id)}</span>
-                    ${priBadge(t.pri)}
-                    ${t.who ? `<span class="task-card__who">${escapeHTML(t.who)}</span>` : ''}
+                    <span class="task-card__id">${escapeHTML(t.id.slice(-6))}</span>
+                    ${_kanbanPriBadge(t.priority)}
+                    <span class="task-card__actions">
+                      <button class="task-card__btn" data-task-action="edit" title="Edit"><i data-phosphor="pencil-simple"></i></button>
+                      <button class="task-card__btn" data-task-action="delete" title="Delete"><i data-phosphor="trash"></i></button>
+                    </span>
                   </div>
                   <div class="task-card__title">${escapeHTML(t.title)}</div>
-                  <div class="task-card__tags">${t.tags.map(tagBadge).join('')}</div>
+                  ${t.body ? `<div class="task-card__body">${escapeHTML(t.body.split('\n')[0]).slice(0, 120)}${t.body.length > 120 ? '…' : ''}</div>` : ''}
+                  ${t.tags?.length ? `<div class="task-card__tags">${t.tags.map(_kanbanTagBadge).join('')}</div>` : ''}
                 </div>`).join('')}
             </div>
-          </div>`).join('')}
+          </div>`;
+        }).join('')}
+      </div>
+
+      <!-- Edit / add modal — hidden by default -->
+      <div id="kanban-modal" class="kanban-modal" style="display:none">
+        <div class="kanban-modal__backdrop" data-kanban-close></div>
+        <div class="kanban-modal__panel">
+          <header class="kanban-modal__head">
+            <span class="kanban-modal__title" id="kanban-modal-title">New task</span>
+            <button class="icon-btn icon-btn--sm" data-kanban-close title="Close"><i data-phosphor="x"></i></button>
+          </header>
+          <div class="kanban-modal__body">
+            <label class="kanban-modal__field">
+              <span>Title</span>
+              <input type="text" id="kanban-modal-title-input" placeholder="What needs to happen?" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="kanban-modal__field">
+              <span>Description</span>
+              <textarea id="kanban-modal-body-input" rows="4" placeholder="Optional notes…" spellcheck="false"></textarea>
+            </label>
+            <div class="kanban-modal__row">
+              <label class="kanban-modal__field">
+                <span>Column</span>
+                <select id="kanban-modal-col-input">
+                  ${data.columns.map(c => `<option value="${c.id}">${escapeHTML(c.name)}</option>`).join('')}
+                </select>
+              </label>
+              <label class="kanban-modal__field">
+                <span>Priority</span>
+                <select id="kanban-modal-pri-input">
+                  <option value="low">Low</option>
+                  <option value="med" selected>Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
+              <label class="kanban-modal__field kanban-modal__field--grow">
+                <span>Tags (comma-sep)</span>
+                <input type="text" id="kanban-modal-tags-input" placeholder="bug, ui" autocomplete="off" spellcheck="false" />
+              </label>
+            </div>
+          </div>
+          <footer class="kanban-modal__foot">
+            <button class="modal__btn" data-kanban-close>Cancel</button>
+            <button class="modal__btn modal__btn--primary" id="kanban-modal-save">Save</button>
+          </footer>
+        </div>
       </div>
     </div>`;
+}
+
+async function initTachesPanel() {
+  const api = window.electronAPI?.kanban;
+  if (!api) {
+    console.warn('[kanban] preload API missing');
+    return;
+  }
+  // Load + re-render
+  _kanbanState = await api.read();
+  const bodyEl = document.getElementById('right-panel-body');
+  if (bodyEl) {
+    bodyEl.innerHTML = renderTachesPanel();
+    window.renderIcons?.(bodyEl);
+  }
+
+  const root = bodyEl?.querySelector('[data-kanban-root]') || document.querySelector('[data-kanban-root]');
+  if (!root) return;
+  const $  = sel => root.querySelector(sel);
+  const $$ = sel => Array.from(root.querySelectorAll(sel));
+
+  // ── Modal helpers ───────────────────────────────────────────────────────
+  let _editingId = null;
+  function openModal(task = null) {
+    _editingId = task?.id || null;
+    $('#kanban-modal-title').textContent = task ? 'Edit task' : 'New task';
+    $('#kanban-modal-title-input').value = task?.title || '';
+    $('#kanban-modal-body-input').value  = task?.body  || '';
+    $('#kanban-modal-col-input').value   = task?.col   || 'todo';
+    $('#kanban-modal-pri-input').value   = task?.priority || 'med';
+    $('#kanban-modal-tags-input').value  = task?.tags?.join(', ') || '';
+    $('#kanban-modal').style.display = 'flex';
+    setTimeout(() => $('#kanban-modal-title-input')?.focus(), 30);
+  }
+  function closeModal() {
+    $('#kanban-modal').style.display = 'none';
+    _editingId = null;
+  }
+  async function saveModal() {
+    const title = $('#kanban-modal-title-input').value.trim();
+    if (!title) { window.showToast?.('Title is required', 'warning'); return; }
+    const patch = {
+      title,
+      body:     $('#kanban-modal-body-input').value,
+      col:      $('#kanban-modal-col-input').value,
+      priority: $('#kanban-modal-pri-input').value,
+      tags:     $('#kanban-modal-tags-input').value.split(',').map(s => s.trim()).filter(Boolean),
+    };
+    if (_editingId) {
+      await api.update(_editingId, patch);
+    } else {
+      await api.add(patch);
+    }
+    closeModal();
+    await refresh();
+  }
+
+  // ── Refresh: re-fetch board + re-render ─────────────────────────────────
+  async function refresh() {
+    _kanbanState = await api.read();
+    const bodyEl2 = document.getElementById('right-panel-body');
+    if (bodyEl2) {
+      bodyEl2.innerHTML = renderTachesPanel();
+      window.renderIcons?.(bodyEl2);
+      // Re-bind handlers on the new DOM
+      wireEvents(bodyEl2.querySelector('[data-kanban-root]'));
+    }
+  }
+
+  // ── Event wiring (called on every refresh) ──────────────────────────────
+  function wireEvents(scope) {
+    if (!scope) return;
+    const q  = s => scope.querySelector(s);
+    const qq = s => Array.from(scope.querySelectorAll(s));
+
+    // Header actions
+    q('#kanban-add-btn')?.addEventListener('click', () => openModal());
+    q('#kanban-reload-btn')?.addEventListener('click', refresh);
+    q('#kanban-clear-done-btn')?.addEventListener('click', async () => {
+      if (!confirm('Remove every task in Done?')) return;
+      await api.clearDone();
+      window.showToast?.('Cleared Done column', 'success');
+      await refresh();
+    });
+    q('#kanban-open-file-btn')?.addEventListener('click', async () => {
+      const p = await api.path();
+      if (p) window.electronAPI?.files?.openInExplorer?.(p);
+    });
+    q('#kanban-inject-btn')?.addEventListener('click', async () => {
+      const md = await api.summary();
+      const composer = document.getElementById('composer-input');
+      if (composer) {
+        const sep = composer.value && !composer.value.endsWith('\n') ? '\n\n' : '';
+        composer.value = composer.value + sep + md + '\n';
+        composer.focus();
+        composer.dispatchEvent(new Event('input', { bubbles: true }));
+        window.showToast?.('Kanban summary added to composer', 'success');
+      }
+    });
+
+    // Per-column "+"
+    qq('.kanban__col-add').forEach(btn => {
+      btn.addEventListener('click', () => openModal({ col: btn.dataset.col, priority: 'med' }));
+    });
+
+    // Per-card edit / delete
+    qq('.task-card').forEach(card => {
+      const id = card.dataset.taskId;
+      card.querySelector('[data-task-action="edit"]')?.addEventListener('click', e => {
+        e.stopPropagation();
+        const task = _kanbanState.tasks.find(t => t.id === id);
+        if (task) openModal(task);
+      });
+      card.querySelector('[data-task-action="delete"]')?.addEventListener('click', async e => {
+        e.stopPropagation();
+        if (!confirm('Delete this task?')) return;
+        await api.delete(id);
+        await refresh();
+      });
+      // Click body of card (not the buttons) → edit
+      card.addEventListener('click', e => {
+        if (e.target.closest('button')) return;
+        const task = _kanbanState.tasks.find(t => t.id === id);
+        if (task) openModal(task);
+      });
+
+      // ── HTML5 drag and drop ──
+      card.addEventListener('dragstart', e => {
+        card.classList.add('task-card--dragging');
+        e.dataTransfer.setData('text/plain', id);
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      card.addEventListener('dragend', () => card.classList.remove('task-card--dragging'));
+    });
+
+    qq('[data-drop-col]').forEach(zone => {
+      zone.addEventListener('dragover', e => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        zone.classList.add('kanban__cards--drag-over');
+      });
+      zone.addEventListener('dragleave', () => zone.classList.remove('kanban__cards--drag-over'));
+      zone.addEventListener('drop', async e => {
+        e.preventDefault();
+        zone.classList.remove('kanban__cards--drag-over');
+        const id = e.dataTransfer.getData('text/plain');
+        const col = zone.dataset.dropCol;
+        if (!id || !col) return;
+        const task = _kanbanState.tasks.find(t => t.id === id);
+        if (!task) return;
+        if (task.col === col) return; // same column → no-op (could implement reorder later)
+        await api.move(id, col, Date.now()); // use timestamp as order so it lands at end
+        await refresh();
+      });
+    });
+
+    // Modal close + save
+    qq('[data-kanban-close]').forEach(el => el.addEventListener('click', closeModal));
+    q('#kanban-modal-save')?.addEventListener('click', saveModal);
+    q('#kanban-modal-title-input')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveModal(); }
+    });
+  }
+
+  wireEvents(root);
+
+  // ── Sync across windows + external CLI edits ────────────────────────────
+  _kanbanCleanup?.();
+  _kanbanCleanup = api.onChanged(() => {
+    // Only refresh if our panel is still mounted
+    if (document.querySelector('[data-kanban-root]')) refresh();
+  });
 }
 
 // ---------- Diff panel ----------
@@ -8974,6 +9202,7 @@ function setRightPanelTab(id) {
     // Edge-to-edge modes
     bodyEl.classList.toggle('rp-body--terminal', id === 'terminal');
     bodyEl.classList.toggle('rp-body--apercu',   id === 'apercu');
+    bodyEl.classList.toggle('rp-body--kanban',   id === 'taches');
 
     // ── Bug A fix: Plan tab — re-scan chat history if __planTodos is null ──
     // parsePlanBlock runs at stream end. If the user opens the Plan tab later
@@ -9011,6 +9240,7 @@ function setRightPanelTab(id) {
     if (id === 'git')      requestAnimationFrame(() => initGitPanel(bodyEl));
     if (id === 'github')      requestAnimationFrame(() => initGithubPanel(bodyEl));
     if (id === 'screenshots') requestAnimationFrame(() => initScreenshotsPanel(bodyEl));
+    if (id === 'taches')      requestAnimationFrame(() => initTachesPanel());
   }
 
   // Sync context-strip chips

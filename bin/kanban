@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Unix shim — invokes the Node CLI with all args forwarded.
+# Usage: kanban list  /  kanban add "Title"  /  kanban done <id>  etc.
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+node "$DIR/kanban.mjs" "$@"
