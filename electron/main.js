@@ -48,6 +48,29 @@ const { spawn } = require('child_process');
 // Dev: not packaged AND not explicitly forced to production
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production';
 
+// ── Single-instance lock ────────────────────────────────────────────────────
+// Prevents multiple Electron processes from sharing the same userData/Cache
+// directory, which causes "Unable to move the cache: Access denied" on Windows
+// and other half-broken behavior. If someone tries to launch a second copy,
+// we focus the existing window and exit the second process cleanly.
+const _gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!_gotSingleInstanceLock) {
+  console.log('[main] another instance is already running — exiting.');
+  app.quit();
+  process.exit(0);
+} else {
+  app.on('second-instance', () => {
+    // Bring the main window back to the front when a second launch is attempted
+    const wins = BrowserWindow.getAllWindows();
+    const primary = wins.find(w => !w.isDestroyed());
+    if (primary) {
+      if (primary.isMinimized()) primary.restore();
+      primary.show();
+      primary.focus();
+    }
+  });
+}
+
 // Lazy-load claude-service only after app is ready (app.getPath requires it)
 let claudeService = null;
 function getClaudeService() {
