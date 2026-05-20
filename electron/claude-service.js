@@ -420,15 +420,22 @@ function buildBrowserContext() {
   const op = global.ccmBrowser;
   if (!op?.isAvailable()) return '';
   const tab = op.getActiveTab();
-  if (!tab?.url || tab.url === 'about:blank') {
-    return `\n\n# Embedded browser\nThe user has the Browser panel open but no page is loaded yet. They can type a URL into the address bar.`;
-  }
-  return `\n\n# Embedded browser
-The user has a Chromium browser panel open showing:
-- **URL:**   ${tab.url}
-- **Title:** ${tab.title || '(untitled)'}
+  const pageLine = tab?.url && tab.url !== 'about:blank'
+    ? `Current page: **${tab.title || '(untitled)'}** — ${tab.url}`
+    : 'No page is loaded yet (about:blank).';
+  // ASSERTIVE instructions — Claude Code CLI will otherwise spend 5-10 tool
+  // searches looking for browser_* tools that aren't registered in CLI mode.
+  // Be blunt: tools don't exist here, do NOT search, just tell the user.
+  return `\n\n# IMPORTANT — Embedded browser (CLI mode, READ THIS FIRST)
 
-You don't have direct browser tools in this conversation (CLI mode). If the user wants you to *control* the browser (navigate, click, read DOM, screenshot), tell them to switch to **Direct API mode** via the model menu — the embedded operator tools are auto-injected there. You can still read the page via your normal WebFetch tool if the URL is publicly accessible.`;
+The user has an embedded Chromium browser panel open in this app.
+${pageLine}
+
+**You do NOT have browser_navigate / browser_click / browser_screenshot tools in this session.** They are renderer-side tools that only get injected when the user is in **Direct API mode** (not CLI mode). Do NOT call ToolSearch looking for them — they will not be found.
+
+If the user asks you to navigate, click, screenshot, or otherwise CONTROL the browser, respond in ONE sentence: *"Browser control needs Direct API mode — click the model chip at the bottom right of the composer and switch to 'Direct Claude API', then ask again."*  Do not search for tools. Do not waste tokens exploring the codebase. Just tell them.
+
+If the user only asks ABOUT the page (read content, summarize), you may use WebFetch on the URL above — it's public web content.`;
 }
 
 async function streamMessageViaCLI(event, messages, modelId, systemPrompt, cliSessionId, binary, permMode, requestId, opts = {}) {

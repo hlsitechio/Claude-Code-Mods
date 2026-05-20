@@ -6185,6 +6185,37 @@ html[data-theme="light"] .kanban-modal__field select {
 .browser-tab__new:hover { background: #1f1f23; color: #d97757; }
 .browser-tab__new i { font-size: 14px; }
 
+/* Mode pill — pinned right on the tab strip. Click toggles CLI ↔ Direct. */
+.browser-mode-pill {
+  display: flex; align-items: center; gap: 6px;
+  margin-left: auto;          /* push to the right edge */
+  margin-bottom: 4px;         /* align with tab baseline */
+  padding: 4px 10px;
+  height: 22px;
+  background: rgba(217, 119, 87, 0.10);
+  border: 1px solid rgba(217, 119, 87, 0.30);
+  border-radius: 11px;
+  color: #d97757;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: background 100ms, border-color 100ms, color 100ms;
+}
+.browser-mode-pill:hover {
+  background: rgba(217, 119, 87, 0.18);
+  border-color: rgba(217, 119, 87, 0.55);
+}
+.browser-mode-pill__icon { font-size: 11px; }
+/* When already in Direct mode the pill turns green to confirm "good state". */
+.is-direct ~ * .browser-mode-pill,
+.browser-mode-pill[data-direct="true"] {
+  background: rgba(122, 179, 137, 0.12);
+  border-color: rgba(122, 179, 137, 0.4);
+  color: #7ab389;
+}
+
 /* ── Toolbar (back / fwd / reload / URL bar / devtools) ─────────────────── */
 .browser-toolbar {
   display: flex;
