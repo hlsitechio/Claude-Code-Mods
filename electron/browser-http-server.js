@@ -107,6 +107,7 @@ async function _handle(req, res) {
   catch (e) { return _sendJson(res, 400, { error: 'Bad JSON: ' + e.message }); }
 
   const cmd = req.url.slice(4); // strip "/op/"
+  const t0 = Date.now();
   try {
     let result;
     switch (cmd) {
@@ -121,8 +122,14 @@ async function _handle(req, res) {
       case 'nav':           result = await op.nav(body.action); break;
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }
+    const ms = Date.now() - t0;
+    // Tag slow operations so we know what to optimize next. 50ms threshold
+    // catches anything beyond the noise floor of IPC + executeJavaScript.
+    if (ms > 50) console.log(`[browser-http] ${cmd} ${ms}ms`);
     return _sendJson(res, 200, { ok: true, result });
   } catch (e) {
+    const ms = Date.now() - t0;
+    console.warn(`[browser-http] ${cmd} FAILED ${ms}ms — ${e.message}`);
     return _sendJson(res, 200, { ok: false, error: e.message });
   }
 }

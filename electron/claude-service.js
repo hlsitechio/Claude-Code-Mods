@@ -849,7 +849,7 @@ const BROWSER_TOOLS = [
   },
   {
     name: 'browser_get_elements',
-    description: 'List interactable elements on the page (links, buttons, inputs, selects). Each element gets an integer "i" you can pass back to browser_click. Use this BEFORE clicking when you do not know the exact selector.',
+    description: 'List interactable elements on the page (links, buttons, inputs, selects). Compact format: each item has i (stable index — pass to browser_click), t (tag), s (CSS selector), x (visible text, ≤80 chars), r ([x,y,w,h] in pixels), optionally h (href, anchors only) and v (type, inputs only). Use this BEFORE clicking when you do not know the exact selector.',
     input_schema: {
       type: 'object',
       properties: { limit: { type: 'integer', description: 'Max elements (default 60, max 200)' } },
