@@ -148,7 +148,8 @@
   // Ordered list of tool panels that appear in the right group
   const TOOL_IDS = [
     'apercu', 'diff', 'terminal', 'fichiers',
-    'taches', 'plan', 'notes', 'skills', 'git', 'github', 'screenshots', 'mcp', 'context', 'shortcuts',
+    'taches', 'plan', 'notes', 'skills', 'git', 'github',
+    'screenshots', 'browser', 'mcp', 'context', 'shortcuts',
   ];
 
   let dv           = null;
@@ -699,27 +700,52 @@
   /* ── Pre-render all panels after layout restore ─────────────────── */
   // Called once after dv.fromJSON() so every visible panel has content,
   // not just the globally-active one. Skips panels already rendered.
-  function _renderAllPanelBodies() {
+  // ── Render + init a single panel's body ──────────────────────────────
+  // Used by:
+  //   • _renderAllPanelBodies (post layout-restore — for every panel)
+  //   • The "+ Add panel" context menu (when right-panel sidebar isn't open
+  //     so _dvTabChange would bail). Without this call, dynamically-added
+  //     panels would show their skeleton ("Loading servers…") forever.
+  //
+  // No-op when:
+  //   • bodyDiv is missing (panel wasn't found in panelBodies)
+  //   • bodyDiv already has content AND force=false (don't blow away state)
+  function _renderAndInitPanel(pid, { force = false } = {}) {
     if (typeof window.renderPanelContent !== 'function') return;
+    const bodyDiv = panelBodies[pid];
+    if (!bodyDiv) return;
+    if (!force && bodyDiv.children.length > 0) return;
+    try {
+      bodyDiv.innerHTML = window.renderPanelContent(pid);
+      window.renderIcons?.(bodyDiv);
+      window.wirePlanTabEvents?.(pid, bodyDiv);
+      requestAnimationFrame(() => {
+        try {
+          switch (pid) {
+            case 'fichiers':    window.initFilesPanel?.();                    break;
+            case 'notes':       window.initNotesPanel?.();                     break;
+            case 'skills':      window.initSkillsDockPanel?.();                break;
+            case 'taches':      window.initTachesPanel?.();                    break;
+            case 'mcp':         window.initMcpPanel?.(bodyDiv);                break;
+            case 'git':         window.initGitPanel?.(bodyDiv);                break;
+            case 'github':      window.initGithubPanel?.(bodyDiv);             break;
+            case 'screenshots': window.initScreenshotsPanel?.(bodyDiv);        break;
+            case 'browser':     window.initBrowserPanel?.(bodyDiv);            break;
+            case 'apercu':
+              window.initApercuScaling?.(bodyDiv);
+              window.initApercuServer?.(bodyDiv);
+              break;
+            // diff, plan, context, shortcuts, terminal — no init needed
+            //   (terminal: per-instance from openTerminal())
+          }
+        } catch (e) { console.warn('[workspace] panel init error', pid, e); }
+      });
+    } catch (e) { console.warn('[workspace] renderPanelContent error', pid, e); }
+  }
+
+  function _renderAllPanelBodies() {
     for (const pid of TOOL_IDS) {
-      const bodyDiv = panelBodies[pid];
-      if (!bodyDiv || bodyDiv.children.length > 0) continue; // skip if already rendered
-      try {
-        bodyDiv.innerHTML = window.renderPanelContent(pid);
-        window.renderIcons?.(bodyDiv);
-        window.wirePlanTabEvents?.(pid, bodyDiv);
-        // Fire async init for data-driven panels so they load in the background
-        requestAnimationFrame(() => {
-          try {
-            if (pid === 'fichiers') window.initFilesPanel?.();
-            if (pid === 'notes')    window.initNotesPanel?.();
-            if (pid === 'skills')   window.initSkillsDockPanel?.();
-            if (pid === 'mcp')      window.initMcpPanel?.(bodyDiv);
-            if (pid === 'git')      window.initGitPanel?.(bodyDiv);
-            // terminal: skip auto-init — xterm creates a PTY; let user trigger it
-          } catch (e) { console.warn('[workspace] panel init error', pid, e); }
-        });
-      } catch (e) { console.warn('[workspace] renderPanelContent error', pid, e); }
+      _renderAndInitPanel(pid);
     }
   }
 
@@ -1045,6 +1071,14 @@
           // is swallowed and panel content never gets injected. Force it here.
           if (id !== 'chat' && typeof window._dvTabChange === 'function') {
             window._dvTabChange(id);
+          }
+          // Belt-and-suspenders: `_dvTabChange` bails when the right-panel
+          // sidebar isn't open, but the panel still needs its body rendered
+          // + init function run. Calling _renderAndInitPanel directly handles
+          // the case where the user adds a panel without the sidebar open
+          // (which is how the MCP panel was stuck on "Loading servers…").
+          if (id !== 'chat') {
+            requestAnimationFrame(() => _renderAndInitPanel(id));
           }
         }
         hideMenu();
