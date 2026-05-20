@@ -6376,6 +6376,7 @@ function renderBrowserPanel() {
                  spellcheck="false" autocomplete="off" />
         </div>
         <button class="browser-btn" id="browser-devtools" title="DevTools (F12)"><i data-phosphor="bug"></i></button>
+        <button class="browser-btn" id="browser-open-system" title="Open this page in your default browser (use for Google sign-in etc)"><i data-phosphor="arrow-square-out"></i></button>
       </div>
 
       <!-- The viewport — main process positions the WebContentsView over this exact rect.
@@ -6688,6 +6689,14 @@ async function initBrowserPanel(bodyEl) {
     root.querySelector('#browser-forward')?.addEventListener('click', () => _browser.activeId && api.nav(_browser.activeId, 'forward'));
     root.querySelector('#browser-reload')?.addEventListener('click',  () => _browser.activeId && api.nav(_browser.activeId, _browserActiveTab()?.loading ? 'stop' : 'reload'));
     root.querySelector('#browser-devtools')?.addEventListener('click',() => _browser.activeId && api.devtools(_browser.activeId));
+    // Escape hatch for sites that refuse to load in WebContentsView
+    // (Google OAuth, banks with strict frame-ancestors, etc).
+    root.querySelector('#browser-open-system')?.addEventListener('click', async () => {
+      if (!_browser.activeId) return;
+      const res = await api.openInSystem(_browser.activeId);
+      if (res?.ok) window.showToast?.('Opened in your default browser', 'success', 2000);
+      else        window.showToast?.('Could not open: ' + (res?.error || 'unknown'), 'warning');
+    });
 
     // URL bar — Enter submits, focus selects all
     const urlInput = root.querySelector('#browser-url');
