@@ -338,7 +338,7 @@ function createWindow() {
 
 // ── App lifecycle ────────────────────────────────────────────────────────────
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   const win = createWindow();
   _primaryWinId = win.id;   // first window is always primary
@@ -360,11 +360,75 @@ app.whenReady().then(() => {
     if (win.isVisible()) { win.hide(); } else { win.show(); win.focus(); }
   });
 
+  // ── Browser MCP bridge ──────────────────────────────────────────────────
+  // Start the HTTP control server so the MCP child process (spawned by
+  // Claude Code CLI per session) can reach `global.ccmBrowser`. Then
+  // ensure ~/.claude/settings.json has our MCP entry registered so
+  // Claude Code knows about us on its next launch.
+  try {
+    const browserHttp = require('./browser-http-server');
+    await browserHttp.startBrowserHttpServer();
+    _registerBrowserMcp();
+  } catch (e) {
+    console.error('[browser-mcp] failed to start bridge:', e);
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else mainWin?.show();
   });
 });
+
+// Register our MCP server in ~/.claude/settings.json so Claude Code picks it
+// up automatically. We MERGE — never overwrite — the user's existing config.
+function _registerBrowserMcp() {
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || require('os').homedir();
+    const dir  = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+    const settingsPath = path.join(dir, 'settings.json');
+    const mcpScript    = path.resolve(__dirname, '..', 'bin', 'browser-mcp.mjs');
+
+    let settings = {};
+    if (fs.existsSync(settingsPath)) {
+      try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); }
+      catch (e) {
+        console.warn('[browser-mcp] settings.json is malformed; refusing to clobber it.');
+        return;
+      }
+    }
+    settings.mcpServers = settings.mcpServers || {};
+    const existing = settings.mcpServers['ccm-browser'];
+    const desired = {
+      command: process.execPath, // node binary OR Electron exec — both can run plain .mjs
+      args:    [mcpScript],
+      env:     {},
+    };
+    // Only rewrite if the script path changed (e.g. user moved CCM)
+    if (
+      !existing ||
+      !Array.isArray(existing.args) ||
+      existing.args[0] !== mcpScript ||
+      existing.command !== desired.command
+    ) {
+      // Prefer plain `node` if available — keeps the entry portable across
+      // CCM upgrades (process.execPath inside Electron points at the
+      // electron binary). Fall back to electron's exec if node isn't found.
+      try {
+        const which = require('child_process').execFileSync(process.platform === 'win32' ? 'where' : 'which', ['node'], { encoding: 'utf8' }).split(/\r?\n/)[0].trim();
+        if (which) desired.command = which;
+      } catch (_) { /* keep process.execPath as fallback */ }
+
+      settings.mcpServers['ccm-browser'] = desired;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+      console.log(`[browser-mcp] registered MCP server in ${settingsPath}`);
+    } else {
+      console.log('[browser-mcp] MCP entry already current');
+    }
+  } catch (e) {
+    console.warn('[browser-mcp] registration error:', e.message);
+  }
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -375,6 +439,9 @@ app.on('before-quit', () => { app.isQuiting = true; });
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   _apercuStopServer(); // close local static server so port is freed immediately
+  // Tear down the browser MCP HTTP bridge + delete the endpoint file so any
+  // MCP child spawned while we're not running fails fast and clearly.
+  try { require('./browser-http-server').stopBrowserHttpServer(); } catch (_) {}
 });
 
 // ── IPC: app info ────────────────────────────────────────────────────────────
