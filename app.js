@@ -6755,16 +6755,11 @@ async function initBrowserPanel(bodyEl) {
     childList:      true, // catches new modals being mounted
   });
 
-  // Also yank the view on window blur (other app focused) so it doesn't
-  // float over the user's other windows.
-  const onBlur  = () => _browserSuspendViews();
-  const onFocus = () => evaluateOverlap();
-  window.addEventListener('blur',  onBlur);
-  window.addEventListener('focus', onFocus);
-  _browser.cleanups.push(() => {
-    window.removeEventListener('blur',  onBlur);
-    window.removeEventListener('focus', onFocus);
-  });
+  // NB: previously we suspended views on `window.blur` thinking a native
+  // child view could float over other OS apps. It can't — WebContentsView
+  // is parented to the BrowserWindow, so the OS handles z-order correctly
+  // when you alt-tab away. Suspending on blur was just causing the
+  // "browser disappears when I click something else" annoyance. Removed.
 
   // Open a starter tab so the panel isn't empty on first mount
   if (_browser.tabs.length === 0) {
