@@ -832,6 +832,262 @@ ipcMain.handle('browser:close', (_, viewId) => {
   return { ok: true };
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Browser operator API — exposed both as IPC (for renderer slash commands)
+// and on `global.ccmBrowser` so claude-service.js can invoke as agent tools.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function _firstBrowserView() {
+  // The agent always targets the most recently created tab. If we ever support
+  // multiple browser panels per window, this picks the newest across all.
+  let newest = null;
+  for (const entry of _browserViews.values()) {
+    if (!entry.view?.webContents?.isDestroyed?.()) newest = entry;
+  }
+  return newest;
+}
+
+async function _browserExec(viewIdOrNull, js, timeoutMs = 8000) {
+  const entry = viewIdOrNull
+    ? _browserViews.get(viewIdOrNull)
+    : _firstBrowserView();
+  if (!entry) throw new Error('No browser tab is open');
+  const wc = entry.view.webContents;
+  return Promise.race([
+    wc.executeJavaScript(js, true), // userGesture=true so click events fire
+    new Promise((_, rej) => setTimeout(() => rej(new Error('Browser script timed out')), timeoutMs)),
+  ]);
+}
+
+async function _browserWaitLoad(entry, timeoutMs = 15000) {
+  const wc = entry.view.webContents;
+  if (!wc.isLoading()) return;
+  return new Promise((resolve) => {
+    const done = () => { cleanup(); resolve(); };
+    const fail = () => { cleanup(); resolve(); };
+    const cleanup = () => {
+      clearTimeout(timer);
+      wc.off('did-finish-load', done);
+      wc.off('did-fail-load',   fail);
+      wc.off('did-stop-loading', done);
+    };
+    const timer = setTimeout(done, timeoutMs);
+    wc.once('did-finish-load', done);
+    wc.once('did-fail-load',   fail);
+    wc.once('did-stop-loading', done);
+  });
+}
+
+const ccmBrowser = {
+  isAvailable() {
+    return _browserViews.size > 0;
+  },
+
+  getActiveTab() {
+    const entry = _firstBrowserView();
+    if (!entry) return null;
+    const wc = entry.view.webContents;
+    return {
+      url:   wc.getURL(),
+      title: wc.getTitle(),
+      isLoading: wc.isLoading(),
+    };
+  },
+
+  async navigate(url) {
+    const entry = _firstBrowserView();
+    if (!entry) throw new Error('No browser tab is open. Ask the user to open the Browser panel first.');
+    const safe = _safeBrowseUrl(url);
+    if (!safe) throw new Error('Refused URL: ' + url);
+    await entry.view.webContents.loadURL(safe);
+    await _browserWaitLoad(entry);
+    return { url: entry.view.webContents.getURL(), title: entry.view.webContents.getTitle() };
+  },
+
+  async readPage(opts = {}) {
+    const maxChars = Math.max(500, Math.min(50000, opts.maxChars || 8000));
+    // Strip scripts/styles, then return cleaned innerText with structure.
+    const js = `
+      (function() {
+        const clone = document.body.cloneNode(true);
+        clone.querySelectorAll('script,style,noscript,iframe,svg').forEach(n => n.remove());
+        let text = clone.innerText || '';
+        text = text.replace(/\\n{3,}/g, '\\n\\n').replace(/[ \\t]+/g, ' ').trim();
+        return {
+          url:    location.href,
+          title:  document.title,
+          text:   text.slice(0, ${maxChars}),
+          truncated: text.length > ${maxChars},
+          totalChars: text.length,
+        };
+      })();
+    `;
+    return _browserExec(null, js);
+  },
+
+  async getElements(opts = {}) {
+    const limit = Math.max(10, Math.min(200, opts.limit || 60));
+    // Return clickable / fillable elements with stable selectors and visible text.
+    const js = `
+      (function() {
+        const items = [];
+        function visible(el) {
+          if (!el || !el.getBoundingClientRect) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return false;
+          const cs = window.getComputedStyle(el);
+          if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+          return true;
+        }
+        function trim(s) { return (s || '').replace(/\\s+/g, ' ').trim().slice(0, 100); }
+        function selectorFor(el) {
+          if (el.id) return '#' + CSS.escape(el.id);
+          if (el.name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
+          const cls = el.className && typeof el.className === 'string' && el.className.trim()
+            ? '.' + el.className.trim().split(/\\s+/).slice(0,2).map(c => CSS.escape(c)).join('.')
+            : '';
+          return el.tagName.toLowerCase() + cls;
+        }
+        const sel = 'a[href], button, input:not([type=hidden]), textarea, select, [role=button], [onclick]';
+        const all = Array.from(document.querySelectorAll(sel)).filter(visible);
+        for (let i = 0; i < all.length && items.length < ${limit}; i++) {
+          const el = all[i];
+          const tag = el.tagName.toLowerCase();
+          const r = el.getBoundingClientRect();
+          const item = {
+            i: items.length,
+            tag,
+            selector: selectorFor(el),
+            text:  trim(el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title')),
+            href:  tag === 'a' ? el.href : undefined,
+            type:  tag === 'input' ? el.type : undefined,
+            name:  el.name || undefined,
+            x: Math.round(r.left), y: Math.round(r.top),
+            w: Math.round(r.width), h: Math.round(r.height),
+          };
+          items.push(item);
+        }
+        return { url: location.href, title: document.title, elements: items };
+      })();
+    `;
+    return _browserExec(null, js);
+  },
+
+  async click(opts = {}) {
+    // Accept { selector }, { text } or { index } from get_elements
+    const { selector, text, index } = opts;
+    if (typeof index === 'number') {
+      // Re-query elements and click by index
+      const list = await this.getElements({ limit: 200 });
+      const target = list.elements[index];
+      if (!target) throw new Error('No element at index ' + index);
+      return _browserExec(null, `
+        (function() {
+          const el = document.querySelector(${JSON.stringify(target.selector)});
+          if (!el) return { ok: false, error: 'Element vanished' };
+          el.scrollIntoView({ block: 'center' });
+          el.click();
+          return { ok: true, url: location.href };
+        })();
+      `);
+    }
+    if (selector) {
+      return _browserExec(null, `
+        (function() {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return { ok: false, error: 'Selector not found' };
+          el.scrollIntoView({ block: 'center' });
+          el.click();
+          return { ok: true, url: location.href };
+        })();
+      `);
+    }
+    if (text) {
+      return _browserExec(null, `
+        (function() {
+          const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          const target = ${JSON.stringify(text)}.toLowerCase();
+          const candidates = Array.from(document.querySelectorAll('a,button,[role=button],input[type=button],input[type=submit]'));
+          const exact = candidates.find(el => norm(el.innerText || el.value) === target);
+          const part  = exact || candidates.find(el => norm(el.innerText || el.value).includes(target));
+          if (!part) return { ok: false, error: 'No element with that text' };
+          part.scrollIntoView({ block: 'center' });
+          part.click();
+          return { ok: true, url: location.href };
+        })();
+      `);
+    }
+    throw new Error('Provide selector, text, or index');
+  },
+
+  async type(opts = {}) {
+    const { selector, text, submit } = opts;
+    if (!selector || typeof text !== 'string') throw new Error('Need selector and text');
+    return _browserExec(null, `
+      (function() {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return { ok: false, error: 'Selector not found' };
+        el.focus();
+        el.value = ${JSON.stringify(text)};
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        ${submit ? `
+          // Submit the form if requested
+          const form = el.closest('form');
+          if (form) form.submit();
+          else el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        ` : ''}
+        return { ok: true };
+      })();
+    `);
+  },
+
+  async scroll(opts = {}) {
+    const { direction = 'down', amount = 600 } = opts;
+    const dy = direction === 'up' ? -amount : amount;
+    return _browserExec(null, `window.scrollBy({ top: ${dy}, behavior: 'smooth' }); 'ok'`);
+  },
+
+  async screenshot(opts = {}) {
+    const entry = _firstBrowserView();
+    if (!entry) throw new Error('No browser tab is open');
+    const image = await entry.view.webContents.capturePage();
+    const quality = Math.max(20, Math.min(95, opts.quality || 75));
+    const buf = image.toJPEG(quality);
+    return {
+      base64:    buf.toString('base64'),
+      mediaType: 'image/jpeg',
+      url:       entry.view.webContents.getURL(),
+      title:     entry.view.webContents.getTitle(),
+    };
+  },
+
+  async nav(action) {
+    const entry = _firstBrowserView();
+    if (!entry) throw new Error('No browser tab is open');
+    const nh = entry.view.webContents.navigationHistory;
+    switch (action) {
+      case 'back':    if (nh.canGoBack())    nh.goBack();    break;
+      case 'forward': if (nh.canGoForward()) nh.goForward(); break;
+      case 'reload':  entry.view.webContents.reload();       break;
+    }
+    await _browserWaitLoad(entry);
+    return { url: entry.view.webContents.getURL(), title: entry.view.webContents.getTitle() };
+  },
+};
+global.ccmBrowser = ccmBrowser;
+
+// IPC mirror — for renderer-driven invocations (slash commands, etc.)
+ipcMain.handle('browser:op-state',      ()      => ccmBrowser.getActiveTab());
+ipcMain.handle('browser:op-read',       (_, o)  => ccmBrowser.readPage(o || {}));
+ipcMain.handle('browser:op-elements',   (_, o)  => ccmBrowser.getElements(o || {}));
+ipcMain.handle('browser:op-screenshot', (_, o)  => ccmBrowser.screenshot(o || {}));
+ipcMain.handle('browser:op-click',      (_, o)  => ccmBrowser.click(o || {}));
+ipcMain.handle('browser:op-type',       (_, o)  => ccmBrowser.type(o || {}));
+ipcMain.handle('browser:op-scroll',     (_, o)  => ccmBrowser.scroll(o || {}));
+ipcMain.handle('browser:op-nav',        (_, o)  => ccmBrowser.nav(o?.action || 'reload'));
+ipcMain.handle('browser:op-navigate',   (_, o)  => ccmBrowser.navigate(o?.url));
+
 // When a window closes, destroy all its browser views so we don't leak processes.
 app.on('browser-window-created', (_, win) => {
   win.on('closed', () => {
