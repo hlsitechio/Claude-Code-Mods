@@ -347,6 +347,24 @@ async function runtimeEval({ expression, awaitPromise = true } = {}) {
   }
 }
 
+// runtimeRun — sibling of runtimeEval for STATEMENT BLOCKS (not expressions).
+// Use this when your code has top-level statements ending in `;`, declarations,
+// loops, etc. — chrome_runtime_eval wraps in `(async () => (EXPR))()` which
+// is expression-only and fails on statements with "Unexpected token ';'".
+//
+// Wrap pattern: `(async () => { CODE; return ... })()` so you can `await`,
+// declare variables, run for-loops, and optionally return a value at the end.
+async function runtimeRun({ code } = {}) {
+  if (!code) throw new Error('code (statement block) required');
+  const page = await _activePage();
+  try {
+    const result = await page.evaluate(`(async () => { ${code} })()`);
+    return { ok: true, result };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ── DOM ────────────────────────────────────────────────────────────────────
 async function domQuery({ selector } = {}) {
   if (!selector) throw new Error('selector required');
@@ -424,6 +442,140 @@ async function inputScroll({ amount = 600, direction = 'down' } = {}) {
   const dy = direction === 'up' ? -amount : amount;
   await page.evaluate(d => window.scrollBy({ top: d, behavior: 'smooth' }), dy);
   return { ok: true };
+}
+
+// domClick — selector-based click with auto-scroll-into-view + visible-rect
+// clamping. Solves the "click x=1294 hit dead air because target overflowed
+// the viewport" issue from the real-session feedback.
+//
+// Pipeline:
+//   1. scrollIntoView({ block: 'center', inline: 'center' }) so the target
+//      lands inside the visible viewport
+//   2. Wait one frame for layout to settle
+//   3. Verify the element's rect is now inside the viewport
+//   4. Click at its geometric center (Puppeteer's page.click handles that)
+async function domClick({ selector } = {}) {
+  if (!selector) throw new Error('selector required');
+  const page = await _activePage();
+  // Scroll the target into the visible viewport
+  const visible = await page.evaluate(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return { found: false };
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    return {
+      found:    true,
+      rect:     { x: r.left, y: r.top, w: r.width, h: r.height },
+      inViewport: r.left >= 0 && r.top >= 0 &&
+                  r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+    };
+  }, selector);
+  if (!visible.found) return { ok: false, error: 'selector not found: ' + selector };
+  // Give the browser a frame to render the new scroll position
+  await new Promise(r => setTimeout(r, 50));
+  // Puppeteer's click ALSO scrolls and computes a safe point — belt and suspenders
+  try {
+    await page.click(selector);
+    return { ok: true, selector, rect: visible.rect, inViewport: visible.inViewport };
+  } catch (e) {
+    return { ok: false, error: e.message, rect: visible.rect };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CodeMirror 6 primitives — for live-editing CM-based editors (Lovable.dev,
+// CodeSandbox, vscode-web, etc). All four tools below operate on the
+// currently-active .cm-content element on the page.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// cmFocus — click the CodeMirror editor's visible center and verify focus
+// landed on .cm-content (not on a search-result button or toolbar). This is
+// the "one primitive, never think about it again" helper from the feedback.
+async function cmFocus() {
+  const page = await _activePage();
+  // Find the editor + its visible center
+  const target = await page.evaluate(() => {
+    const cm = document.querySelector('.cm-content');
+    if (!cm) return { ok: false, error: '.cm-content not found on this page' };
+    cm.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const r = cm.getBoundingClientRect();
+    // Clamp to the visible viewport — handles the "editor extends past split"
+    // case where geometric center is off-screen.
+    const x = Math.max(4, Math.min(window.innerWidth  - 4, r.left + Math.min(r.width  / 2, window.innerWidth  / 2)));
+    const y = Math.max(4, Math.min(window.innerHeight - 4, r.top  + Math.min(r.height / 2, window.innerHeight / 2)));
+    return { ok: true, x, y };
+  });
+  if (!target.ok) return target;
+  // Click the visible center — Puppeteer's mouse.click handles the actual gesture
+  await page.mouse.click(target.x, target.y);
+  // Verify focus landed on .cm-content
+  await new Promise(r => setTimeout(r, 60));
+  const verified = await page.evaluate(() => {
+    return document.activeElement?.classList?.contains('cm-content') ||
+           document.activeElement?.closest?.('.cm-editor') !== null;
+  });
+  return { ok: verified, focused: verified, x: target.x, y: target.y };
+}
+
+// cmGotoLine — jump to a specific line in the CodeMirror editor.
+// CM6's default keymap binds Ctrl+G to "open goto line dialog". We focus,
+// fire the chord, type the line number, press Enter. Works on Lovable.dev,
+// CodeSandbox, and any vanilla CM6 install.
+async function cmGotoLine({ line } = {}) {
+  if (typeof line !== 'number' || line < 1) throw new Error('line (positive integer) required');
+  const focusResult = await cmFocus();
+  if (!focusResult.ok) return focusResult;
+  const page = await _activePage();
+  // Open the goto-line dialog (CM6 default: Ctrl+G)
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyG');
+  await page.keyboard.up('Control');
+  await new Promise(r => setTimeout(r, 150)); // wait for dialog to mount
+  // Type the line number + Enter
+  await page.keyboard.type(String(line));
+  await page.keyboard.press('Enter');
+  await new Promise(r => setTimeout(r, 100)); // wait for navigation
+  return { ok: true, line };
+}
+
+// cmReplaceLine — atomic line replacement. The killer combo:
+//   1. Focus editor                       (cmFocus)
+//   2. Jump to line N                     (cmGotoLine)
+//   3. Home → select to end of line       (Home, Shift+End)
+//   4. Replace with new content           (Input.insertText — bypasses CM
+//                                          auto-pairing of brackets/quotes)
+//   5. Save                               (Ctrl+S, configurable)
+// Replaces the 30+ keystroke dance from the real session with one call.
+async function cmReplaceLine({ line, content, save = true } = {}) {
+  if (typeof line !== 'number' || line < 1) throw new Error('line (positive integer) required');
+  if (typeof content !== 'string') throw new Error('content (replacement string) required');
+  const page = await _activePage();
+  // 1+2 — focus + goto line
+  const goto = await cmGotoLine({ line });
+  if (!goto.ok) return goto;
+  // 3 — Home then Shift+End to select the whole line
+  await page.keyboard.press('Home');
+  await page.keyboard.down('Shift');
+  await page.keyboard.press('End');
+  await page.keyboard.up('Shift');
+  // 4 — replace via Input.insertText (CDP-level, bypasses CM6 auto-pairing
+  //     of brackets/quotes that mangles content typed via keyboard)
+  const session = await page.target().createCDPSession();
+  try {
+    await session.send('Input.insertText', { text: content });
+  } finally {
+    try { await session.detach(); } catch (_) {}
+  }
+  // 5 — save (Ctrl+S). Some hosts intercept it (Lovable does), others ignore.
+  if (save) {
+    await new Promise(r => setTimeout(r, 80));
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyS');
+    await page.keyboard.up('Control');
+    await new Promise(r => setTimeout(r, 200));
+  }
+  return { ok: true, line, length: content.length, saved: !!save };
 }
 
 // ── Generic CDP escape hatch ───────────────────────────────────────────────
@@ -1102,10 +1254,13 @@ module.exports = {
   launch, close, status, findChrome, profileDir,
   targetList, targetNewTab, targetCloseTab, targetActivateTab,
   pageNavigate, pageReload, pageScreenshot, pagePdf, pageWaitForLoad,
-  runtimeEval,
-  domQuery, domQueryAll, domGetText,
+  runtimeEval, runtimeRun,
+  domQuery, domQueryAll, domGetText, domClick,
   inputClick, inputType, inputKey, inputScroll,
   cdpRaw,
+
+  // Phase 8 — CodeMirror primitives
+  cmFocus, cmGotoLine, cmReplaceLine,
 
   // Phase 2 — Network
   networkGetCookies, networkSetCookie, networkDeleteCookies, networkClearAllCookies,
