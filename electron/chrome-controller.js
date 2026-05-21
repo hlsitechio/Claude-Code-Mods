@@ -1038,6 +1038,81 @@ async function frameClick({ sessionId, selector } = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Phase 11.5 — Auto-stabilize
+//
+// After every mutating action we wait until the page has actually settled
+// before returning. "Settled" = no in-flight navigation, no in-flight fetch/XHR
+// for `networkIdleMs`, and no DOM mutations for `mutationIdleMs`. Bounded by
+// `timeout`. This is what Playwright calls "auto-waiting" — except we apply it
+// to LLM-issued actions where flakiness is the #1 failure mode.
+//
+// Implementation lives partly in the page (MutationObserver, fetch hook) and
+// partly here (Network domain events via CDP).
+// ═══════════════════════════════════════════════════════════════════════════
+const _STABILIZE_PAGE_SCRIPT = `
+(async ({ networkIdleMs, mutationIdleMs, timeout }) => {
+  const start = Date.now();
+  // Install a hook on first call so we can track in-flight fetches.
+  if (!window.__ccmStab) {
+    const w = window;
+    w.__ccmStab = { inflight: 0, lastNet: Date.now(), lastMut: Date.now() };
+    const origFetch = w.fetch;
+    if (origFetch) {
+      w.fetch = function(...a) {
+        w.__ccmStab.inflight++;
+        return origFetch.apply(this, a).finally(() => {
+          w.__ccmStab.inflight = Math.max(0, w.__ccmStab.inflight - 1);
+          w.__ccmStab.lastNet = Date.now();
+        });
+      };
+    }
+    const OX = w.XMLHttpRequest;
+    if (OX) {
+      const send = OX.prototype.send;
+      OX.prototype.send = function(...a) {
+        w.__ccmStab.inflight++;
+        this.addEventListener('loadend', () => {
+          w.__ccmStab.inflight = Math.max(0, w.__ccmStab.inflight - 1);
+          w.__ccmStab.lastNet = Date.now();
+        });
+        return send.apply(this, a);
+      };
+    }
+    const mo = new MutationObserver(() => { w.__ccmStab.lastMut = Date.now(); });
+    mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    w.__ccmStab.lastMut = Date.now();
+  }
+  const s = window.__ccmStab;
+  // Poll until both quiet OR timeout.
+  while (Date.now() - start < timeout) {
+    const now = Date.now();
+    const netQuiet = s.inflight === 0 && (now - s.lastNet) >= networkIdleMs;
+    const mutQuiet = (now - s.lastMut) >= mutationIdleMs;
+    const ready    = document.readyState === 'complete';
+    if (netQuiet && mutQuiet && ready) {
+      return { ok: true, settled: true, waited: now - start };
+    }
+    await new Promise(r => setTimeout(r, 50));
+  }
+  return { ok: true, settled: false, waited: Date.now() - start, reason: 'timeout' };
+})
+`;
+
+async function _stabilize({ timeout = 5000, networkIdleMs = 500, mutationIdleMs = 200 } = {}) {
+  const page = await _activePage();
+  try {
+    return await page.evaluate(_STABILIZE_PAGE_SCRIPT + '({ networkIdleMs: ' + networkIdleMs + ', mutationIdleMs: ' + mutationIdleMs + ', timeout: ' + timeout + ' })');
+  } catch (e) {
+    // Navigation mid-evaluate is common and benign — just report it.
+    return { ok: true, settled: false, reason: 'context-lost' };
+  }
+}
+
+async function stabilize(opts = {}) {
+  return _stabilize(opts);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Phase 11 — Semantic observation (the chrome_observe primitive)
 //
 // Single fast pass over the page. Returns an indented YAML-style tree of every
@@ -1312,35 +1387,53 @@ function _refSel(ref) {
   return '[data-ccm-ref="' + ref + '"]';
 }
 
-async function clickRef({ ref } = {}) {
-  return inputClick({ selector: _refSel(ref) });
+// Every ref-based action auto-stabilizes (waits for page to settle) and
+// includes the observe_delta in its return value. One call per intent —
+// no separate "did it work?" round-trip.
+async function _wrapAction(fn, { observe = true, stabilizeMs = 5000 } = {}) {
+  const before = await _activePage().then(p =>
+    p.evaluate(`(window.__ccmObserve && window.__ccmObserve.sig) ? true : false`)
+  ).catch(() => false);
+  const result = await fn();
+  let stab = null;
+  try { stab = await _stabilize({ timeout: stabilizeMs }); } catch (_) {}
+  let delta = null;
+  if (observe && before) {
+    try { delta = await observeDelta(); } catch (_) {}
+  }
+  return { ...result, stabilized: stab, delta };
 }
 
-async function typeRef({ ref, text, submit = false, delay = 20 } = {}) {
+async function clickRef({ ref, observe = true, stabilizeMs = 5000 } = {}) {
+  return _wrapAction(() => inputClick({ selector: _refSel(ref) }), { observe, stabilizeMs });
+}
+
+async function typeRef({ ref, text, submit = false, observe = true, stabilizeMs = 5000 } = {}) {
   if (typeof text !== 'string') throw new Error('text required');
   const sel = _refSel(ref);
-  // Use the same React-safe setter trick as frameType so controlled inputs update.
-  const page = await _activePage();
-  await page.evaluate((s, val) => {
-    const el = document.querySelector(s);
-    if (!el) return;
-    el.focus();
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
-               || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
-    if (setter && setter.set) setter.set.call(el, val); else el.value = val;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }, sel, text);
-  if (submit) {
-    await page.keyboard.press('Enter');
-  }
-  return { ok: true, ref, typed: text.length };
+  return _wrapAction(async () => {
+    const page = await _activePage();
+    await page.evaluate((s, val) => {
+      const el = document.querySelector(s);
+      if (!el) return;
+      el.focus();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+                 || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+      if (setter && setter.set) setter.set.call(el, val); else el.value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, sel, text);
+    if (submit) await page.keyboard.press('Enter');
+    return { ok: true, ref, typed: text.length };
+  }, { observe, stabilizeMs });
 }
 
-async function focusRef({ ref } = {}) {
-  const page = await _activePage();
-  await page.focus(_refSel(ref));
-  return { ok: true, ref };
+async function focusRef({ ref, observe = false, stabilizeMs = 1000 } = {}) {
+  return _wrapAction(async () => {
+    const page = await _activePage();
+    await page.focus(_refSel(ref));
+    return { ok: true, ref };
+  }, { observe, stabilizeMs });
 }
 
 async function frameType({ sessionId, selector, text, submit = false } = {}) {
@@ -2032,8 +2125,8 @@ module.exports = {
   inputClick, inputType, inputKey, inputScroll,
   cdpRaw,
   frameList, frameAttach, frameDetach, frameEval, frameClick, frameType,
-  // Phase 11 — semantic observation + ref-based actions
-  observe, observeDelta, clickRef, typeRef, focusRef,
+  // Phase 11 — semantic observation + ref-based actions + auto-stabilize
+  observe, observeDelta, clickRef, typeRef, focusRef, stabilize,
 
   // Phase 8 — CodeMirror primitives
   cmFocus, cmGotoLine, cmReplaceLine,

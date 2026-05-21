@@ -241,6 +241,7 @@ async function _handle(req, res) {
       case 'chrome-click-ref':           result = await chrome.clickRef(body); break;
       case 'chrome-type-ref':            result = await chrome.typeRef(body); break;
       case 'chrome-focus-ref':           result = await chrome.focusRef(body); break;
+      case 'chrome-stabilize':           result = await chrome.stabilize(body); break;
 
       // Cross-origin frame (OOPIF) access — 3DS, reCAPTCHA, embedded auth.
       case 'chrome-frame-list':          result = await chrome.frameList(); break;

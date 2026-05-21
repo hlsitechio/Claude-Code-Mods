@@ -822,23 +822,29 @@ const TOOLS = [
   },
   {
     name: 'chrome_click_ref',
-    description: 'Click an element by its ref from chrome_observe. Stable across re-renders (the ref rides on data-ccm-ref on the DOM node itself).',
+    description: 'Click an element by its ref from chrome_observe. Auto-stabilizes after the click (waits for network + DOM to settle) and returns the observe_delta in the response — one round-trip per intent. Pass observe=false to skip the delta if you don\'t need it.',
     inputSchema: {
       type: 'object',
-      properties: { ref: { type: 'number' } },
+      properties: {
+        ref:         { type: 'number' },
+        observe:     { type: 'boolean', description: 'Include observe_delta in response (default true)' },
+        stabilizeMs: { type: 'number',  description: 'Max ms to wait for page to settle (default 5000)' },
+      },
       required: ['ref'],
       additionalProperties: false,
     },
   },
   {
     name: 'chrome_type_ref',
-    description: 'Type text into an input by ref (React-safe — sets value via native setter + fires input/change). submit=true to press Enter after.',
+    description: 'Type text into an input by ref (React-safe — sets value via native setter + fires input/change). submit=true to press Enter after. Auto-stabilizes + returns observe_delta.',
     inputSchema: {
       type: 'object',
       properties: {
-        ref:    { type: 'number' },
-        text:   { type: 'string' },
-        submit: { type: 'boolean' },
+        ref:         { type: 'number' },
+        text:        { type: 'string' },
+        submit:      { type: 'boolean' },
+        observe:     { type: 'boolean', description: 'Include observe_delta in response (default true)' },
+        stabilizeMs: { type: 'number' },
       },
       required: ['ref', 'text'],
       additionalProperties: false,
@@ -849,8 +855,25 @@ const TOOLS = [
     description: 'Focus an element by ref (useful before chrome_input_key sequences).',
     inputSchema: {
       type: 'object',
-      properties: { ref: { type: 'number' } },
+      properties: {
+        ref:          { type: 'number' },
+        observe:      { type: 'boolean', description: 'Include observe_delta in response (default false for focus)' },
+        stabilizeMs:  { type: 'number',  description: 'Max ms to wait for page to settle after action (default 1000)' },
+      },
       required: ['ref'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_stabilize',
+    description: 'Wait until the page has settled: no in-flight nav, network idle (default 500ms quiet), DOM mutation idle (default 200ms quiet). Bounded by `timeout` (default 5000ms). Returns { settled, waited }. ref-based actions call this automatically — use explicitly only when you need to wait after a non-action (e.g. after navigate).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timeout:        { type: 'number' },
+        networkIdleMs:  { type: 'number' },
+        mutationIdleMs: { type: 'number' },
+      },
       additionalProperties: false,
     },
   },
@@ -1317,6 +1340,7 @@ async function execTool(name, args = {}) {
     case 'chrome_click_ref':        return callOp('chrome-click-ref', args);
     case 'chrome_type_ref':         return callOp('chrome-type-ref', args);
     case 'chrome_focus_ref':        return callOp('chrome-focus-ref', args);
+    case 'chrome_stabilize':        return callOp('chrome-stabilize', args);
 
     // ── Chrome · cross-origin frame access ──────────────────────
     case 'chrome_frame_list':       return callOp('chrome-frame-list');
