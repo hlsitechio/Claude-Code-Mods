@@ -59,6 +59,15 @@ let _browser     = null;  // Puppeteer Browser (attached, not spawned)
 let _connectedAt = 0;
 let _chromePath  = null;  // resolved path to chrome.exe / Chrome.app / chrome
 
+// ── Phase 9 — target tracking ──────────────────────────────────────────────
+// Puppeteer exposes Target.targetInfo but DOESN'T give us "last activated"
+// timestamps. We track these ourselves on every activation/navigation so the
+// MCP can tell two identical-URL tabs apart and confirm which one it's
+// currently driving (from real-session feedback: "Two identical tabs in
+// chrome_target_list. Both said `Memorify - Lovable` at the same URL.").
+const _targetActivations = new Map();  // targetId → unix ms timestamp
+let _attachedTargetId    = null;       // the page _activePage() most recently picked
+
 // CDP endpoint the embedded Chromium exposes (set by main.js's command-line
 // switch). We connect here instead of launching a separate Chrome process —
 // so the `chrome_*` tools drive the SAME WebContentsView the user sees.
@@ -208,7 +217,8 @@ function _isBrowserableUrl(url) {
 
 // Most operations target the "active" browser-panel page — NOT the CCM app
 // UI itself. We filter the page list to URLs that look like the user is
-// browsing, then pick the last one (most recently opened/active).
+// browsing, then prefer the most-recently-activated tab (tracked in
+// _targetActivations), falling back to the last entry in the page list.
 async function _activePage() {
   const browser = await _ensureBrowser();
   const pages = await browser.pages();
@@ -222,8 +232,19 @@ async function _activePage() {
       '(right-click dock → Add panel → Browser) and load a page first.'
     );
   }
-  // Prefer the most recently opened — usually the active tab in the panel
-  return browseable[browseable.length - 1];
+  // Phase 9 — prefer the most-recently-activated browseable tab. Disambiguates
+  // when two tabs share a URL/title (the "Memorify - Lovable" twin-tab trap).
+  let best = browseable[browseable.length - 1]; // fallback: last in list
+  let bestTs = -1;
+  for (const p of browseable) {
+    const ts = _targetActivations.get(p.target()._targetId);
+    if (typeof ts === 'number' && ts > bestTs) {
+      bestTs = ts;
+      best = p;
+    }
+  }
+  _attachedTargetId = best.target()._targetId;
+  return best;
 }
 
 async function _pageById(targetId) {
@@ -234,7 +255,12 @@ async function _pageById(targetId) {
 
 // ── Target / tab operations ────────────────────────────────────────────────
 // targetList returns ONLY browser-panel tabs, filtered to exclude the CCM
-// app UI and other Electron internals.
+// app UI and other Electron internals. Each tab includes:
+//   - lastActivated: unix-ms timestamp of our last bringToFront/navigate
+//                    (null if never touched this session)
+//   - attached: true if this is the tab _activePage() last picked (= the tab
+//               every chrome_* tool is currently driving). Disambiguates
+//               identical-URL twin tabs.
 async function targetList() {
   const browser = await _ensureBrowser();
   const pages   = await browser.pages();
@@ -242,14 +268,22 @@ async function targetList() {
   for (const p of pages) {
     const url = p.url();
     if (!_isBrowserableUrl(url)) continue;
+    const id = p.target()._targetId;
     out.push({
-      id:    p.target()._targetId,
+      id,
       url,
-      title: await p.title().catch(() => ''),
-      type:  p.target().type(),
+      title:         await p.title().catch(() => ''),
+      type:          p.target().type(),
+      lastActivated: _targetActivations.get(id) || null,
+      attached:      id === _attachedTargetId,
     });
   }
-  return { tabs: out, count: out.length };
+  // Sort: attached first, then most-recently-activated, then everything else
+  out.sort((a, b) => {
+    if (a.attached !== b.attached) return a.attached ? -1 : 1;
+    return (b.lastActivated || 0) - (a.lastActivated || 0);
+  });
+  return { tabs: out, count: out.length, attachedId: _attachedTargetId };
 }
 
 async function targetNewTab({ url } = {}) {
@@ -260,9 +294,11 @@ async function targetNewTab({ url } = {}) {
   if (!url) throw new Error('url required (cannot create new tabs from CDP in attached mode — open one in CCM\'s Browser panel first)');
   const page = await _activePage();
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  const id = page.target()._targetId;
+  _targetActivations.set(id, Date.now());
   return {
     ok:    true,
-    id:    page.target()._targetId,
+    id,
     url:   page.url(),
     title: await page.title().catch(() => ''),
     note:  'Navigated active browser-panel tab. Use the CCM panel UI to open NEW tabs.',
@@ -272,7 +308,10 @@ async function targetNewTab({ url } = {}) {
 async function targetCloseTab({ id } = {}) {
   const page = id ? await _pageById(id) : await _activePage();
   if (!page) return { ok: false, error: 'Tab not found' };
+  const targetId = page.target()._targetId;
   await page.close();
+  _targetActivations.delete(targetId);
+  if (_attachedTargetId === targetId) _attachedTargetId = null;
   return { ok: true };
 }
 
@@ -280,7 +319,9 @@ async function targetActivateTab({ id } = {}) {
   const page = id ? await _pageById(id) : null;
   if (!page) return { ok: false, error: 'Tab not found' };
   await page.bringToFront();
-  return { ok: true, id, url: page.url() };
+  _targetActivations.set(id, Date.now());
+  _attachedTargetId = id;
+  return { ok: true, id, url: page.url(), lastActivated: _targetActivations.get(id) };
 }
 
 // ── Page operations ────────────────────────────────────────────────────────
@@ -288,6 +329,7 @@ async function pageNavigate({ url, waitUntil = 'load', timeout = 30000 } = {}) {
   if (!url) throw new Error('url required');
   const page = await _activePage();
   const resp = await page.goto(url, { waitUntil, timeout });
+  _targetActivations.set(page.target()._targetId, Date.now());
   return {
     ok:     true,
     url:    page.url(),
@@ -576,6 +618,303 @@ async function cmReplaceLine({ line, content, save = true } = {}) {
     await new Promise(r => setTimeout(r, 200));
   }
   return { ok: true, line, length: content.length, saved: !!save };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 9 — playbook follow-ups (real-session enhancements from session 2)
+// ═══════════════════════════════════════════════════════════════════════════
+// Three problems this block solves:
+//   1. "Save redirects away from ?view=codeEditor"  → cmEnsureEditor
+//   2. "No direct 'open file at line N' primitive"  → cmOpenAtLine
+//   3. "cm_edit_atomic([{file,find,replace}])"      → cmEditAtomic
+//   4. "Element-to-source picker as MCP tool"       → pickerInstall/Capture
+//
+// All four are built on the Phase 8 primitives (cmFocus, cmGotoLine,
+// cmReplaceLine) — no new low-level mechanisms.
+
+// cmEnsureEditor — verify `.cm-content` is mounted on the active page; if not,
+// try to re-navigate with `?view=codeEditor` (Lovable's pattern, harmless
+// elsewhere). Solves "Save sometimes drops the editor query param".
+async function cmEnsureEditor() {
+  const page = await _activePage();
+  const hasEditor = await page.evaluate(() => !!document.querySelector('.cm-content'));
+  if (hasEditor) return { ok: true, alreadyMounted: true, url: page.url() };
+  // Try to re-navigate with ?view=codeEditor
+  let target;
+  try {
+    const u = new URL(page.url());
+    u.searchParams.set('view', 'codeEditor');
+    target = u.toString();
+  } catch (_) {
+    return { ok: false, error: 'page URL not parseable: ' + page.url() };
+  }
+  if (target === page.url()) {
+    return { ok: false, error: '.cm-content not mounted and URL already has ?view=codeEditor — editor failed to render' };
+  }
+  await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  _targetActivations.set(page.target()._targetId, Date.now());
+  try {
+    await page.waitForSelector('.cm-content', { timeout: 5000 });
+    return { ok: true, reNavigated: true, url: page.url() };
+  } catch (_) {
+    return { ok: false, error: 'editor did not mount within 5s after re-navigation', url: page.url() };
+  }
+}
+
+// cmOpenAtLine — best-effort "open file at line N". Sets `file` and `line`
+// query params on the current URL and navigates. Works on hosts that read
+// those params (Lovable does — `?file=...&line=...`); falls back to calling
+// cmGotoLine after navigation so the line jump is guaranteed even when the
+// host ignores the line param.
+//
+// Caller responsibility: this DOES NOT open files via the search-code UI —
+// it assumes the current page (e.g. a Lovable project) understands the file
+// param. If the host doesn't, search-code via chrome_input_type is still the
+// fallback.
+async function cmOpenAtLine({ file, line } = {}) {
+  if (!file || typeof file !== 'string') throw new Error('file (path string) required');
+  const page = await _activePage();
+  let target;
+  try {
+    const u = new URL(page.url());
+    u.searchParams.set('view', 'codeEditor');
+    u.searchParams.set('file', file);
+    if (typeof line === 'number' && line > 0) u.searchParams.set('line', String(line));
+    target = u.toString();
+  } catch (_) {
+    return { ok: false, error: 'current URL not parseable: ' + page.url() };
+  }
+  await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  _targetActivations.set(page.target()._targetId, Date.now());
+  // Wait for editor to mount
+  try {
+    await page.waitForSelector('.cm-content', { timeout: 6000 });
+  } catch (_) {
+    return { ok: false, error: '.cm-content did not mount within 6s — URL params may not be supported by this host', url: page.url() };
+  }
+  // Belt-and-suspenders: jump to line via Ctrl+G even if the URL param worked
+  let jumped = null;
+  if (typeof line === 'number' && line > 0) {
+    await new Promise(r => setTimeout(r, 200));
+    jumped = await cmGotoLine({ line });
+  }
+  return { ok: true, file, line, url: page.url(), jumped };
+}
+
+// cmEditAtomic — multi-file batch editor. Each entry: { line, content, file? }
+//   - If `file` is present and different from current, save current → open new
+//   - Apply cmReplaceLine with save=false (we batch-save per file)
+//   - On file boundary or end-of-list, send Ctrl+S once
+//
+// Order of edits: caller-controlled. Since cmReplaceLine only replaces (no
+// insert/delete), line numbers stay valid in any order.
+//
+// Returns { ok, edits: [{file,line,ok,error?}], savedFiles: [...] }
+async function cmEditAtomic({ edits = [], save = true, ensureEditor = true } = {}) {
+  if (!Array.isArray(edits) || edits.length === 0) {
+    throw new Error('edits (non-empty array of {line, content, file?}) required');
+  }
+  const results = [];
+  const savedFiles = new Set();
+  let currentFile = null;
+  let needsSave = false;
+
+  const saveCurrent = async () => {
+    if (!save || !needsSave) return;
+    const page = await _activePage();
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyS');
+    await page.keyboard.up('Control');
+    await new Promise(r => setTimeout(r, 300));
+    savedFiles.add(currentFile || '(current)');
+    needsSave = false;
+  };
+
+  for (let i = 0; i < edits.length; i++) {
+    const e = edits[i] || {};
+    if (typeof e.line !== 'number' || e.line < 1) {
+      results.push({ ...e, ok: false, error: 'edit[' + i + '].line (positive integer) required' });
+      continue;
+    }
+    if (typeof e.content !== 'string') {
+      results.push({ ...e, ok: false, error: 'edit[' + i + '].content (string) required' });
+      continue;
+    }
+    try {
+      // File-switch handling
+      if (e.file && e.file !== currentFile) {
+        // Save previous file (if any)
+        await saveCurrent();
+        if (ensureEditor) await cmEnsureEditor();
+        const opened = await cmOpenAtLine({ file: e.file, line: e.line });
+        if (!opened.ok) {
+          results.push({ ...e, ok: false, error: 'could not open file: ' + (opened.error || 'unknown') });
+          continue;
+        }
+        currentFile = e.file;
+      }
+      // Apply edit (save=false, we batch-save)
+      const r = await cmReplaceLine({ line: e.line, content: e.content, save: false });
+      results.push({ ...e, ...r });
+      if (r.ok) needsSave = true;
+    } catch (err) {
+      results.push({ ...e, ok: false, error: err.message });
+    }
+  }
+
+  // Save the final file
+  await saveCurrent();
+
+  const allOk = results.every(r => r.ok);
+  return { ok: allOk, edits: results, savedFiles: Array.from(savedFiles) };
+}
+
+// ── Element-to-source picker — codified from element_to_source_picker.js ───
+// Injects an overlay that highlights any hovered element + shows its React
+// fiber `_debugSource` (Vite/CRA dev builds expose this via the JSX-source
+// Babel plugin). On click, captures `{ tag, text, classes, source, chain }`
+// to `window.__pickerResult` and sets `window.__pickerDone = true`.
+// pickerCapture polls those globals and returns the captured result.
+const PICKER_SCRIPT = `(() => {
+  document.querySelectorAll('[data-picker]').forEach(e => e.remove());
+  window.__pickerResult = null;
+  window.__pickerDone = false;
+  const findFiber = el => {
+    const k = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
+    return k ? el[k] : null;
+  };
+  const findSource = fiber => {
+    let f = fiber, d = 0;
+    while (f && d < 30) {
+      if (f._debugSource) {
+        const t = typeof f.type === 'string' ? f.type : (f.type?.displayName || f.type?.name || '?');
+        return { ...f._debugSource, componentType: t };
+      }
+      f = f.return; d++;
+    }
+    return null;
+  };
+  const findSourceChain = fiber => {
+    const chain = [];
+    let f = fiber, d = 0;
+    while (f && d < 30) {
+      if (f._debugSource) {
+        const t = typeof f.type === 'string' ? f.type : (f.type?.displayName || f.type?.name || '?');
+        chain.push({ type: t, file: f._debugSource.fileName.split(/[\\\\/]/).pop(), line: f._debugSource.lineNumber });
+      }
+      f = f.return; d++;
+    }
+    return chain;
+  };
+  const overlay = document.createElement('div');
+  overlay.dataset.picker = '1';
+  Object.assign(overlay.style, {
+    position: 'fixed', pointerEvents: 'none', border: '2px solid #00e5ff',
+    background: 'rgba(0,229,255,0.18)', zIndex: 2147483647, transition: 'all 60ms',
+    display: 'none', boxShadow: '0 0 12px rgba(0,229,255,0.6)',
+  });
+  document.body.appendChild(overlay);
+  const tip = document.createElement('div');
+  tip.dataset.picker = '1';
+  Object.assign(tip.style, {
+    position: 'fixed', pointerEvents: 'none', background: '#0a0a0a',
+    color: '#00e5ff', padding: '6px 10px',
+    font: '600 12px ui-monospace, SFMono-Regular, monospace',
+    zIndex: 2147483647, borderRadius: '6px', display: 'none',
+    border: '1px solid #00e5ff', boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+  });
+  document.body.appendChild(tip);
+  const banner = document.createElement('div');
+  banner.dataset.picker = '1';
+  banner.textContent = 'PICKER ACTIVE — hover & click any element';
+  Object.assign(banner.style, {
+    position: 'fixed', top: '10px', left: '50%', transform: 'translateX(-50%)',
+    background: '#00e5ff', color: '#000', padding: '8px 16px',
+    font: '600 13px ui-sans-serif, system-ui', zIndex: 2147483647,
+    borderRadius: '999px', boxShadow: '0 4px 20px rgba(0,229,255,0.5)',
+  });
+  document.body.appendChild(banner);
+  const move = e => {
+    const el = e.target;
+    if (el.dataset?.picker) return;
+    const r = el.getBoundingClientRect();
+    Object.assign(overlay.style, {
+      display: 'block', left: r.x + 'px', top: r.y + 'px',
+      width: r.width + 'px', height: r.height + 'px',
+    });
+    const f = findFiber(el);
+    const s = f ? findSource(f) : null;
+    tip.textContent = s
+      ? '<' + s.componentType + '>  ' + s.fileName.split(/[\\\\/]/).pop() + ':' + s.lineNumber
+      : '(no source — not a dev build?)';
+    Object.assign(tip.style, {
+      display: 'block', left: r.x + 'px', top: Math.max(4, r.y - 30) + 'px',
+    });
+  };
+  const click = e => {
+    const el = e.target;
+    if (el.dataset?.picker) return;
+    e.preventDefault(); e.stopPropagation();
+    const f = findFiber(el);
+    const s = f ? findSource(f) : null;
+    const chain = f ? findSourceChain(f) : [];
+    window.__pickerResult = {
+      tag: el.tagName,
+      text: (el.textContent || '').slice(0, 120),
+      classes: (el.className && el.className.toString) ? el.className.toString() : '',
+      source: s, chain,
+    };
+    window.__pickerDone = true;
+    document.removeEventListener('mousemove', move, true);
+    document.removeEventListener('click', click, true);
+    [overlay, tip, banner].forEach(n => n.remove());
+  };
+  document.addEventListener('mousemove', move, true);
+  document.addEventListener('click', click, true);
+  return 'picker installed';
+})()`;
+
+async function pickerInstall() {
+  const page = await _activePage();
+  const session = await page.target().createCDPSession();
+  try {
+    const r = await session.send('Runtime.evaluate', {
+      expression: PICKER_SCRIPT,
+      awaitPromise: false,
+      returnByValue: true,
+    });
+    if (r.exceptionDetails) {
+      return { ok: false, error: r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'install failed' };
+    }
+    return { ok: true, message: r.result?.value || 'installed', url: page.url() };
+  } finally { try { await session.detach(); } catch (_) {} }
+}
+
+async function pickerCapture({ timeoutMs = 30000 } = {}) {
+  const page = await _activePage();
+  const limitMs = Math.max(1000, Math.min(300000, timeoutMs));
+  const t0 = Date.now();
+  while (Date.now() - t0 < limitMs) {
+    const probe = await page.evaluate(() => ({
+      done:   !!window.__pickerDone,
+      result: window.__pickerResult,
+    }));
+    if (probe.done && probe.result) {
+      return { ok: true, elapsedMs: Date.now() - t0, ...probe.result };
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return { ok: false, error: 'picker timed out after ' + limitMs + 'ms (no element clicked)' };
+}
+
+async function pickerCancel() {
+  const page = await _activePage();
+  await page.evaluate(() => {
+    document.querySelectorAll('[data-picker]').forEach(e => e.remove());
+    window.__pickerDone = true;
+    window.__pickerResult = null;
+  });
+  return { ok: true };
 }
 
 // ── Generic CDP escape hatch ───────────────────────────────────────────────
@@ -1261,6 +1600,10 @@ module.exports = {
 
   // Phase 8 — CodeMirror primitives
   cmFocus, cmGotoLine, cmReplaceLine,
+
+  // Phase 9 — multi-file batch, open-at-line, save-survivor, picker
+  cmEnsureEditor, cmOpenAtLine, cmEditAtomic,
+  pickerInstall, pickerCapture, pickerCancel,
 
   // Phase 2 — Network
   networkGetCookies, networkSetCookie, networkDeleteCookies, networkClearAllCookies,

@@ -448,7 +448,7 @@ const TOOLS = [
   // ── Target / tabs ──────────────────────────────────────────────────────
   {
     name: 'chrome_target_list',
-    description: 'List all open tabs in Claude\'s Chrome — id, url, title, type for each.',
+    description: 'List all open browser-panel tabs. Returns { tabs: [{ id, url, title, type, lastActivated, attached }], count, attachedId }. `attached: true` marks the tab the MCP is currently driving — use this to disambiguate two identical-URL tabs. `lastActivated` is the unix-ms timestamp of the last activate/navigate this session (null if untouched). Sorted attached-first, then most-recently-activated.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -642,6 +642,76 @@ const TOOLS = [
       required: ['line', 'content'],
       additionalProperties: false,
     },
+  },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase 9 — playbook follow-ups: multi-file batch, open-at-line, picker
+  // ════════════════════════════════════════════════════════════════════════
+  {
+    name: 'chrome_cm_ensure_editor',
+    description: 'Verify the CodeMirror editor (.cm-content) is mounted on the active page. If not, re-navigate the same URL with `?view=codeEditor` appended — fixes "Save sometimes drops the editor pane" on Lovable.dev. Idempotent: returns ok+alreadyMounted=true if no action needed.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_cm_open_at_line',
+    description: 'Open a specific file at line N via URL params (`?view=codeEditor&file=<path>&line=<n>`) — the proven Lovable pattern. After navigation waits for .cm-content + calls goto-line for guaranteed cursor placement. Best-effort: if the host ignores file/line params, you\'ll get { ok:false, error } back and should fall back to search-code.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string',  description: 'Repo-relative file path (e.g. "src/pages/Auth.tsx")' },
+        line: { type: 'integer', description: '1-indexed line to jump to (optional but recommended)' },
+      },
+      required: ['file'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_cm_edit_atomic',
+    description: 'Multi-file batch CodeMirror edit. Each edit = { line, content, file? }. Same file = sequential replaceLine calls then one Ctrl+S. New file in `file` field = saves the previous file first, then opens the new one via cm_open_at_line. Returns { ok, edits: [{file,line,ok,error?}], savedFiles }. Use this instead of multiple chrome_cm_replace_line calls when you have a list of surgical edits to make — handles file switching + save batching for you.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        edits: {
+          type: 'array',
+          description: 'Edits in order. Within one file, line order doesn\'t matter (replaceLine doesn\'t shift lines).',
+          items: {
+            type: 'object',
+            properties: {
+              line:    { type: 'integer', description: '1-indexed line to replace' },
+              content: { type: 'string',  description: 'New content for that line' },
+              file:    { type: 'string',  description: 'Optional — switch to this file before applying (caches between edits)' },
+            },
+            required: ['line', 'content'],
+            additionalProperties: false,
+          },
+        },
+        save:         { type: 'boolean', description: 'Send Ctrl+S per file boundary + at the end (default true)' },
+        ensureEditor: { type: 'boolean', description: 'Call cm_ensure_editor before each file switch (default true)' },
+      },
+      required: ['edits'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_picker_install',
+    description: 'Install the element-to-source picker overlay on the active page. Hover any element → cyan outline + tooltip showing <Component>  file.tsx:line. Click an element → captures source location to window.__pickerResult. Then call chrome_picker_capture to retrieve. Requires a Vite/CRA/Next dev build (reads React fiber `_debugSource`).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_picker_capture',
+    description: 'Poll the active page until the user clicks an element with the picker active (or until timeout). Returns { ok, tag, text, classes, source: { fileName, lineNumber, componentType }, chain: [...] } where `chain` is the React component ancestry. Call chrome_picker_install first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        timeoutMs: { type: 'integer', description: 'Max ms to wait for click (default 30000, max 300000)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_picker_cancel',
+    description: 'Remove the picker overlay from the active page without capturing anything. Use when you want to abort an open picker session.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 
   // ── Input ───────────────────────────────────────────────────────────────
@@ -1079,6 +1149,14 @@ async function execTool(name, args = {}) {
     case 'chrome_cm_focus':         return callOp('chrome-cm-focus');
     case 'chrome_cm_goto_line':     return callOp('chrome-cm-goto-line', args);
     case 'chrome_cm_replace_line':  return callOp('chrome-cm-replace-line', args);
+
+    // ── Phase 9 · multi-file batch, open-at-line, picker ────────
+    case 'chrome_cm_ensure_editor': return callOp('chrome-cm-ensure-editor');
+    case 'chrome_cm_open_at_line':  return callOp('chrome-cm-open-at-line', args);
+    case 'chrome_cm_edit_atomic':   return callOp('chrome-cm-edit-atomic', args);
+    case 'chrome_picker_install':   return callOp('chrome-picker-install');
+    case 'chrome_picker_capture':   return callOp('chrome-picker-capture', args);
+    case 'chrome_picker_cancel':    return callOp('chrome-picker-cancel');
 
     // ── Chrome · input ──────────────────────────────────────────
     case 'chrome_input_click':      return callOp('chrome-input-click', args);
