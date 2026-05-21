@@ -331,17 +331,21 @@ async function targetActivateTab({ id } = {}) {
 }
 
 // ── Page operations ────────────────────────────────────────────────────────
-async function pageNavigate({ url, waitUntil = 'load', timeout = 30000 } = {}) {
+async function pageNavigate({ url, waitUntil = 'load', timeout = 30000, stabilize = true, stabilizeMs = 5000 } = {}) {
   if (!url) throw new Error('url required');
   const page = await _activePage();
   const resp = await page.goto(url, { waitUntil, timeout });
   _targetActivations.set(page.target()._targetId, Date.now());
-  return {
+  const out = {
     ok:     true,
     url:    page.url(),
     title:  await page.title().catch(() => ''),
     status: resp?.status() || null,
   };
+  if (stabilize) {
+    try { out.stabilized = await _stabilize({ timeout: stabilizeMs }); } catch (_) {}
+  }
+  return out;
 }
 
 async function pageReload({ waitUntil = 'load', timeout = 30000 } = {}) {
@@ -455,34 +459,49 @@ async function domGetText({ selector } = {}) {
 }
 
 // ── Input ──────────────────────────────────────────────────────────────────
-async function inputClick({ selector, x, y } = {}) {
+// Optional auto-stabilize (off by default for legacy compat). Set
+// stabilize:true on any call to wait for the page to settle before returning.
+async function inputClick({ selector, x, y, stabilize = false, stabilizeMs = 5000 } = {}) {
   const page = await _activePage();
+  let result;
   if (selector) {
     await page.click(selector);
-    return { ok: true, clicked: 'selector', target: selector };
-  }
-  if (typeof x === 'number' && typeof y === 'number') {
+    result = { ok: true, clicked: 'selector', target: selector };
+  } else if (typeof x === 'number' && typeof y === 'number') {
     await page.mouse.click(x, y);
-    return { ok: true, clicked: 'coords', x, y };
+    result = { ok: true, clicked: 'coords', x, y };
+  } else {
+    throw new Error('selector or {x,y} required');
   }
-  throw new Error('selector or {x,y} required');
+  if (stabilize) {
+    try { result.stabilized = await _stabilize({ timeout: stabilizeMs }); } catch (_) {}
+  }
+  return result;
 }
 
-async function inputType({ selector, text, delay = 20 } = {}) {
+async function inputType({ selector, text, delay = 20, stabilize = false, stabilizeMs = 5000 } = {}) {
   if (typeof text !== 'string') throw new Error('text required');
   const page = await _activePage();
   if (selector) await page.focus(selector);
   await page.keyboard.type(text, { delay });
-  return { ok: true, typed: text.length + ' chars' };
+  const result = { ok: true, typed: text.length + ' chars' };
+  if (stabilize) {
+    try { result.stabilized = await _stabilize({ timeout: stabilizeMs }); } catch (_) {}
+  }
+  return result;
 }
 
-async function inputKey({ key, modifiers = [] } = {}) {
+async function inputKey({ key, modifiers = [], stabilize = false, stabilizeMs = 5000 } = {}) {
   if (!key) throw new Error('key required');
   const page = await _activePage();
   for (const m of modifiers) await page.keyboard.down(m);
   await page.keyboard.press(key);
   for (const m of modifiers.slice().reverse()) await page.keyboard.up(m);
-  return { ok: true };
+  const result = { ok: true };
+  if (stabilize) {
+    try { result.stabilized = await _stabilize({ timeout: stabilizeMs }); } catch (_) {}
+  }
+  return result;
 }
 
 async function inputScroll({ amount = 600, direction = 'down' } = {}) {

@@ -499,13 +499,15 @@ const TOOLS = [
   // ── Page ────────────────────────────────────────────────────────────────
   {
     name: 'chrome_page_navigate',
-    description: 'Navigate Chrome\'s active tab to a URL. Waits for the page to finish loading and returns final URL, title, HTTP status.',
+    description: 'Navigate Chrome\'s active tab to a URL. Waits for the page to finish loading and (by default) for the page to fully settle — returns final URL, title, HTTP status, and `stabilized: { settled, waited }`.',
     inputSchema: {
       type: 'object',
       properties: {
-        url:       { type: 'string' },
-        waitUntil: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'], description: 'Default "load"' },
-        timeout:   { type: 'integer', description: 'Max ms to wait (default 30000)' },
+        url:         { type: 'string' },
+        waitUntil:   { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'], description: 'Default "load"' },
+        timeout:     { type: 'integer', description: 'Max ms for navigation (default 30000)' },
+        stabilize:   { type: 'boolean', description: 'Auto-wait for network + DOM idle after load (default true)' },
+        stabilizeMs: { type: 'number',  description: 'Stabilize timeout in ms (default 5000)' },
       },
       required: ['url'],
       additionalProperties: false,
@@ -730,28 +732,35 @@ const TOOLS = [
   },
 
   // ── Input ───────────────────────────────────────────────────────────────
+  // For DOM-driven flows, prefer the ref-based tools (chrome_observe →
+  // chrome_click_ref / chrome_type_ref) — they auto-stabilize and return the
+  // observe delta. These selector/coord tools remain for low-level cases.
   {
     name: 'chrome_input_click',
-    description: 'Click an element OR a pixel coordinate in Chrome\'s active tab. Provide either selector OR {x, y}.',
+    description: 'Click an element OR a pixel coordinate. Prefer chrome_click_ref for DOM elements. Pass stabilize:true to auto-wait for the page to settle after click.',
     inputSchema: {
       type: 'object',
       properties: {
-        selector: { type: 'string' },
-        x:        { type: 'number', description: 'X coord in CSS pixels (if no selector)' },
-        y:        { type: 'number', description: 'Y coord in CSS pixels (if no selector)' },
+        selector:    { type: 'string' },
+        x:           { type: 'number', description: 'X coord in CSS pixels (if no selector)' },
+        y:           { type: 'number', description: 'Y coord in CSS pixels (if no selector)' },
+        stabilize:   { type: 'boolean', description: 'Auto-wait for network + DOM idle after click (default false)' },
+        stabilizeMs: { type: 'number' },
       },
       additionalProperties: false,
     },
   },
   {
     name: 'chrome_input_type',
-    description: 'Type text in Chrome. If selector is provided, focuses that element first. Uses real keyboard events (defeats anti-automation that sniffs synthetic input).',
+    description: 'Type text in Chrome via real keyboard events. Prefer chrome_type_ref for inputs. Pass stabilize:true to auto-wait after.',
     inputSchema: {
       type: 'object',
       properties: {
-        selector: { type: 'string', description: 'Element to focus before typing (optional)' },
-        text:     { type: 'string' },
-        delay:    { type: 'integer', description: 'Per-keystroke delay in ms (default 20)' },
+        selector:    { type: 'string', description: 'Element to focus before typing (optional)' },
+        text:        { type: 'string' },
+        delay:       { type: 'integer', description: 'Per-keystroke delay in ms (default 20)' },
+        stabilize:   { type: 'boolean' },
+        stabilizeMs: { type: 'number' },
       },
       required: ['text'],
       additionalProperties: false,
@@ -759,12 +768,14 @@ const TOOLS = [
   },
   {
     name: 'chrome_input_key',
-    description: 'Press a single key in Chrome with optional modifiers. Key names follow USB HID (e.g. "Enter", "Tab", "ArrowDown", "F5").',
+    description: 'Press a single key in Chrome with optional modifiers. Key names follow USB HID (e.g. "Enter", "Tab", "ArrowDown", "F5"). Pass stabilize:true to auto-wait after.',
     inputSchema: {
       type: 'object',
       properties: {
-        key:       { type: 'string' },
-        modifiers: { type: 'array', items: { type: 'string', enum: ['Control', 'Shift', 'Alt', 'Meta'] } },
+        key:         { type: 'string' },
+        modifiers:   { type: 'array', items: { type: 'string', enum: ['Control', 'Shift', 'Alt', 'Meta'] } },
+        stabilize:   { type: 'boolean' },
+        stabilizeMs: { type: 'number' },
       },
       required: ['key'],
       additionalProperties: false,
