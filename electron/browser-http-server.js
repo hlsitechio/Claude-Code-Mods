@@ -211,6 +211,14 @@ async function _handle(req, res) {
       case 'chrome-cm-goto-line':        result = await chrome.cmGotoLine(body); break;
       case 'chrome-cm-replace-line':     result = await chrome.cmReplaceLine(body); break;
 
+      // Phase 9 — multi-file batch, open-at-line, picker, save-survivor
+      case 'chrome-cm-ensure-editor':    result = await chrome.cmEnsureEditor(); break;
+      case 'chrome-cm-open-at-line':     result = await chrome.cmOpenAtLine(body); break;
+      case 'chrome-cm-edit-atomic':      result = await chrome.cmEditAtomic(body); break;
+      case 'chrome-picker-install':      result = await chrome.pickerInstall(); break;
+      case 'chrome-picker-capture':      result = await chrome.pickerCapture(body); break;
+      case 'chrome-picker-cancel':       result = await chrome.pickerCancel(); break;
+
       // Input
       case 'chrome-input-click':         result = await chrome.inputClick(body); break;
       case 'chrome-input-type':          result = await chrome.inputType(body); break;
