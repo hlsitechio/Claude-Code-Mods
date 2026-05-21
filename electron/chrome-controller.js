@@ -68,6 +68,12 @@ let _chromePath  = null;  // resolved path to chrome.exe / Chrome.app / chrome
 const _targetActivations = new Map();  // targetId → unix ms timestamp
 let _attachedTargetId    = null;       // the page _activePage() most recently picked
 
+// ── Cross-origin frame sessions ────────────────────────────────────────────
+// OOPIFs (Stripe 3DS, reCAPTCHA, embedded auth) live in their own CDP target.
+// Top-level page JS can't touch their DOM. We attach a per-target CDPSession
+// and cache it here so frame_eval/click/type can address that frame directly.
+const _frameSessions = new Map();      // sessionId → puppeteer CDPSession
+
 // CDP endpoint the embedded Chromium exposes (set by main.js's command-line
 // switch). We connect here instead of launching a separate Chrome process —
 // so the `chrome_*` tools drive the SAME WebContentsView the user sees.
@@ -924,16 +930,138 @@ async function pickerCancel() {
 // can do. Safety relies on the auth boundary, not method allowlisting.
 async function cdpRaw({ method, params = {}, sessionId } = {}) {
   if (!method) throw new Error('method required (e.g. "Page.captureScreenshot")');
+  // If caller passes a sessionId from chrome_frame_attach, route the call
+  // into that frame's CDPSession instead of opening a fresh top-page one.
+  if (sessionId) {
+    const sess = _frameSessions.get(sessionId);
+    if (!sess) throw new Error(`unknown sessionId ${sessionId} — attach with chrome_frame_attach first`);
+    const result = await sess.send(method, params);
+    return { ok: true, result, sessionId };
+  }
   const page = await _activePage();
-  const session = sessionId
-    ? await page.target().createCDPSession() // user wants a fresh session
-    : await page.target().createCDPSession();
+  const session = await page.target().createCDPSession();
   try {
     const result = await session.send(method, params);
     return { ok: true, result };
   } finally {
     try { await session.detach(); } catch (_) {}
   }
+}
+
+// ── Cross-origin frame access (OOPIFs) ─────────────────────────────────────
+// Puppeteer surfaces iframes as separate Targets (target.type() === 'iframe').
+// Attaching a CDPSession to one lets us run Runtime.evaluate INSIDE that
+// frame's process — bypassing the same-origin DOM wall the parent page hits.
+function _sessionIdOf(sess) {
+  // CDPSession.id() in newer puppeteer, _sessionId in older builds.
+  if (typeof sess.id === 'function') return sess.id();
+  return sess._sessionId || sess._targetId || null;
+}
+
+async function frameList() {
+  const browser = await _ensureBrowser();
+  const targets = browser.targets();
+  const out = [];
+  for (const t of targets) {
+    const type = t.type();
+    if (type !== 'iframe') continue;
+    const url = t.url();
+    let parentTargetId = null;
+    try { const parent = t._targetInfo && t._targetInfo.openerId; parentTargetId = parent || null; } catch (_) {}
+    out.push({
+      targetId: t._targetId,
+      url,
+      type,
+      parentTargetId,
+      attached: Array.from(_frameSessions.values()).some(s => {
+        try { return s._target && s._target._targetId === t._targetId; } catch (_) { return false; }
+      }),
+    });
+  }
+  return { frames: out, count: out.length };
+}
+
+async function frameAttach({ targetId } = {}) {
+  if (!targetId) throw new Error('targetId required (get one from chrome_frame_list)');
+  const browser = await _ensureBrowser();
+  const target = browser.targets().find(t => t._targetId === targetId);
+  if (!target) throw new Error(`no target with id ${targetId} (call chrome_frame_list to refresh)`);
+  const sess = await target.createCDPSession();
+  // Stash the puppeteer Target on the session so frameList can mark "attached".
+  try { sess._target = target; } catch (_) {}
+  const sessionId = _sessionIdOf(sess);
+  if (!sessionId) throw new Error('attach succeeded but sessionId unavailable from puppeteer build');
+  _frameSessions.set(sessionId, sess);
+  // Enable Runtime + DOM + Input on this session so eval/click/type work.
+  try { await sess.send('Runtime.enable'); } catch (_) {}
+  try { await sess.send('DOM.enable'); } catch (_) {}
+  try { await sess.send('Page.enable'); } catch (_) {}
+  return { ok: true, sessionId, targetId, url: target.url() };
+}
+
+async function frameDetach({ sessionId } = {}) {
+  if (!sessionId) throw new Error('sessionId required');
+  const sess = _frameSessions.get(sessionId);
+  if (!sess) return { ok: true, detached: false, reason: 'not in cache' };
+  try { await sess.detach(); } catch (_) {}
+  _frameSessions.delete(sessionId);
+  return { ok: true, detached: true };
+}
+
+async function frameEval({ sessionId, expression, awaitPromise = true } = {}) {
+  if (!sessionId) throw new Error('sessionId required');
+  if (!expression) throw new Error('expression required');
+  const sess = _frameSessions.get(sessionId);
+  if (!sess) throw new Error(`unknown sessionId ${sessionId} — attach first`);
+  const wrapped = `(async () => (${expression}))()`;
+  const res = await sess.send('Runtime.evaluate', {
+    expression: wrapped,
+    awaitPromise,
+    returnByValue: true,
+  });
+  if (res.exceptionDetails) {
+    return { ok: false, error: res.exceptionDetails.text || 'eval exception', details: res.exceptionDetails };
+  }
+  return { ok: true, result: res.result && res.result.value };
+}
+
+async function frameClick({ sessionId, selector } = {}) {
+  if (!sessionId) throw new Error('sessionId required');
+  if (!selector) throw new Error('selector required');
+  const sess = _frameSessions.get(sessionId);
+  if (!sess) throw new Error(`unknown sessionId ${sessionId} — attach first`);
+  // Click via the frame's own DOM — same-frame JS isn't blocked.
+  const js = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return { ok:false, error:'not found' }; el.click(); return { ok:true, tag: el.tagName }; })()`;
+  const res = await sess.send('Runtime.evaluate', { expression: js, returnByValue: true });
+  if (res.exceptionDetails) return { ok: false, error: res.exceptionDetails.text };
+  return res.result.value;
+}
+
+async function frameType({ sessionId, selector, text, submit = false } = {}) {
+  if (!sessionId) throw new Error('sessionId required');
+  if (typeof text !== 'string') throw new Error('text required');
+  const sess = _frameSessions.get(sessionId);
+  if (!sess) throw new Error(`unknown sessionId ${sessionId} — attach first`);
+  // Set value + fire input/change so frameworks (React/Vue) pick it up.
+  const js = `
+    (() => {
+      const sel = ${JSON.stringify(selector || '')};
+      const val = ${JSON.stringify(text)};
+      const el = sel ? document.querySelector(sel) : document.activeElement;
+      if (!el) return { ok:false, error:'no element' };
+      el.focus();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+                 || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+      if (setter && setter.set) setter.set.call(el, val); else el.value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      ${submit ? `if (el.form) el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit();` : ''}
+      return { ok:true, typed: val.length };
+    })()
+  `;
+  const res = await sess.send('Runtime.evaluate', { expression: js, returnByValue: true });
+  if (res.exceptionDetails) return { ok: false, error: res.exceptionDetails.text };
+  return res.result.value;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1597,6 +1725,7 @@ module.exports = {
   domQuery, domQueryAll, domGetText, domClick,
   inputClick, inputType, inputKey, inputScroll,
   cdpRaw,
+  frameList, frameAttach, frameDetach, frameEval, frameClick, frameType,
 
   // Phase 8 — CodeMirror primitives
   cmFocus, cmGotoLine, cmReplaceLine,

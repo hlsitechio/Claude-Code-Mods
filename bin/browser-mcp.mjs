@@ -26,10 +26,25 @@ import http from 'node:http';
 import { URL } from 'node:url';
 
 // ── Endpoint discovery ──────────────────────────────────────────────────────
+// Phase 10 — multi-slot. Read CCM_BROWSER_SLOT from env (set by the MCP entry
+// in ~/.claude.json) to pick which CCM instance we drive. Default = slot 1
+// (existing behaviour, no env var needed).
+const _slot = (() => {
+  const env = process.env.CCM_BROWSER_SLOT;
+  if (env) {
+    const n = parseInt(env, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 64) return n;
+  }
+  return 1;
+})();
+
 function endpointFilePath() {
   const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
   const dir  = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  return path.join(dir, 'ccm-browser-endpoint.json');
+  const fname = _slot === 1
+    ? 'ccm-browser-endpoint.json'
+    : `ccm-browser-endpoint-${_slot}.json`;
+  return path.join(dir, fname);
 }
 
 // In-memory cache for the endpoint envelope. Read from disk ONCE at startup
@@ -65,10 +80,10 @@ const _httpAgent = new http.Agent({
 async function callOp(cmd, body = {}) {
   let env = readEndpoint();
   if (!env) {
-    throw new Error(
-      'Claude Code Mods is not running. Launch the CCM desktop app, ' +
-      'open the Browser panel, then retry.'
-    );
+    const slotHint = _slot === 1
+      ? 'Launch the CCM desktop app, open the Browser panel, then retry.'
+      : `Launch CCM slot ${_slot} (e.g. \`electron . --slot=${_slot}\`), open the Browser panel, then retry.`;
+    throw new Error('Claude Code Mods slot ' + _slot + ' is not running. ' + slotHint);
   }
   const u = new URL(env.url + '/op/' + cmd);
   const data = JSON.stringify(body || {});
@@ -771,14 +786,87 @@ const TOOLS = [
   // ── Generic CDP escape hatch ───────────────────────────────────────────
   {
     name: 'chrome_cdp_raw',
-    description: 'Call ANY Chrome DevTools Protocol method directly. Reference: https://chromedevtools.github.io/devtools-protocol/. Use when no narrower chrome_* tool fits. Examples: method="Network.getCookies" / "Page.printToPDF" / "Accessibility.getFullAXTree".',
+    description: 'Call ANY Chrome DevTools Protocol method directly. Reference: https://chromedevtools.github.io/devtools-protocol/. Use when no narrower chrome_* tool fits. Pass `sessionId` (from chrome_frame_attach) to route the call into a cross-origin iframe.',
     inputSchema: {
       type: 'object',
       properties: {
-        method: { type: 'string', description: 'CDP method like "Domain.action" (e.g. "Page.captureScreenshot")' },
-        params: { type: 'object',  description: 'Method parameters as specified in the CDP docs' },
+        method:    { type: 'string', description: 'CDP method like "Domain.action" (e.g. "Page.captureScreenshot")' },
+        params:    { type: 'object',  description: 'Method parameters as specified in the CDP docs' },
+        sessionId: { type: 'string',  description: 'Optional — attached frame session from chrome_frame_attach' },
       },
       required: ['method'],
+      additionalProperties: false,
+    },
+  },
+
+  // ── Cross-origin frame (OOPIF) access ──────────────────────────────────
+  // Top-level page JS cannot reach a cross-origin iframe's DOM. These tools
+  // open a separate CDP session bound to the iframe's process so you can
+  // eval/click/type inside it — Stripe 3DS, reCAPTCHA, embedded auth, etc.
+  {
+    name: 'chrome_frame_list',
+    description: 'List cross-origin iframe targets on the active page. Returns [{targetId, url, parentTargetId, attached}]. Find the one you want, then attach with chrome_frame_attach.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_frame_attach',
+    description: 'Attach a CDPSession to an iframe target. Returns `sessionId` you pass to chrome_frame_eval/click/type or chrome_cdp_raw. Use chrome_frame_list to discover targetIds.',
+    inputSchema: {
+      type: 'object',
+      properties: { targetId: { type: 'string', description: 'iframe targetId from chrome_frame_list' } },
+      required: ['targetId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_frame_detach',
+    description: 'Detach an attached iframe session and free its CDPSession.',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string' } },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_frame_eval',
+    description: 'Evaluate a JS EXPRESSION inside an attached iframe (same wrapping as chrome_runtime_eval). Use this when the parent page can\'t reach the iframe due to same-origin policy.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId:    { type: 'string' },
+        expression:   { type: 'string' },
+        awaitPromise: { type: 'boolean', description: 'Await if expression resolves to a promise (default true)' },
+      },
+      required: ['sessionId', 'expression'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_frame_click',
+    description: 'Click an element by CSS selector inside an attached iframe.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        selector:  { type: 'string' },
+      },
+      required: ['sessionId', 'selector'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_frame_type',
+    description: 'Type text into an input inside an attached iframe (sets value + fires input/change so React/Vue pick it up). Pass submit=true to also submit the enclosing form.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        selector:  { type: 'string', description: 'Optional — defaults to document.activeElement of the frame' },
+        text:      { type: 'string' },
+        submit:    { type: 'boolean' },
+      },
+      required: ['sessionId', 'text'],
       additionalProperties: false,
     },
   },
@@ -1166,6 +1254,14 @@ async function execTool(name, args = {}) {
 
     // ── Chrome · generic CDP escape hatch ───────────────────────
     case 'chrome_cdp_raw':          return callOp('chrome-cdp-raw', args);
+
+    // ── Chrome · cross-origin frame access ──────────────────────
+    case 'chrome_frame_list':       return callOp('chrome-frame-list');
+    case 'chrome_frame_attach':     return callOp('chrome-frame-attach', args);
+    case 'chrome_frame_detach':     return callOp('chrome-frame-detach', args);
+    case 'chrome_frame_eval':       return callOp('chrome-frame-eval', args);
+    case 'chrome_frame_click':      return callOp('chrome-frame-click', args);
+    case 'chrome_frame_type':       return callOp('chrome-frame-type', args);
 
     // ── Phase 2 · Network ───────────────────────────────────────
     case 'chrome_net_cookies_get':       return callOp('chrome-net-cookies-get', args);

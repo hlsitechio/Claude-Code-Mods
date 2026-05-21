@@ -27,14 +27,21 @@ let _endpointFile = null;
 let _token = null;
 let _port = null;
 
-// We persist the {url, token, pid} envelope here so spawned MCP children can
-// read it deterministically. Lives in the user's Claude config dir — same
+// We persist the {url, token, pid, slot} envelope here so spawned MCP children
+// can read it deterministically. Lives in the user's Claude config dir — same
 // place Claude Code looks for its own settings — so the child can locate it
 // without knowing about our Electron userData path.
-function endpointFilePath() {
+//
+// Phase 10 — multi-slot:
+//   slot 1 (default) → ccm-browser-endpoint.json   (backward compat)
+//   slot N >= 2      → ccm-browser-endpoint-N.json
+function endpointFilePath(slot = 1) {
   const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
   const dir  = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  return path.join(dir, 'ccm-browser-endpoint.json');
+  const fname = slot === 1
+    ? 'ccm-browser-endpoint.json'
+    : `ccm-browser-endpoint-${slot}.json`;
+  return path.join(dir, fname);
 }
 
 function _sendJson(res, status, payload) {
@@ -228,6 +235,14 @@ async function _handle(req, res) {
       // Generic CDP escape hatch
       case 'chrome-cdp-raw':             result = await chrome.cdpRaw(body); break;
 
+      // Cross-origin frame (OOPIF) access — 3DS, reCAPTCHA, embedded auth.
+      case 'chrome-frame-list':          result = await chrome.frameList(); break;
+      case 'chrome-frame-attach':        result = await chrome.frameAttach(body); break;
+      case 'chrome-frame-detach':        result = await chrome.frameDetach(body); break;
+      case 'chrome-frame-eval':          result = await chrome.frameEval(body); break;
+      case 'chrome-frame-click':         result = await chrome.frameClick(body); break;
+      case 'chrome-frame-type':          result = await chrome.frameType(body); break;
+
       // ── Phase 2 · Network ────────────────────────────────────
       case 'chrome-net-cookies-get':       result = await chrome.networkGetCookies(body); break;
       case 'chrome-net-cookie-set':        result = await chrome.networkSetCookie(body); break;
@@ -385,8 +400,8 @@ async function _handle(req, res) {
  * its endpoint + auth token to disk so child processes can find it.
  * Idempotent — calling twice is a no-op.
  */
-function startBrowserHttpServer() {
-  if (_server) return { port: _port, token: _token };
+function startBrowserHttpServer({ slot = 1 } = {}) {
+  if (_server) return { port: _port, token: _token, slot };
 
   _token = crypto.randomBytes(24).toString('hex');
   _server = http.createServer((req, res) => {
@@ -399,12 +414,14 @@ function startBrowserHttpServer() {
   return new Promise((resolve) => {
     _server.listen(0, '127.0.0.1', () => {
       _port = _server.address().port;
-      _endpointFile = endpointFilePath();
+      _endpointFile = endpointFilePath(slot);
 
       const envelope = {
         url:     `http://127.0.0.1:${_port}`,
         token:   _token,
         pid:     process.pid,
+        slot,
+        cdpPort: 9222 + (slot - 1),
         started: new Date().toISOString(),
       };
       try {
