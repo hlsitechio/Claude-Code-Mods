@@ -799,6 +799,62 @@ const TOOLS = [
     },
   },
 
+  // ── Semantic observation — Phase 11 ────────────────────────────────────
+  // The fast eye: one tool that returns the page's MEANING (role + name +
+  // value + state) instead of pixels. Each interactive node gets a stable
+  // `data-ccm-ref="N"` attribute so subsequent clicks/types survive React
+  // re-renders. Prefer this over screenshot+vision for any DOM-driven flow.
+  {
+    name: 'chrome_observe',
+    description: 'Semantic snapshot of the active page — visible interactive elements as a YAML-style tree of [ref] role "name" = "value" (state). Each element is tagged with data-ccm-ref="N" in the DOM so chrome_click_ref / chrome_type_ref can address them by number. Use this INSTEAD OF screenshot+vision for any DOM-driven flow — faster, cheaper, more accurate.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        raw: { type: 'boolean', description: 'Include the full nodes[] array (default false — tree only)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_observe_delta',
+    description: 'Return only what CHANGED since the last chrome_observe call: { changed, appeared, disappeared, refCount }. Use this after every action instead of a full re-observe — 10× cheaper on SPAs that re-render constantly.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_click_ref',
+    description: 'Click an element by its ref from chrome_observe. Stable across re-renders (the ref rides on data-ccm-ref on the DOM node itself).',
+    inputSchema: {
+      type: 'object',
+      properties: { ref: { type: 'number' } },
+      required: ['ref'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_type_ref',
+    description: 'Type text into an input by ref (React-safe — sets value via native setter + fires input/change). submit=true to press Enter after.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:    { type: 'number' },
+        text:   { type: 'string' },
+        submit: { type: 'boolean' },
+      },
+      required: ['ref', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_focus_ref',
+    description: 'Focus an element by ref (useful before chrome_input_key sequences).',
+    inputSchema: {
+      type: 'object',
+      properties: { ref: { type: 'number' } },
+      required: ['ref'],
+      additionalProperties: false,
+    },
+  },
+
   // ── Cross-origin frame (OOPIF) access ──────────────────────────────────
   // Top-level page JS cannot reach a cross-origin iframe's DOM. These tools
   // open a separate CDP session bound to the iframe's process so you can
@@ -1254,6 +1310,13 @@ async function execTool(name, args = {}) {
 
     // ── Chrome · generic CDP escape hatch ───────────────────────
     case 'chrome_cdp_raw':          return callOp('chrome-cdp-raw', args);
+
+    // ── Chrome · semantic observation (Phase 11) ────────────────
+    case 'chrome_observe':          return callOp('chrome-observe', args);
+    case 'chrome_observe_delta':    return callOp('chrome-observe-delta');
+    case 'chrome_click_ref':        return callOp('chrome-click-ref', args);
+    case 'chrome_type_ref':         return callOp('chrome-type-ref', args);
+    case 'chrome_focus_ref':        return callOp('chrome-focus-ref', args);
 
     // ── Chrome · cross-origin frame access ──────────────────────
     case 'chrome_frame_list':       return callOp('chrome-frame-list');

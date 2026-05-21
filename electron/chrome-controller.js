@@ -1037,6 +1037,312 @@ async function frameClick({ sessionId, selector } = {}) {
   return res.result.value;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 11 — Semantic observation (the chrome_observe primitive)
+//
+// Single fast pass over the page. Returns an indented YAML-style tree of every
+// visible+interactive element, plus a flat node list with stable refs. Each
+// matched DOM node is tagged with `data-ccm-ref="N"` so subsequent action tools
+// can address it by ref (no brittle CSS selectors, no element-IDs that change
+// per render). State is cached on window.__ccmObserve so chrome_observe_delta
+// can return only what changed since last call.
+// ═══════════════════════════════════════════════════════════════════════════
+const _OBSERVE_PAGE_SCRIPT = `
+(() => {
+  const INTERACTIVE = 'a[href],button,input,select,textarea,summary,details,[role],[tabindex]:not([tabindex="-1"]),[contenteditable=""],[contenteditable="true"],[onclick]';
+  const ROLE_FROM_TAG = {
+    a: 'link', button: 'button', input: null, select: 'combobox', textarea: 'textbox',
+    summary: 'button', form: 'form', nav: 'navigation', main: 'main',
+    h1:'heading',h2:'heading',h3:'heading',h4:'heading',h5:'heading',h6:'heading',
+    img:'image', ul:'list', ol:'list', li:'listitem', table:'table',
+    label:'label', dialog:'dialog',
+  };
+  const INPUT_ROLES = {
+    text:'textbox', search:'searchbox', email:'textbox', password:'textbox', tel:'textbox',
+    url:'textbox', number:'spinbutton', range:'slider', checkbox:'checkbox', radio:'radio',
+    submit:'button', button:'button', reset:'button', file:'button',
+    date:'textbox', 'datetime-local':'textbox', time:'textbox', month:'textbox', week:'textbox',
+    color:'colorpicker',
+  };
+  function visible(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.hidden) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+    if (el.closest('[aria-hidden="true"]')) return false;
+    return true;
+  }
+  function role(el) {
+    const explicit = el.getAttribute('role');
+    if (explicit) return explicit;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      return INPUT_ROLES[t] || 'textbox';
+    }
+    return ROLE_FROM_TAG[tag] || tag;
+  }
+  function accName(el) {
+    // Accessible-name approximation: aria-labelledby > aria-label > label[for] >
+    // placeholder > value (for buttons) > innerText > alt > title
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const parts = labelledBy.split(/\\s+/).map(id => document.getElementById(id)).filter(Boolean);
+      const t = parts.map(n => (n.innerText || n.textContent || '').trim()).join(' ').trim();
+      if (t) return t;
+    }
+    const aria = el.getAttribute('aria-label');
+    if (aria) return aria.trim();
+    if (el.id) {
+      const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+      if (lab) {
+        const t = (lab.innerText || lab.textContent || '').trim();
+        if (t) return t;
+      }
+    }
+    const ph = el.getAttribute('placeholder');
+    if (ph) return ph.trim();
+    if (el.tagName === 'BUTTON' || (el.tagName === 'INPUT' && /^(submit|button|reset)$/i.test(el.type||''))) {
+      const t = (el.innerText || el.value || '').trim();
+      if (t) return t;
+    }
+    const txt = (el.innerText || el.textContent || '').trim().replace(/\\s+/g,' ');
+    if (txt) return txt.slice(0, 200);
+    const alt = el.getAttribute('alt'); if (alt) return alt.trim();
+    const title = el.getAttribute('title'); if (title) return title.trim();
+    return '';
+  }
+  function state(el) {
+    const s = [];
+    if (el.disabled) s.push('disabled');
+    if (el.readOnly) s.push('readonly');
+    if (el.required) s.push('required');
+    if (el.checked) s.push('checked');
+    if (el.getAttribute('aria-checked') === 'true') s.push('checked');
+    if (el.getAttribute('aria-selected') === 'true') s.push('selected');
+    if (el.getAttribute('aria-expanded') === 'true') s.push('expanded');
+    if (el.getAttribute('aria-expanded') === 'false') s.push('collapsed');
+    if (el.getAttribute('aria-pressed') === 'true') s.push('pressed');
+    if (el === document.activeElement) s.push('focused');
+    return s;
+  }
+  function value(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      const v = el.value;
+      if (v !== '' && v != null) return String(v).slice(0, 120);
+    }
+    return null;
+  }
+
+  const nodes = [];
+  const seen = new Set();
+  let refCounter = 0;
+
+  // Sweep interactive + landmark elements
+  const candidates = Array.from(document.querySelectorAll(INTERACTIVE));
+  // Add landmarks (visible only) for tree skeleton
+  const landmarks = Array.from(document.querySelectorAll('h1,h2,h3,h4,form,nav,main,dialog,[role=region],[role=dialog]'));
+  for (const el of landmarks) if (!candidates.includes(el)) candidates.push(el);
+
+  for (const el of candidates) {
+    if (seen.has(el) || !visible(el)) continue;
+    seen.add(el);
+    refCounter++;
+    el.setAttribute('data-ccm-ref', String(refCounter));
+    const r = el.getBoundingClientRect();
+    nodes.push({
+      ref:   refCounter,
+      tag:   el.tagName.toLowerCase(),
+      role:  role(el),
+      name:  accName(el),
+      value: value(el),
+      state: state(el),
+      rect:  { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+      depth: (() => { let d = 0, p = el.parentElement; while (p) { d++; p = p.parentElement; } return d; })(),
+    });
+  }
+
+  // Build a parent-pointer index so we can render an indented tree following
+  // DOM ancestry but only for nodes we kept.
+  const refByEl = new Map();
+  for (const el of seen) refByEl.set(el, +el.getAttribute('data-ccm-ref'));
+  const parentRefOf = new Map();
+  for (const el of seen) {
+    let p = el.parentElement;
+    while (p) {
+      if (refByEl.has(p)) { parentRefOf.set(refByEl.get(el), refByEl.get(p)); break; }
+      p = p.parentElement;
+    }
+  }
+  // Render tree by DOM order
+  const sorted = nodes.slice().sort((a, b) => a.ref - b.ref);
+  const depthByRef = new Map();
+  for (const n of sorted) {
+    const p = parentRefOf.get(n.ref);
+    depthByRef.set(n.ref, p ? (depthByRef.get(p) || 0) + 1 : 0);
+  }
+  const lines = [];
+  for (const n of sorted) {
+    const d = depthByRef.get(n.ref) || 0;
+    const indent = '  '.repeat(d);
+    const name = n.name ? ' "' + n.name.replace(/"/g, '\\\\"').slice(0,140) + '"' : '';
+    const val  = n.value != null ? ' = "' + String(n.value).slice(0,80).replace(/"/g, '\\\\"') + '"' : '';
+    const st   = n.state.length ? ' (' + n.state.join(',') + ')' : '';
+    lines.push(indent + '- [' + n.ref + '] ' + n.role + name + val + st);
+  }
+
+  // Hash per ref so delta diffs are cheap
+  const sig = {};
+  for (const n of nodes) {
+    sig[n.ref] = n.role + '|' + n.name + '|' + (n.value||'') + '|' + n.state.join(',');
+  }
+  window.__ccmObserve = { sig, ts: Date.now() };
+
+  return {
+    url: location.href,
+    title: document.title,
+    refCount: nodes.length,
+    viewport: { w: innerWidth, h: innerHeight, scrollY: scrollY, scrollX: scrollX },
+    tree: lines.join('\\n'),
+    nodes,
+  };
+})()
+`;
+
+async function observe({ raw = false } = {}) {
+  const page = await _activePage();
+  const result = await page.evaluate(_OBSERVE_PAGE_SCRIPT);
+  if (raw) return result;
+  // Default: omit the heavy nodes[] from the response (kept page-side in __ccmObserve).
+  return {
+    url:       result.url,
+    title:     result.title,
+    refCount:  result.refCount,
+    viewport:  result.viewport,
+    tree:      result.tree,
+  };
+}
+
+const _OBSERVE_DELTA_SCRIPT = `
+(() => {
+  const prev = window.__ccmObserve && window.__ccmObserve.sig;
+  if (!prev) return { error: 'no previous observe — call chrome_observe first' };
+
+  // Re-run the same pass; but DON'T re-assign refs to existing tagged nodes.
+  // For new untagged interactives, give them fresh refs continuing the sequence.
+  const INTERACTIVE = 'a[href],button,input,select,textarea,summary,details,[role],[tabindex]:not([tabindex="-1"]),[contenteditable=""],[contenteditable="true"],[onclick]';
+  function visible(el) {
+    if (!el || el.nodeType !== 1 || el.hidden) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width<=0||r.height<=0) return false;
+    const cs = getComputedStyle(el);
+    return !(cs.display==='none'||cs.visibility==='hidden'||cs.opacity==='0');
+  }
+  // Reuse the original role/name/value/state logic — we'll inline only what's
+  // needed for the signature.
+  function compact(el) {
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute('role') || tag;
+    const name = (el.getAttribute('aria-label') || el.innerText || el.value || '').trim().replace(/\\s+/g,' ').slice(0,200);
+    const value = (el.value && (tag==='input'||tag==='textarea'||tag==='select')) ? String(el.value).slice(0,120) : '';
+    const st = [];
+    if (el.disabled) st.push('disabled');
+    if (el.checked) st.push('checked');
+    if (el.getAttribute('aria-checked')==='true') st.push('checked');
+    if (el.getAttribute('aria-selected')==='true') st.push('selected');
+    if (el.getAttribute('aria-expanded')==='true') st.push('expanded');
+    if (el===document.activeElement) st.push('focused');
+    return role + '|' + name + '|' + value + '|' + st.join(',');
+  }
+
+  const tagged = Array.from(document.querySelectorAll('[data-ccm-ref]'));
+  let maxRef = 0;
+  for (const el of tagged) maxRef = Math.max(maxRef, +el.getAttribute('data-ccm-ref'));
+
+  const currentRefs = new Set();
+  const changed = [], appeared = [], disappeared = [];
+  const newSig = {};
+
+  for (const el of tagged) {
+    if (!visible(el)) continue;
+    const ref = +el.getAttribute('data-ccm-ref');
+    currentRefs.add(ref);
+    const s = compact(el);
+    newSig[ref] = s;
+    if (prev[ref] === undefined) { /* shouldn't happen */ }
+    else if (prev[ref] !== s) {
+      changed.push({ ref, before: prev[ref], after: s });
+    }
+  }
+  for (const refStr of Object.keys(prev)) {
+    const ref = +refStr;
+    if (!currentRefs.has(ref)) disappeared.push(ref);
+  }
+  // New interactives (no ref yet)
+  for (const el of document.querySelectorAll(INTERACTIVE)) {
+    if (!visible(el)) continue;
+    if (el.hasAttribute('data-ccm-ref')) continue;
+    maxRef++;
+    el.setAttribute('data-ccm-ref', String(maxRef));
+    const s = compact(el);
+    newSig[maxRef] = s;
+    const name = (el.getAttribute('aria-label') || el.innerText || '').trim().slice(0,120);
+    appeared.push({ ref: maxRef, role: el.getAttribute('role') || el.tagName.toLowerCase(), name });
+  }
+
+  window.__ccmObserve = { sig: newSig, ts: Date.now() };
+  return { changed, appeared, disappeared, refCount: Object.keys(newSig).length };
+})()
+`;
+
+async function observeDelta() {
+  const page = await _activePage();
+  return page.evaluate(_OBSERVE_DELTA_SCRIPT);
+}
+
+// ── Ref-based actions ─────────────────────────────────────────────────────
+// Translate { ref: N } → CSS selector [data-ccm-ref="N"] and delegate to the
+// existing input* primitives. Refs survive re-renders because the attribute
+// rides on the DOM node, not on a synthetic ID we made up.
+function _refSel(ref) {
+  if (typeof ref !== 'number' || !isFinite(ref)) throw new Error('ref must be a number (from chrome_observe)');
+  return '[data-ccm-ref="' + ref + '"]';
+}
+
+async function clickRef({ ref } = {}) {
+  return inputClick({ selector: _refSel(ref) });
+}
+
+async function typeRef({ ref, text, submit = false, delay = 20 } = {}) {
+  if (typeof text !== 'string') throw new Error('text required');
+  const sel = _refSel(ref);
+  // Use the same React-safe setter trick as frameType so controlled inputs update.
+  const page = await _activePage();
+  await page.evaluate((s, val) => {
+    const el = document.querySelector(s);
+    if (!el) return;
+    el.focus();
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+               || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+    if (setter && setter.set) setter.set.call(el, val); else el.value = val;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, sel, text);
+  if (submit) {
+    await page.keyboard.press('Enter');
+  }
+  return { ok: true, ref, typed: text.length };
+}
+
+async function focusRef({ ref } = {}) {
+  const page = await _activePage();
+  await page.focus(_refSel(ref));
+  return { ok: true, ref };
+}
+
 async function frameType({ sessionId, selector, text, submit = false } = {}) {
   if (!sessionId) throw new Error('sessionId required');
   if (typeof text !== 'string') throw new Error('text required');
@@ -1726,6 +2032,8 @@ module.exports = {
   inputClick, inputType, inputKey, inputScroll,
   cdpRaw,
   frameList, frameAttach, frameDetach, frameEval, frameClick, frameType,
+  // Phase 11 — semantic observation + ref-based actions
+  observe, observeDelta, clickRef, typeRef, focusRef,
 
   // Phase 8 — CodeMirror primitives
   cmFocus, cmGotoLine, cmReplaceLine,
