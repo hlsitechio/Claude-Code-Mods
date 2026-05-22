@@ -237,11 +237,12 @@ async function _handle(req, res) {
 
       // Phase 11 — semantic observation + ref-based actions.
       case 'chrome-observe':             result = await chrome.observe(body); break;
-      case 'chrome-observe-delta':       result = await chrome.observeDelta(); break;
+      case 'chrome-observe-delta':       result = await chrome.observeDelta(body); break;
       case 'chrome-click-ref':           result = await chrome.clickRef(body); break;
       case 'chrome-type-ref':            result = await chrome.typeRef(body); break;
       case 'chrome-focus-ref':           result = await chrome.focusRef(body); break;
       case 'chrome-stabilize':           result = await chrome.stabilize(body); break;
+      case 'chrome-step':                result = await chrome.step(body); break;
 
       // Cross-origin frame (OOPIF) access — 3DS, reCAPTCHA, embedded auth.
       case 'chrome-frame-list':          result = await chrome.frameList(); break;

@@ -48,25 +48,76 @@ const { spawn } = require('child_process');
 // Dev: not packaged AND not explicitly forced to production
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production';
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 10 — Multi-slot support (parallel CCM instances, one per slot)
+// ═══════════════════════════════════════════════════════════════════════════
+// Each CCM instance occupies a "slot" — slot 1 (default) keeps full backward
+// compatibility with every existing install. Slot N (N >= 2) gets:
+//   - CDP port:        9222 + N - 1   (slot 2 = :9223, slot 3 = :9224, ...)
+//   - userData dir:    <default> + "-slot-N"  (separate Chromium profile)
+//   - endpoint file:   ccm-browser-endpoint-N.json
+//   - MCP entry name:  ccm-browser-N  (env { CCM_BROWSER_SLOT: 'N' })
+//   - Window title:    "Claude Code · Slot N"
+// User launches a second slot with `electron . --slot=2` (or `CCM_SLOT=2`).
+// Then registers it with Claude Code CLI — that happens automatically the
+// first time slot 2 boots (see _registerBrowserMcp below).
+const CCM_SLOT = (() => {
+  for (let i = 0; i < process.argv.length; i++) {
+    const a = process.argv[i];
+    if (a.startsWith('--slot=')) {
+      const n = parseInt(a.slice(7), 10);
+      if (Number.isFinite(n) && n >= 1 && n <= 64) return n;
+    }
+    if (a === '--slot' && i + 1 < process.argv.length) {
+      const n = parseInt(process.argv[i + 1], 10);
+      if (Number.isFinite(n) && n >= 1 && n <= 64) return n;
+    }
+  }
+  if (process.env.CCM_SLOT) {
+    const n = parseInt(process.env.CCM_SLOT, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 64) return n;
+  }
+  return 1;
+})();
+const CCM_CDP_PORT = 9222 + (CCM_SLOT - 1);
+
+// Slot > 1: relocate userData so each Electron has its own Chromium profile.
+// The single-instance lock below scopes to userData, so different paths =
+// different locks → slots can coexist. MUST happen before any code calls
+// app.getPath('userData') and before requestSingleInstanceLock().
+if (CCM_SLOT > 1) {
+  const defaultUserData = app.getPath('userData');
+  app.setPath('userData', `${defaultUserData}-slot-${CCM_SLOT}`);
+}
+
+// Expose to lazy-loaded modules. chrome-controller.js reads CCM_CDP_ENDPOINT;
+// browser-http-server.js / browser-mcp.mjs both honour CCM_SLOT-style filenames.
+process.env.CCM_CDP_ENDPOINT = `http://127.0.0.1:${CCM_CDP_PORT}`;
+process.env.CCM_SLOT         = String(CCM_SLOT);
+console.log(`[main] slot=${CCM_SLOT}  cdp=:${CCM_CDP_PORT}  userData=${app.getPath('userData')}`);
+
 // ── Chrome DevTools Protocol — enable the embedded Chromium for control ────
 // This makes the WebContentsView (and the rest of Electron's webContents)
-// reachable via http://127.0.0.1:9222 — the standard CDP endpoint. The
-// chrome-controller.js module connects here via puppeteer-core to drive the
-// SAME browser the user sees in the panel. One browser, two control surfaces:
+// reachable via http://127.0.0.1:<CCM_CDP_PORT> — the standard CDP endpoint.
+// The chrome-controller.js module connects here via puppeteer-core to drive
+// the SAME browser the user sees in the panel. One browser, two control
+// surfaces:
 //   - in-process IPC via electronAPI.browser.* (the `browser_*` MCP tools)
-//   - external CDP over localhost:9222 (the `chrome_*` MCP tools)
+//   - external CDP over localhost:<port> (the `chrome_*` MCP tools)
 //
 // MUST be set BEFORE app is ready. The port is localhost-only by default,
 // so we're not exposing anything to the network. Anyone on the local box
 // CAN connect though — for stricter isolation we could use a random port
 // (port 0) + read it from Electron's DevToolsActivePort file.
-app.commandLine.appendSwitch('remote-debugging-port', '9222');
+app.commandLine.appendSwitch('remote-debugging-port', String(CCM_CDP_PORT));
 
 // ── Single-instance lock ────────────────────────────────────────────────────
 // Prevents multiple Electron processes from sharing the same userData/Cache
 // directory, which causes "Unable to move the cache: Access denied" on Windows
 // and other half-broken behavior. If someone tries to launch a second copy,
 // we focus the existing window and exit the second process cleanly.
+// NOTE: with Phase 10 each slot has its own userData → the lock automatically
+// scopes per-slot, so two slots can run in parallel without fighting.
 const _gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!_gotSingleInstanceLock) {
   console.log('[main] another instance is already running — exiting.');
@@ -218,7 +269,7 @@ function createWindow() {
     y:         state.y,
     minWidth:  900,
     minHeight: 600,
-    title: 'Claude Code Mods',
+    title: CCM_SLOT === 1 ? 'Claude Code Mods' : `Claude Code Mods · Slot ${CCM_SLOT}`,
     backgroundColor: '#0b0b0c',
     show: false,
     frame: false,           // custom title bar
@@ -381,8 +432,8 @@ app.whenReady().then(async () => {
   // Claude Code knows about us on its next launch.
   try {
     const browserHttp = require('./browser-http-server');
-    await browserHttp.startBrowserHttpServer();
-    _registerBrowserMcp();
+    await browserHttp.startBrowserHttpServer({ slot: CCM_SLOT });
+    _registerBrowserMcp(CCM_SLOT);
   } catch (e) {
     console.error('[browser-mcp] failed to start bridge:', e);
   }
@@ -402,7 +453,7 @@ app.whenReady().then(async () => {
 // We write to BOTH locations: the new `~/.claude.json` (where `/mcp` reads)
 // AND the legacy `~/.claude/settings.json` (for older CLI versions). The
 // permissions file is preserved untouched if it has no mcpServers entry.
-function _registerBrowserMcp() {
+function _registerBrowserMcp(slot = 1) {
   const home = process.env.HOME || process.env.USERPROFILE || require('os').homedir();
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
   const mcpScript = path.resolve(__dirname, '..', 'bin', 'browser-mcp.mjs');
@@ -419,10 +470,15 @@ function _registerBrowserMcp() {
     if (which) nodeBin = which;
   } catch (_) { /* keep process.execPath as fallback */ }
 
+  // Slot 1 keeps the historical name `ccm-browser` (no env) so existing setups
+  // keep working. Slot N (N >= 2) registers as `ccm-browser-N` with the env
+  // var that tells browser-mcp.mjs which endpoint file to read.
+  const entryName = slot === 1 ? 'ccm-browser' : `ccm-browser-${slot}`;
+  const entryEnv  = slot === 1 ? {} : { CCM_BROWSER_SLOT: String(slot) };
   const desired = {
     command: nodeBin,
     args:    [mcpScript],
-    env:     {},
+    env:     entryEnv,
   };
 
   // Targets to keep in sync. The primary is `~/.claude.json` — that's what
@@ -444,20 +500,21 @@ function _registerBrowserMcp() {
         }
       }
       cfg.mcpServers = cfg.mcpServers || {};
-      const existing = cfg.mcpServers['ccm-browser'];
+      const existing = cfg.mcpServers[entryName];
       const isCurrent =
         existing &&
         Array.isArray(existing.args) &&
         existing.args[0] === mcpScript &&
-        existing.command === desired.command;
+        existing.command === desired.command &&
+        (existing.env?.CCM_BROWSER_SLOT || '1') === (entryEnv.CCM_BROWSER_SLOT || '1');
       if (isCurrent) {
-        console.log(`[browser-mcp] entry already current in ${target}`);
+        console.log(`[browser-mcp] ${entryName} already current in ${target}`);
         continue;
       }
-      cfg.mcpServers['ccm-browser'] = desired;
+      cfg.mcpServers[entryName] = desired;
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, JSON.stringify(cfg, null, 2), 'utf8');
-      console.log(`[browser-mcp] registered in ${target}`);
+      console.log(`[browser-mcp] registered ${entryName} in ${target}`);
     } catch (e) {
       console.warn(`[browser-mcp] could not write ${target}:`, e.message);
     }

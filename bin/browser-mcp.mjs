@@ -817,19 +817,24 @@ const TOOLS = [
   // re-renders. Prefer this over screenshot+vision for any DOM-driven flow.
   {
     name: 'chrome_observe',
-    description: 'Semantic snapshot of the active page — visible interactive elements as a YAML-style tree of [ref] role "name" = "value" (state). Each element is tagged with data-ccm-ref="N" in the DOM so chrome_click_ref / chrome_type_ref can address them by number. Use this INSTEAD OF screenshot+vision for any DOM-driven flow — faster, cheaper, more accurate.',
+    description: 'Semantic snapshot of a page — visible interactive elements as a YAML-style tree of [ref] role "name" = "value" (state). Each element is tagged with data-ccm-ref="N" in the DOM. Defaults to the active tab; pass `targetId` (from chrome_target_list) to observe a SPECIFIC tab without activating it — enables driving multiple tabs in parallel within one turn.',
     inputSchema: {
       type: 'object',
       properties: {
-        raw: { type: 'boolean', description: 'Include the full nodes[] array (default false — tree only)' },
+        raw:      { type: 'boolean', description: 'Include the full nodes[] array (default false — tree only)' },
+        targetId: { type: 'string',  description: 'Optional tab targetId (from chrome_target_list). Omit to use the active tab.' },
       },
       additionalProperties: false,
     },
   },
   {
     name: 'chrome_observe_delta',
-    description: 'Return only what CHANGED since the last chrome_observe call: { changed, appeared, disappeared, refCount }. Use this after every action instead of a full re-observe — 10× cheaper on SPAs that re-render constantly.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    description: 'Return only what CHANGED since the last chrome_observe on this tab. Each tab keeps its own observe cache, so pass the same `targetId` you observed with.',
+    inputSchema: {
+      type: 'object',
+      properties: { targetId: { type: 'string', description: 'Optional tab targetId. Omit to use the active tab.' } },
+      additionalProperties: false,
+    },
   },
   {
     name: 'chrome_click_ref',
@@ -840,6 +845,7 @@ const TOOLS = [
         ref:         { type: 'number' },
         observe:     { type: 'boolean', description: 'Include observe_delta in response (default true)' },
         stabilizeMs: { type: 'number',  description: 'Max ms to wait for page to settle (default 5000)' },
+        targetId:    { type: 'string',  description: 'Optional tab targetId for parallel multi-tab control.' },
       },
       required: ['ref'],
       additionalProperties: false,
@@ -847,7 +853,7 @@ const TOOLS = [
   },
   {
     name: 'chrome_type_ref',
-    description: 'Type text into an input by ref (React-safe — sets value via native setter + fires input/change). submit=true to press Enter after. Auto-stabilizes + returns observe_delta.',
+    description: 'Type text into an input by ref (React-safe — sets value via native setter + fires input/change). submit=true to press Enter after. Auto-stabilizes + returns observe_delta. Pass `targetId` to type into a non-active tab.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -856,6 +862,7 @@ const TOOLS = [
         submit:      { type: 'boolean' },
         observe:     { type: 'boolean', description: 'Include observe_delta in response (default true)' },
         stabilizeMs: { type: 'number' },
+        targetId:    { type: 'string',  description: 'Optional tab targetId for parallel multi-tab control.' },
       },
       required: ['ref', 'text'],
       additionalProperties: false,
@@ -870,6 +877,7 @@ const TOOLS = [
         ref:          { type: 'number' },
         observe:      { type: 'boolean', description: 'Include observe_delta in response (default false for focus)' },
         stabilizeMs:  { type: 'number',  description: 'Max ms to wait for page to settle after action (default 1000)' },
+        targetId:     { type: 'string',  description: 'Optional tab targetId.' },
       },
       required: ['ref'],
       additionalProperties: false,
@@ -877,14 +885,36 @@ const TOOLS = [
   },
   {
     name: 'chrome_stabilize',
-    description: 'Wait until the page has settled: no in-flight nav, network idle (default 500ms quiet), DOM mutation idle (default 200ms quiet). Bounded by `timeout` (default 5000ms). Returns { settled, waited }. ref-based actions call this automatically — use explicitly only when you need to wait after a non-action (e.g. after navigate).',
+    description: 'Wait until the page has settled: no in-flight nav, network idle (default 500ms quiet), DOM mutation idle (default 200ms quiet). Bounded by `timeout` (default 5000ms). Returns { settled, waited }.',
     inputSchema: {
       type: 'object',
       properties: {
         timeout:        { type: 'number' },
         networkIdleMs:  { type: 'number' },
         mutationIdleMs: { type: 'number' },
+        targetId:       { type: 'string', description: 'Optional tab targetId.' },
       },
+      additionalProperties: false,
+    },
+  },
+
+  {
+    name: 'chrome_step',
+    description: 'High-level intent resolver. Given { action, target } it runs a fresh observe, fuzzy-matches `target` against accessible names of role-appropriate elements, and executes — one round-trip per intent. Auto-stabilizes and bundles observe_delta. Use this INSTEAD OF chrome_observe + chrome_click_ref/type_ref when you already know the human-readable target name. Returns { resolved, candidates, delta, stabilized }. On ambiguous match (top two scores within 8), refuses and returns top-5 candidates so the caller can disambiguate with `role` or `near`.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action:      { type: 'string', enum: ['click','type','focus','select'], description: 'Verb to perform.' },
+        target:      { type: 'string', description: 'Accessible name (or substring) of the element. Case-insensitive, token-overlap fallback.' },
+        role:        { type: 'string', description: 'Optional ARIA role to constrain match (button, link, textbox, combobox, ...).' },
+        value:       { type: 'string', description: 'Text to type (action=type) or option value/label to pick (action=select).' },
+        submit:      { type: 'boolean', description: 'For action=type — press Enter after.' },
+        near:        { type: 'string', description: 'Disambiguator: prefer matches near an element whose name contains this string.' },
+        observe:     { type: 'boolean', description: 'Include observe_delta in response (default true).' },
+        stabilizeMs: { type: 'number',  description: 'Max ms to wait for page to settle (default 5000).' },
+        targetId:    { type: 'string',  description: 'Optional tab targetId for parallel multi-tab control.' },
+      },
+      required: ['action', 'target'],
       additionalProperties: false,
     },
   },
@@ -1347,11 +1377,12 @@ async function execTool(name, args = {}) {
 
     // ── Chrome · semantic observation (Phase 11) ────────────────
     case 'chrome_observe':          return callOp('chrome-observe', args);
-    case 'chrome_observe_delta':    return callOp('chrome-observe-delta');
+    case 'chrome_observe_delta':    return callOp('chrome-observe-delta', args);
     case 'chrome_click_ref':        return callOp('chrome-click-ref', args);
     case 'chrome_type_ref':         return callOp('chrome-type-ref', args);
     case 'chrome_focus_ref':        return callOp('chrome-focus-ref', args);
     case 'chrome_stabilize':        return callOp('chrome-stabilize', args);
+    case 'chrome_step':             return callOp('chrome-step', args);
 
     // ── Chrome · cross-origin frame access ──────────────────────
     case 'chrome_frame_list':       return callOp('chrome-frame-list');

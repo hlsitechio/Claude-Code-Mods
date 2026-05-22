@@ -7,6 +7,22 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+
+- **ccm-browser Phase 12 — `chrome_step` intent resolver** — one-call high-level action: `{ action, target, role?, value?, near? }` runs a fresh `chrome_observe`, fuzzy-matches `target` against accessible names of role-appropriate elements, then dispatches to the matching ref-based action with auto-stabilize + bundled `observe_delta`. Ambiguous matches (top-two scores within 8) refuse and return top-5 candidates so the caller can disambiguate with `role` or `near`. The LLM does NL→structured intent; the MCP does resolution + execute + observe in a single round-trip.
+
+- **Multi-slot CCM (Phase 10)** — run multiple CCM instances in parallel, each driving its own embedded browser at its own CDP port, so one machine can host N independent Claude Code sessions side-by-side
+  - Slot picked at launch via `--slot=N` CLI arg or `CCM_SLOT=N` env (1-indexed, max 64). Slot 1 = default, fully backward-compatible.
+  - Per-slot isolation: CDP port = `9221 + N`, userData dir = `<default>-slot-N`, MCP endpoint file = `ccm-browser-endpoint-N.json`, MCP entry name = `ccm-browser-N` with `env { CCM_BROWSER_SLOT: 'N' }`, window title = `Claude Code Mods · Slot N`
+  - Single-instance lock per slot — different userData dirs lock independently, so slots coexist without fighting
+  - Each Claude Code CLI session targets a specific slot via env: `claude mcp add --env CCM_BROWSER_SLOT=2 ...` (or use the auto-registered `ccm-browser-2` entry that slot 2 writes on first boot)
+  - npm convenience scripts: `electron:slot2`, `electron:slot3`, `electron:slot4`
+- **Phase 9 — playbook follow-ups for the Lovable.dev live-edit pipeline**
+  - `chrome_cm_edit_atomic` — multi-file batch editor (per-file save batching + auto file-switch via cm_open_at_line)
+  - `chrome_cm_open_at_line` — opens a file at line N via URL params (`?view=codeEditor&file=…&line=…`) with safety-net cm_goto_line
+  - `chrome_cm_ensure_editor` — re-navigates with `?view=codeEditor` if the editor pane dropped after Save
+  - `chrome_picker_install` / `chrome_picker_capture` / `chrome_picker_cancel` — element-to-source picker codified as MCP tools (React fiber `_debugSource` walker)
+  - `chrome_target_list` enriched with `lastActivated` timestamps + `attached` marker on the tab the MCP is driving (disambiguates twin tabs)
+
 - **Dockview workspace** — replaces the static right-panel tab system with a fully flexible dock layout powered by `dockview-core` v5.2.0
   - Panels can be dragged, reordered, split horizontally/vertically, and floated into independent windows
   - Custom dark theme (`.dockview-theme-ccmod`) matches the app's `#141416` / `#d97757` palette

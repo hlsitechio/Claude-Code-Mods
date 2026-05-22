@@ -1117,12 +1117,23 @@ const _STABILIZE_PAGE_SCRIPT = `
 })
 `;
 
-async function _stabilize({ timeout = 5000, networkIdleMs = 500, mutationIdleMs = 200 } = {}) {
-  const page = await _activePage();
+// Phase 13 — Resolve which page a tool acts on. When `targetId` is given we
+// pick that specific tab without activating it (parallel multi-tab control in
+// one turn). When omitted, fall back to the most-recently-activated tab.
+async function _resolvePage(targetId) {
+  if (targetId) {
+    const p = await _pageById(targetId);
+    if (!p) throw new Error('No browser-panel tab matches targetId=' + targetId + ' — call chrome_target_list.');
+    return p;
+  }
+  return _activePage();
+}
+
+async function _stabilize({ timeout = 5000, networkIdleMs = 500, mutationIdleMs = 200, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   try {
     return await page.evaluate(_STABILIZE_PAGE_SCRIPT + '({ networkIdleMs: ' + networkIdleMs + ', mutationIdleMs: ' + mutationIdleMs + ', timeout: ' + timeout + ' })');
   } catch (e) {
-    // Navigation mid-evaluate is common and benign — just report it.
     return { ok: true, settled: false, reason: 'context-lost' };
   }
 }
@@ -1306,8 +1317,8 @@ const _OBSERVE_PAGE_SCRIPT = `
 })()
 `;
 
-async function observe({ raw = false } = {}) {
-  const page = await _activePage();
+async function observe({ raw = false, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   const result = await page.evaluate(_OBSERVE_PAGE_SCRIPT);
   if (raw) return result;
   // Default: omit the heavy nodes[] from the response (kept page-side in __ccmObserve).
@@ -1392,8 +1403,8 @@ const _OBSERVE_DELTA_SCRIPT = `
 })()
 `;
 
-async function observeDelta() {
-  const page = await _activePage();
+async function observeDelta({ targetId } = {}) {
+  const page = await _resolvePage(targetId);
   return page.evaluate(_OBSERVE_DELTA_SCRIPT);
 }
 
@@ -1409,29 +1420,33 @@ function _refSel(ref) {
 // Every ref-based action auto-stabilizes (waits for page to settle) and
 // includes the observe_delta in its return value. One call per intent —
 // no separate "did it work?" round-trip.
-async function _wrapAction(fn, { observe = true, stabilizeMs = 5000 } = {}) {
-  const before = await _activePage().then(p =>
-    p.evaluate(`(window.__ccmObserve && window.__ccmObserve.sig) ? true : false`)
-  ).catch(() => false);
-  const result = await fn();
+async function _wrapAction(fn, { observe = true, stabilizeMs = 5000, targetId } = {}) {
+  const resolvedPage = await _resolvePage(targetId);
+  const before = await resolvedPage
+    .evaluate(`(window.__ccmObserve && window.__ccmObserve.sig) ? true : false`)
+    .catch(() => false);
+  const result = await fn(resolvedPage);
   let stab = null;
-  try { stab = await _stabilize({ timeout: stabilizeMs }); } catch (_) {}
+  try { stab = await _stabilize({ timeout: stabilizeMs, targetId }); } catch (_) {}
   let delta = null;
   if (observe && before) {
-    try { delta = await observeDelta(); } catch (_) {}
+    try { delta = await observeDelta({ targetId }); } catch (_) {}
   }
   return { ...result, stabilized: stab, delta };
 }
 
-async function clickRef({ ref, observe = true, stabilizeMs = 5000 } = {}) {
-  return _wrapAction(() => inputClick({ selector: _refSel(ref) }), { observe, stabilizeMs });
+async function clickRef({ ref, observe = true, stabilizeMs = 5000, targetId } = {}) {
+  const sel = _refSel(ref);
+  return _wrapAction(async (page) => {
+    await page.click(sel);
+    return { ok: true, clicked: 'selector', target: sel, ref };
+  }, { observe, stabilizeMs, targetId });
 }
 
-async function typeRef({ ref, text, submit = false, observe = true, stabilizeMs = 5000 } = {}) {
+async function typeRef({ ref, text, submit = false, observe = true, stabilizeMs = 5000, targetId } = {}) {
   if (typeof text !== 'string') throw new Error('text required');
   const sel = _refSel(ref);
-  return _wrapAction(async () => {
-    const page = await _activePage();
+  return _wrapAction(async (page) => {
     await page.evaluate((s, val) => {
       const el = document.querySelector(s);
       if (!el) return;
@@ -1444,15 +1459,140 @@ async function typeRef({ ref, text, submit = false, observe = true, stabilizeMs 
     }, sel, text);
     if (submit) await page.keyboard.press('Enter');
     return { ok: true, ref, typed: text.length };
-  }, { observe, stabilizeMs });
+  }, { observe, stabilizeMs, targetId });
 }
 
-async function focusRef({ ref, observe = false, stabilizeMs = 1000 } = {}) {
-  return _wrapAction(async () => {
-    const page = await _activePage();
+async function focusRef({ ref, observe = false, stabilizeMs = 1000, targetId } = {}) {
+  return _wrapAction(async (page) => {
     await page.focus(_refSel(ref));
     return { ok: true, ref };
-  }, { observe, stabilizeMs });
+  }, { observe, stabilizeMs, targetId });
+}
+
+// ── Phase 12 — chrome_step (intent resolver) ──────────────────────────────
+// Take structured intent { action, target, role?, value?, near? }, fuzzy-match
+// `target` against the current observe tree's accessible names (role-filtered
+// by action), and dispatch to the appropriate ref-based action. The LLM does
+// NL→structured intent; this resolver does name→ref→execute→stabilize→delta in
+// one round-trip. On ambiguous match, refuses and returns top candidates.
+const _STEP_ACTION_ROLES = {
+  click:  ['button','link','checkbox','radio','menuitem','menuitemcheckbox','menuitemradio','tab','option','switch','treeitem','combobox','summary'],
+  type:   ['textbox','searchbox','spinbutton','combobox'],
+  focus:  null,
+  select: ['combobox','listbox'],
+};
+
+function _stepScore(node, target, role) {
+  const name = (node.name || '').toLowerCase();
+  const q = target.toLowerCase().trim();
+  let s = 0;
+  if (role && node.role === role) s += 50;
+  else if (role && node.role !== role) s -= 100;
+  if (q) {
+    if (name === q) s += 100;
+    else if (name.startsWith(q)) s += 55;
+    else if (name.includes(q)) s += 40;
+    else {
+      const nameTokens = new Set(name.split(/\W+/).filter(Boolean));
+      const qTokens = q.split(/\W+/).filter(Boolean);
+      let hits = 0;
+      for (const t of qTokens) if (nameTokens.has(t)) hits++;
+      if (qTokens.length) s += Math.round((hits / qTokens.length) * 30);
+    }
+  }
+  if (node.state && node.state.includes('disabled')) s -= 50;
+  // In-viewport bonus
+  if (node.rect && node.rect.y >= 0 && node.rect.y < 4000) s += 2;
+  return s;
+}
+
+async function step({ action, target, role, value, submit = false, near, observe: obs = true, stabilizeMs = 5000, targetId } = {}) {
+  if (!action || !['click','type','focus','select'].includes(action)) {
+    throw new Error("action required: 'click' | 'type' | 'focus' | 'select'");
+  }
+  if (typeof target !== 'string' || !target.trim()) {
+    throw new Error('target required (accessible name to match)');
+  }
+  if ((action === 'type' || action === 'select') && typeof value !== 'string') {
+    throw new Error(`value required for action='${action}'`);
+  }
+
+  // Fresh observe — refs may have shifted since last call.
+  const snap = await observe({ raw: true, targetId });
+  const nodes = snap.nodes || [];
+
+  const allowed = role ? null : _STEP_ACTION_ROLES[action];
+  let nearRefs = null;
+  if (near) {
+    const lower = near.toLowerCase();
+    nearRefs = new Set();
+    for (const n of nodes) if ((n.name || '').toLowerCase().includes(lower)) nearRefs.add(n.ref);
+  }
+
+  const scored = nodes
+    .filter(n => {
+      if (role) return n.role === role;
+      if (!allowed) return true;
+      return allowed.includes(n.role);
+    })
+    .map(n => {
+      let s = _stepScore(n, target, role);
+      if (nearRefs && nearRefs.has(n.ref)) s += 15;
+      return { ref: n.ref, role: n.role, name: n.name, state: n.state, score: s };
+    })
+    .filter(n => n.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!scored.length) {
+    return {
+      ok: false,
+      error: 'no element matched',
+      action, target, role: role || null,
+      hint: 'try a different name, drop role filter, or call chrome_observe to inspect the tree',
+    };
+  }
+  const top = scored[0];
+  const runnerUp = scored[1];
+  if (runnerUp && (top.score - runnerUp.score) < 8) {
+    return {
+      ok: false,
+      error: 'ambiguous match — pass role or near to disambiguate',
+      candidates: scored.slice(0, 5),
+    };
+  }
+
+  let result;
+  if (action === 'click') {
+    result = await clickRef({ ref: top.ref, observe: obs, stabilizeMs, targetId });
+  } else if (action === 'type') {
+    result = await typeRef({ ref: top.ref, text: value, submit, observe: obs, stabilizeMs, targetId });
+  } else if (action === 'focus') {
+    result = await focusRef({ ref: top.ref, observe: obs, stabilizeMs, targetId });
+  } else if (action === 'select') {
+    result = await _wrapAction(async (page) => {
+      await page.evaluate((ref, val) => {
+        const el = document.querySelector('[data-ccm-ref="' + ref + '"]');
+        if (!el) return;
+        // Try matching <option> by value or visible text
+        if (el.tagName === 'SELECT') {
+          let matched = false;
+          for (const opt of el.options) {
+            if (opt.value === val || (opt.textContent || '').trim() === val) {
+              el.value = opt.value; matched = true; break;
+            }
+          }
+          if (!matched) el.value = val;
+        } else {
+          el.value = val;
+        }
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }, top.ref, value);
+      return { ok: true, ref: top.ref, selected: value };
+    }, { observe: obs, stabilizeMs, targetId });
+  }
+
+  return { ok: true, resolved: top, candidates: scored.slice(1, 4), ...result };
 }
 
 async function frameType({ sessionId, selector, text, submit = false } = {}) {
@@ -2146,6 +2286,8 @@ module.exports = {
   frameList, frameAttach, frameDetach, frameEval, frameClick, frameType,
   // Phase 11 — semantic observation + ref-based actions + auto-stabilize
   observe, observeDelta, clickRef, typeRef, focusRef, stabilize,
+  // Phase 12 — intent resolver
+  step,
 
   // Phase 8 — CodeMirror primitives
   cmFocus, cmGotoLine, cmReplaceLine,

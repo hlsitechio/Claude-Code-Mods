@@ -282,3 +282,53 @@ For the picker-driven flow (clicking an element in the preview to identify what 
 **The killer pipeline:** Picker → `read_file` → propose edit → `cm_replace_line` → `get_diff` confirm. Zero scrolling, zero guessing, zero AI tokens. This is the productizable workflow.
 
 The rhythm that emerged — **ship → use → flag what hurts → enhance** — is the right one. Today's friction list IS tomorrow's roadmap.
+
+---
+
+## Phase 10 — Multi-slot CCM (2026-05-20, evening)
+
+### The need
+
+Single-user pain: one CCM = one embedded browser = one Claude Code session can drive it. If you want a second Claude session working on a different project (without context-switching), you need a second CCM.
+
+### The design
+
+One Electron process per **slot** (1-indexed, 1–64). Each slot is fully isolated:
+
+| What | Slot 1 (default) | Slot N (N ≥ 2) |
+|---|---|---|
+| CDP port | `:9222` | `:(9221 + N)` |
+| userData dir | `<default>` | `<default>-slot-N` |
+| Endpoint file | `~/.claude/ccm-browser-endpoint.json` | `~/.claude/ccm-browser-endpoint-N.json` |
+| MCP entry name | `ccm-browser` (no env) | `ccm-browser-N` (env `CCM_BROWSER_SLOT=N`) |
+| Window title | `Claude Code Mods` | `Claude Code Mods · Slot N` |
+| Single-instance lock | per-slot (scoped to userData) | per-slot (scoped to userData) |
+
+### How to use
+
+1. Launch slot 1 normally (it's the default — nothing changes from before).
+2. Launch slot 2 from a separate shell:
+   ```
+   cd G:\claude_code_mod\full_install
+   npm run electron:slot2
+   ```
+   (Or directly: `electron . --slot=2`. Or env: `CCM_SLOT=2 electron .`.)
+3. Slot 2's first boot writes the MCP entry `ccm-browser-2` to `~/.claude.json` automatically. Open a new Claude Code CLI session and the `ccm-browser-2` tools are there.
+4. In Claude Session A → `chrome_*` tools drive slot 1's embedded browser (`:9222`).
+5. In Claude Session B → `chrome_*` tools driven by the `ccm-browser-2` MCP drive slot 2's embedded browser (`:9223`).
+
+Both sessions can run any of the 165 Phase 1-9 tools against their own slot's browser without ever colliding.
+
+### Edge cases handled
+
+- **Port clash** — if slot N's port is already taken, the CDP server fails to bind and Puppeteer can't connect. Error message points at `--slot=N` + the port.
+- **Profile pollution** — each slot's Chromium has fully separate cookies / local storage / extensions, because userData is per-slot.
+- **MCP entry collisions** — slot 1 registers `ccm-browser`, slot 2 registers `ccm-browser-2`. They never overwrite each other; both keys coexist in `~/.claude.json`.
+- **Endpoint file orphans** — on graceful quit each slot deletes its own `ccm-browser-endpoint-N.json`. On hard kill the stale file remains; the next slot-N boot overwrites it.
+
+### What this unlocks
+
+- Work on two Lovable projects in parallel — slot 1 on project A, slot 2 on project B.
+- Pair-coding: slot 1 = "live driver" Claude session, slot 2 = "reviewer" Claude session with a separate browser snapshot.
+- A/B test the same change in two browsers (different login states, different feature flags) by editing in slot 1, mirroring in slot 2.
+- Isolate sensitive work — slot 2 with a clean profile, no extensions, separate cookie jar — without disturbing your main slot 1 setup.
