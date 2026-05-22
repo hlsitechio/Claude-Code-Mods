@@ -71,13 +71,26 @@ First Benny order placed via Claude tonight:
 - Google Messages web is paired in the CCM browser → can read OTPs
 - 3DS challenge popup was the friction point — Phase 10 closes that gap
 
+## Phase 12 (continued same day) — `chrome_step`
+
+Shipped the intent resolver. New tool:
+
+- `chrome_step { action, target, role?, value?, submit?, near?, observe?, stabilizeMs? }`
+  - `action`: `click | type | focus | select`
+  - Runs fresh `observe`, role-filters by action (`click` → button/link/etc, `type` → textbox/searchbox/spinbutton/combobox, `select` → combobox/listbox), fuzzy-scores `target` against accessible names (exact > startsWith > includes > token-overlap), `near` adds +15 to refs whose name contains the disambiguator string, disabled −50.
+  - Refuses on ambiguous match (top two within 8 points) → returns `candidates[]` instead of acting.
+  - Dispatches to existing `clickRef` / `typeRef` / `focusRef` so auto-stabilize + observe_delta come for free; `select` is implemented inline (matches `<option>` by value OR visible text, fires input+change).
+  - One round-trip per intent — no observe-then-act-then-delta dance.
+
+Files touched: `electron/chrome-controller.js` (+~125), `electron/browser-http-server.js` (+1 route), `bin/browser-mcp.mjs` (+schema +dispatch).
+
+The thesis call: this is the "operator" surface. The LLM emits structured intent; the MCP owns resolution. No NL parsing on our side, no LLM call inside the MCP — clean separation.
+
 ## What's NOT done yet (next session pickup)
 
 In rough priority order:
 
-1. **`chrome_step` (NL → action)** — single high-level call that takes
-   intent ("submit the form with my saved info"), resolves it against
-   the observe tree + memory, and executes. The "operator" experience.
+1. ~~**`chrome_step` (NL → action)**~~ — ✅ shipped as structured-intent resolver (see Phase 12 section above). Full NL pre-parsing stays LLM-side.
 2. **Action recorder / replayer** — capture (observe, action) pairs into
    a script that can be replayed deterministically. Effectively the MCP
    writes its own Playwright tests, except we own the runtime.
