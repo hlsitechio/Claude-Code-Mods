@@ -460,6 +460,16 @@ async function _applyStealthToPage(page) {
 
 async function _installStealthOnAllPages() {
   if (!_isBrowserAlive() || _stealthInstalled) return;
+  // BISECT KNOB — set CCM_DISABLE_STEALTH=1 to launch without any stealth
+  // injection. Use this when troubleshooting "site X was working before, now
+  // it's broken" — if disabling stealth fixes it, the stealth script is
+  // touching a global that site X depends on (Function.toString, chrome.
+  // runtime, userAgentData, etc). Narrows the suspect to STEALTH_SCRIPT.
+  if (process.env.CCM_DISABLE_STEALTH === '1') {
+    _stealthInstalled = true;   // mark installed so we don't try again
+    console.log('[stealth] DISABLED via CCM_DISABLE_STEALTH=1 — pages see real Electron defaults');
+    return;
+  }
   _stealthInstalled = true;
   // Apply to existing pages
   let pages = [];
