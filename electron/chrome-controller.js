@@ -241,12 +241,21 @@ async function launch(opts = {}) {
 // can be self-contained on the puppeteer side without a require cycle).
 const STEALTH_SCRIPT = `
 (() => {
+  // Track every method we patch so we can lie about toString() on them
+  // — Cloudflare Turnstile checks "is getParameter a native function?"
+  // by calling Function.prototype.toString.call(getParameter).
+  const _PATCHED = new WeakSet();
+  const _markPatched = (fn) => { try { _PATCHED.add(fn); } catch (_) {} return fn; };
+
+  // ── 1. navigator.webdriver ─────────────────────────────────────────────
   try {
     Object.defineProperty(Navigator.prototype, 'webdriver', {
-      get: () => undefined,
+      get: _markPatched(function () { return undefined; }),
       configurable: true,
     });
   } catch (_) {}
+
+  // ── 2. navigator.plugins + mimeTypes ───────────────────────────────────
   try {
     const fakePlugins = [
       { name: 'PDF Viewer',                filename: 'internal-pdf-viewer' },
@@ -256,64 +265,178 @@ const STEALTH_SCRIPT = `
       { name: 'WebKit built-in PDF',       filename: 'internal-pdf-viewer' },
     ];
     Object.defineProperty(navigator, 'plugins', {
-      get: () => Object.freeze(fakePlugins),
+      get: _markPatched(function () { return Object.freeze(fakePlugins); }),
       configurable: true,
     });
     Object.defineProperty(navigator, 'mimeTypes', {
-      get: () => Object.freeze([{ type: 'application/pdf', suffixes: 'pdf' }]),
+      get: _markPatched(function () { return Object.freeze([{ type: 'application/pdf', suffixes: 'pdf' }]); }),
       configurable: true,
     });
   } catch (_) {}
+
+  // ── 3. navigator.languages ─────────────────────────────────────────────
   try {
     if (!navigator.languages || navigator.languages.length === 0) {
       Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
+        get: _markPatched(function () { return ['en-US', 'en']; }),
         configurable: true,
       });
     }
   } catch (_) {}
+
+  // ── 4. window.chrome — full runtime surface ────────────────────────────
+  // Real Chrome 130 has chrome.runtime with: id, onConnect, onMessage,
+  // onConnectExternal, onMessageExternal, connect, sendMessage, getURL,
+  // getManifest, getPlatformInfo, getPackageDirectoryEntry, lastError, etc.
+  // Cloudflare Turnstile checks specific methods exist — we need to stub
+  // them. The actual VALUES don't matter; only that the properties are
+  // callable functions or expected types.
   try {
     if (!window.chrome) window.chrome = {};
-    if (!window.chrome.runtime) window.chrome.runtime = {};
-    if (!window.chrome.csi) window.chrome.csi = () => ({ startE: Date.now() });
-    if (!window.chrome.loadTimes) window.chrome.loadTimes = () => ({});
+
+    if (!window.chrome.runtime) {
+      const _runtimeNoop = _markPatched(function () { return undefined; });
+      window.chrome.runtime = {
+        id: undefined,                            // undefined in real-page context (not an extension)
+        onConnect: { addListener: _markPatched(function () {}), hasListener: _markPatched(function () { return false; }), removeListener: _markPatched(function () {}) },
+        onMessage: { addListener: _markPatched(function () {}), hasListener: _markPatched(function () { return false; }), removeListener: _markPatched(function () {}) },
+        onConnectExternal:  { addListener: _markPatched(function () {}), hasListener: _markPatched(function () { return false; }), removeListener: _markPatched(function () {}) },
+        onMessageExternal:  { addListener: _markPatched(function () {}), hasListener: _markPatched(function () { return false; }), removeListener: _markPatched(function () {}) },
+        connect:        _markPatched(function () { throw new Error('chrome.runtime.connect: extension context required'); }),
+        sendMessage:    _markPatched(function () { throw new Error('chrome.runtime.sendMessage: extension context required'); }),
+        getURL:         _markPatched(function (path) { return 'chrome-extension://invalid/' + (path || ''); }),
+        getManifest:    _markPatched(function () { return undefined; }),
+        getPlatformInfo:_markPatched(function (cb) { cb && cb({ os: 'win', arch: 'x86-64', nacl_arch: 'x86-64' }); }),
+        lastError: undefined,
+      };
+    }
+
+    // chrome.app — present in real Chrome desktop, missing in headless/Electron
+    if (!window.chrome.app) {
+      window.chrome.app = {
+        isInstalled: false,
+        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+        getDetails:       _markPatched(function () { return null; }),
+        getIsInstalled:   _markPatched(function () { return false; }),
+        installState:     _markPatched(function (cb) { cb && cb('disabled'); }),
+        runningState:     _markPatched(function () { return 'cannot_run'; }),
+      };
+    }
+
+    if (!window.chrome.csi) window.chrome.csi = _markPatched(function () { return { startE: Date.now(), onloadT: Date.now(), pageT: 0, tran: 15 }; });
+    if (!window.chrome.loadTimes) {
+      window.chrome.loadTimes = _markPatched(function () {
+        const t = Date.now() / 1000;
+        return {
+          requestTime: t - 1, startLoadTime: t - 1, commitLoadTime: t - 0.5,
+          finishDocumentLoadTime: t - 0.2, finishLoadTime: t, firstPaintTime: t - 0.1,
+          firstPaintAfterLoadTime: 0, navigationType: 'Other', wasFetchedViaSpdy: true,
+          wasNpnNegotiated: true, npnNegotiatedProtocol: 'h2',
+          wasAlternateProtocolAvailable: false, connectionInfo: 'h2',
+        };
+      });
+    }
   } catch (_) {}
+
+  // ── 5. navigator.userAgentData (Client Hints) ──────────────────────────
+  // Modern Chrome exposes userAgentData with brands/mobile/platform. Many
+  // sites now prefer this over parsing the UA string. Missing/empty = bot.
+  try {
+    if (!navigator.userAgentData) {
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: _markPatched(function () {
+          return {
+            brands: [
+              { brand: 'Not_A Brand',          version: '8' },
+              { brand: 'Chromium',             version: '130' },
+              { brand: 'Google Chrome',        version: '130' },
+            ],
+            mobile: false,
+            platform: 'Windows',
+            getHighEntropyValues: _markPatched(function (hints) {
+              return Promise.resolve({
+                architecture: 'x86',
+                bitness: '64',
+                brands: this.brands,
+                fullVersionList: this.brands.map(b => ({ brand: b.brand, version: b.version + '.0.0.0' })),
+                mobile: false,
+                model: '',
+                platform: 'Windows',
+                platformVersion: '15.0.0',
+                uaFullVersion: '130.0.0.0',
+                wow64: false,
+              });
+            }),
+            toJSON: _markPatched(function () { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; }),
+          };
+        }),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // ── 6. navigator.permissions.query consistency ─────────────────────────
   try {
     if (window.navigator.permissions) {
       const origQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
-      window.navigator.permissions.query = (params) => {
+      window.navigator.permissions.query = _markPatched(function (params) {
         if (params && params.name === 'notifications') {
           return Promise.resolve({ state: Notification.permission, onchange: null });
         }
         return origQuery(params);
-      };
+      });
     }
   } catch (_) {}
+
+  // ── 7. WebGL renderer/vendor spoof ─────────────────────────────────────
   try {
     const proto = WebGLRenderingContext.prototype;
     const origGetParam = proto.getParameter;
-    proto.getParameter = function (parameter) {
+    proto.getParameter = _markPatched(function (parameter) {
       if (parameter === 37445) return 'Google Inc. (NVIDIA)';
       if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)';
       return origGetParam.apply(this, arguments);
-    };
+    });
     if (window.WebGL2RenderingContext) {
       const proto2 = WebGL2RenderingContext.prototype;
       const origGetParam2 = proto2.getParameter;
-      proto2.getParameter = function (parameter) {
+      proto2.getParameter = _markPatched(function (parameter) {
         if (parameter === 37445) return 'Google Inc. (NVIDIA)';
         if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)';
         return origGetParam2.apply(this, arguments);
-      };
+      });
     }
   } catch (_) {}
+
+  // ── 8. outerWidth/outerHeight consistency ──────────────────────────────
   try {
     if (window.outerHeight < window.innerHeight) {
-      Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+      Object.defineProperty(window, 'outerHeight', { get: _markPatched(function () { return window.innerHeight; }) });
     }
     if (window.outerWidth < window.innerWidth) {
-      Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
+      Object.defineProperty(window, 'outerWidth', { get: _markPatched(function () { return window.innerWidth; }) });
     }
+  } catch (_) {}
+
+  // ── 9. Function.prototype.toString — hide ALL our patches at once ──────
+  // The single highest-value anti-detection trick after navigator.webdriver.
+  // Without this, calling toString() on any of our patched methods returns
+  // "function () { /* our source */ }" instead of "function () { [native code] }".
+  // CF Turnstile and most modern bot-detection libs call toString() on
+  // suspicious functions to detect tampering. With this in place, all
+  // patches read as native.
+  try {
+    const origToString = Function.prototype.toString;
+    const nativeStrCache = new Map();
+    Function.prototype.toString = _markPatched(function () {
+      if (_PATCHED.has(this)) {
+        // Return "function nativeName() { [native code] }" with a plausible name.
+        const name = this.name || '';
+        return 'function ' + name + '() { [native code] }';
+      }
+      return origToString.apply(this, arguments);
+    });
   } catch (_) {}
 })();
 `;
