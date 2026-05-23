@@ -1321,13 +1321,9 @@ function _attachBrowserViewListeners(viewId, view) {
     return _handleBrowserWindowOpen(details, viewId);
   });
 
-  // Apply stealth to any child window the embedded view creates (OAuth
-  // popups land here once setWindowOpenHandler returns {action:'allow'}).
-  // Without this, OAuth popups fail Cloudflare-style fingerprint checks
-  // even though their parent page passed.
-  wc.on('did-create-window', (childWin) => {
-    try { _setupStealthForWebContents(childWin.webContents); } catch (_) {}
-  });
+  // OAuth child windows get stealth automatically via puppeteer's
+  // `targetcreated` listener in chrome-controller — no per-WebContents
+  // attach needed here (was causing debugger conflicts).
 }
 
 ipcMain.handle('browser:create', async (event, opts = {}) => {
@@ -1376,22 +1372,21 @@ ipcMain.handle('browser:create', async (event, opts = {}) => {
     },
   });
 
-  // Phase 20 stealth — FIRE AND FORGET. Do NOT await. The
-  // webContents.debugger.attach() can conflict with puppeteer's attachment
-  // at the browser-level --remote-debugging-port, hanging indefinitely.
-  // We tried Promise.race against a timeout but even that introduces
-  // latency on every tab creation. Better: kick off stealth setup in the
-  // background — if it succeeds before the first inline detection script,
-  // great. If it doesn't, the browser still works.
-  //
-  // For deterministic stealth on Cloudflare-protected sites, Phase 20.5
-  // will route the addScriptToEvaluateOnNewDocument call through the
-  // existing puppeteer connection (which is already attached and won't
-  // conflict with itself) instead of opening a second debugger session
-  // per webContents.
-  setImmediate(() => {
-    _setupStealthForWebContents(view.webContents).catch(e =>
-      console.warn('[stealth] background setup failed:', e.message));
+  // Phase 20.5 — stealth is now installed via the puppeteer connection in
+  // chrome-controller.js (`_installStealthOnAllPages`). It's triggered on
+  // `chrome_launch` and re-applies to every new page via a `targetcreated`
+  // listener. No per-webContents debugger.attach happens here — that was
+  // the source of the hang + conflict with puppeteer's existing attachment.
+  // If chrome_launch hasn't been called yet, we kick it off now so the
+  // very first tab still gets stealth.
+  setImmediate(async () => {
+    try {
+      if (global.ccmChrome && typeof global.ccmChrome.launch === 'function') {
+        await global.ccmChrome.launch();
+      }
+    } catch (e) {
+      console.warn('[stealth] auto-launch failed:', e.message);
+    }
   });
 
   const viewId = _nextBrowserViewId++;

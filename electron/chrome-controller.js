@@ -214,8 +214,147 @@ async function launch(opts = {}) {
   _browser.on('disconnected', () => {
     console.log('[chrome-controller] CDP disconnected — will reconnect on next call');
     _browser = null;
+    _stealthInstalled = false;
   });
+  // Phase 20.5 — install stealth via the connection we already have.
+  // webContents.debugger.attach() conflicts with puppeteer at the browser-
+  // level CDP port; using puppeteer's own evaluateOnNewDocument routes
+  // through the existing session and applies to current + future pages.
+  try {
+    await _installStealthOnAllPages();
+  } catch (e) {
+    console.warn('[stealth] puppeteer-side install failed:', e.message);
+  }
   return { ok: true, ...(await status()) };
+}
+
+// ── Phase 20.5 — stealth via puppeteer ────────────────────────────────────
+// Same STEALTH_SCRIPT as main.js used to inject via webContents.debugger,
+// but now applied through puppeteer's page.evaluateOnNewDocument (which
+// uses Page.addScriptToEvaluateOnNewDocument under the hood — same CDP
+// method, but routed through puppeteer's existing session so it can't
+// conflict with itself). Applied to all existing pages + automatically
+// to every new page that appears.
+//
+// IMPORTANT — keep this script in sync with the STEALTH_SCRIPT in main.js
+// (they were originally one; we duplicated it here so chrome-controller
+// can be self-contained on the puppeteer side without a require cycle).
+const STEALTH_SCRIPT = `
+(() => {
+  try {
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+  } catch (_) {}
+  try {
+    const fakePlugins = [
+      { name: 'PDF Viewer',                filename: 'internal-pdf-viewer' },
+      { name: 'Chrome PDF Viewer',         filename: 'internal-pdf-viewer' },
+      { name: 'Chromium PDF Viewer',       filename: 'internal-pdf-viewer' },
+      { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer' },
+      { name: 'WebKit built-in PDF',       filename: 'internal-pdf-viewer' },
+    ];
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => Object.freeze(fakePlugins),
+      configurable: true,
+    });
+    Object.defineProperty(navigator, 'mimeTypes', {
+      get: () => Object.freeze([{ type: 'application/pdf', suffixes: 'pdf' }]),
+      configurable: true,
+    });
+  } catch (_) {}
+  try {
+    if (!navigator.languages || navigator.languages.length === 0) {
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+  try {
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+    if (!window.chrome.csi) window.chrome.csi = () => ({ startE: Date.now() });
+    if (!window.chrome.loadTimes) window.chrome.loadTimes = () => ({});
+  } catch (_) {}
+  try {
+    if (window.navigator.permissions) {
+      const origQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+      window.navigator.permissions.query = (params) => {
+        if (params && params.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission, onchange: null });
+        }
+        return origQuery(params);
+      };
+    }
+  } catch (_) {}
+  try {
+    const proto = WebGLRenderingContext.prototype;
+    const origGetParam = proto.getParameter;
+    proto.getParameter = function (parameter) {
+      if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+      if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+      return origGetParam.apply(this, arguments);
+    };
+    if (window.WebGL2RenderingContext) {
+      const proto2 = WebGL2RenderingContext.prototype;
+      const origGetParam2 = proto2.getParameter;
+      proto2.getParameter = function (parameter) {
+        if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+        if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+        return origGetParam2.apply(this, arguments);
+      };
+    }
+  } catch (_) {}
+  try {
+    if (window.outerHeight < window.innerHeight) {
+      Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+    }
+    if (window.outerWidth < window.innerWidth) {
+      Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
+    }
+  } catch (_) {}
+})();
+`;
+
+let _stealthInstalled = false;
+let _stealthHandler   = null;
+// Track per-page stealth so re-application is idempotent on reconnect.
+const _pagesWithStealth = new WeakSet();
+
+async function _applyStealthToPage(page) {
+  if (!page || page.isClosed?.() || _pagesWithStealth.has(page)) return false;
+  try {
+    await page.evaluateOnNewDocument(STEALTH_SCRIPT);
+    _pagesWithStealth.add(page);
+    return true;
+  } catch (e) {
+    console.warn('[stealth] applyToPage failed for', page.url?.()?.slice(0, 60), ':', e.message);
+    return false;
+  }
+}
+
+async function _installStealthOnAllPages() {
+  if (!_isBrowserAlive() || _stealthInstalled) return;
+  _stealthInstalled = true;
+  // Apply to existing pages
+  let pages = [];
+  try { pages = await _browser.pages(); } catch (_) {}
+  let applied = 0;
+  for (const p of pages) {
+    if (await _applyStealthToPage(p)) applied++;
+  }
+  // Listen for NEW pages — every fresh tab/popup gets stealth automatically.
+  _stealthHandler = async (target) => {
+    if (target.type() !== 'page') return;
+    try {
+      const page = await target.page();
+      if (page) await _applyStealthToPage(page);
+    } catch (_) {}
+  };
+  _browser.on('targetcreated', _stealthHandler);
+  console.log('[stealth] installed via puppeteer — applied to', applied, 'existing page(s), watching for new ones');
 }
 
 async function close() {
