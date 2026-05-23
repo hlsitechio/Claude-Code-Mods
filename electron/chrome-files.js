@@ -90,14 +90,29 @@ async function flagsSet({ flags } = {}) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Preferences (Default/Preferences JSON — ~165KB, ~1000+ keys)
 // ═══════════════════════════════════════════════════════════════════════════
+// Prototype pollution defense — any caller-controlled dotted path could
+// otherwise contain `__proto__.x` and mutate Object.prototype, polluting the
+// entire main process. Block the three magic property names anywhere in the
+// path. Keys are caller-supplied (e.g. `prefsSet({key:'__proto__.x', value})`).
+const _UNSAFE_PATH_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+function _assertSafePath(dottedPath) {
+  for (const k of dottedPath.split('.')) {
+    if (_UNSAFE_PATH_KEYS.has(k)) {
+      throw new Error(`Unsafe path segment "${k}" — refuse to mutate prototype chain.`);
+    }
+  }
+}
+
 function _walkPath(obj, dottedPath) {
-  return dottedPath.split('.').reduce((o, k) => (o && k in o ? o[k] : undefined), obj);
+  _assertSafePath(dottedPath);
+  return dottedPath.split('.').reduce((o, k) => (o && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined), obj);
 }
 function _setPath(obj, dottedPath, value) {
+  _assertSafePath(dottedPath);
   const parts = dottedPath.split('.');
   const last = parts.pop();
   const parent = parts.reduce((o, k) => {
-    if (!(k in o) || typeof o[k] !== 'object' || o[k] === null) o[k] = {};
+    if (!Object.prototype.hasOwnProperty.call(o, k) || typeof o[k] !== 'object' || o[k] === null) o[k] = {};
     return o[k];
   }, obj);
   if (value === null || value === undefined) delete parent[last];
@@ -156,9 +171,34 @@ async function policyList() {
     return { raw: '', note: 'No HKCU Chrome policies set on this machine.' };
   }
 }
+// Allowlist of registry value types we'll let the caller use. `REG_EXPAND_SZ`
+// is intentionally EXCLUDED — it expands `%COMSPEC%`-style env vars at read
+// time, which is a persistence/privilege-escalation vector if an attacker can
+// pick the data. The standard Chrome policy types are REG_SZ / REG_DWORD /
+// REG_MULTI_SZ — we don't need anything else.
+const _VALID_POLICY_TYPES = new Set(['REG_SZ', 'REG_DWORD', 'REG_MULTI_SZ']);
+// Policy names per Chrome's policy schema are CamelCase ASCII identifiers
+// like `HomepageLocation`. Reject anything that could nest into another
+// subkey (backslash) or escape into reg.exe flag territory (slash, dash).
+const _VALID_POLICY_NAME = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
+
+function _validatePolicyName(name) {
+  if (typeof name !== 'string' || !_VALID_POLICY_NAME.test(name)) {
+    throw new Error(
+      `Invalid policy name: "${name}". ` +
+      'Must match /^[A-Za-z][A-Za-z0-9_]{0,127}$/ — Chrome policies are CamelCase ASCII, ' +
+      'no backslashes (subkey nesting), no slashes/dashes (reg.exe flag escape).'
+    );
+  }
+}
+
 async function policySet({ name, value, type = 'REG_SZ' } = {}) {
   if (process.platform !== 'win32') throw new Error('Windows-only');
   if (!name) throw new Error('name required (the policy key, e.g. "HomepageLocation")');
+  _validatePolicyName(name);
+  if (!_VALID_POLICY_TYPES.has(type)) {
+    throw new Error(`Invalid type "${type}". Allowed: ${[..._VALID_POLICY_TYPES].join(', ')}. REG_EXPAND_SZ is blocked (env-var expansion persistence vector).`);
+  }
   // REG_DWORD for integer policies, REG_SZ for strings, REG_MULTI_SZ for arrays
   const { execFileSync } = require('child_process');
   execFileSync('reg', [
@@ -170,6 +210,7 @@ async function policySet({ name, value, type = 'REG_SZ' } = {}) {
 async function policyDelete({ name } = {}) {
   if (process.platform !== 'win32') throw new Error('Windows-only');
   if (!name) throw new Error('name required');
+  _validatePolicyName(name);
   const { execFileSync } = require('child_process');
   try {
     execFileSync('reg', [

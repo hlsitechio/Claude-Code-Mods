@@ -171,6 +171,28 @@
           </div>
         </section>
 
+        <!-- CLI sessions (Phase 18) — Claude Code CLI sessions tracked
+             alongside CCM chat sessions. Reads ~/.claude/projects/<cwd>/*.jsonl. -->
+        <section class="mt-4 collapsible" data-collapse="cli" data-bucket="cli">
+          <div class="section-head section-head--row">
+            <button class="collapsible__toggle" aria-label="Toggle CLI sessions">
+              <span class="collapsible__chev"><i data-phosphor="caret-down"></i></span>
+              <i data-phosphor="terminal" class="text-ink-500"></i>
+              <span>CLI</span>
+              <span class="ml-auto count" id="cli-count">0</span>
+              <button class="icon-btn icon-btn--sm" id="cli-refresh"
+                      title="Refresh CLI session list" style="margin-left:6px;">
+                <i data-phosphor="arrows-clockwise" style="font-size:11px;"></i>
+              </button>
+            </button>
+          </div>
+          <div class="collapsible__wrap">
+            <div class="collapsible__inner">
+              <div id="cli-list" class="space-y-0.5"></div>
+            </div>
+          </div>
+        </section>
+
       </div><!-- /#scroll -->
 
       <div class="sidebar-tabs">
@@ -190,8 +212,8 @@
         <button id="user-menu-btn" class="account-btn" aria-haspopup="menu" title="Account menu">
           <span class="account-btn__avatar" id="account-avatar">HL</span>
           <span class="account-btn__texts min-w-0">
-            <span class="account-btn__name truncate" id="account-name">Hubert Larose Surprenant</span>
-            <span class="account-btn__email truncate" id="account-email">Plus · hlaro…@gmail.com</span>
+            <span class="account-btn__name truncate" id="account-name">You</span>
+            <span class="account-btn__email truncate" id="account-email"></span>
           </span>
         </button>
         <button class="icon-btn" id="shortcuts-btn" title="Keyboard shortcuts (Ctrl /)"><i data-phosphor="keyboard"></i></button>

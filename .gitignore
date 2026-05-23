@@ -45,6 +45,9 @@ workspace-index.json
 Thumbs.db
 desktop.ini
 
+# Runtime debug screenshots (auto-saved by the picker / page-screenshot tools)
+screenshot/
+
 # ── Browser session / cookie data ─────────────────────────────────────────
 # Belt-and-suspenders: the embedded browser stores its persistent session in
 # the OS userData directory (%APPDATA%\claude-code-desktop\Partitions\

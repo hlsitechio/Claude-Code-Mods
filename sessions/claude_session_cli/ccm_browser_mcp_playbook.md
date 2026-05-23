@@ -332,3 +332,127 @@ Both sessions can run any of the 165 Phase 1-9 tools against their own slot's br
 - Pair-coding: slot 1 = "live driver" Claude session, slot 2 = "reviewer" Claude session with a separate browser snapshot.
 - A/B test the same change in two browsers (different login states, different feature flags) by editing in slot 1, mirroring in slot 2.
 - Isolate sensitive work — slot 2 with a clean profile, no extensions, separate cookie jar — without disturbing your main slot 1 setup.
+
+---
+
+## Phase 15 — Drive both split-view panes in ONE Claude turn (2026-05-21)
+
+### The need
+
+User point-blank: *"the real deal is how claude cli can control both splitscreen at the same time .. imagine .. doing research in one window .. and the other taking notes of these research."*
+
+CCM's browser panel can put two `WebContentsView`s side-by-side (Phase 14 fix delivered the drag-handle + Alt+Click pinning). But until now Claude had no way to know **which CDP target = which visible pane**, so it couldn't drive both atomically.
+
+### The wire
+
+```
+renderer (app.js)
+  _syncBrowserSplitState()                ← called from refreshChrome + divider drop
+   └→ electronAPI.browser.setSplitState({ active, leftViewId, rightViewId, leftUrl, rightUrl, ratio })
+       └→ IPC `browser:set-split-state`
+           └→ main process: global.ccmSplitState = state
+               └→ chrome-controller.splitState()  resolves leftUrl/rightUrl → CDP targetIds
+                   └→ MCP tool `chrome_split_state` returns { left: {targetId}, right: {targetId} }
+```
+
+URL match is the resolver. If both panes have the same URL the first-found wins for left, the right pane skips that id — disambiguation falls to the `attached` marker if you really care.
+
+### Canonical pipeline — research + notes
+
+```javascript
+// 1. Discover the layout (one call)
+const split = await chrome_split_state();
+//   → { active: true, ratio: 0.5,
+//       left:  { targetId: 'tgt-AAA', url: 'https://chatgpt.com', title: 'ChatGPT' },
+//       right: { targetId: 'tgt-BBB', url: 'https://start.me',    title: 'start.me' } }
+const A = split.left.targetId;   // research pane
+const B = split.right.targetId;  // notes pane
+
+// 2. Read research pane (no active-tab flip needed)
+const researchTree = await chrome_observe({ targetId: A });
+// LLM extracts findings from the observe tree...
+
+// 3. Write notes in the OTHER pane — same turn, no context switch
+await chrome_step({
+  targetId: B,
+  action: 'type',
+  target: 'note body',
+  value: 'Finding: …',
+});
+
+// 4. Loop: advance the research pane while notes stay focused
+await chrome_step({
+  targetId: A,
+  action: 'click',
+  target: 'next page',
+});
+// repeat 2-4 forever — both panes driven from the same Claude turn
+```
+
+Every Phase 11 ref-based tool (`chrome_observe`, `chrome_observe_delta`, `chrome_click_ref`, `chrome_type_ref`, `chrome_focus_ref`, `chrome_stabilize`, `chrome_step`) already accepts `targetId:` — Phase 15 is purely the **discovery** that lets Claude pick which targetId to use.
+
+### Two ways to discover
+
+- **`chrome_split_state`** — direct: returns `{ left, right, ratio }` with targetIds populated.
+- **`chrome_target_list`** — enriched: each tab now has `pane: 'left' | 'right' | null` plus top-level `splitActive`, `splitLeftId`, `splitRightId`.
+- **`chrome_status`** — opportunistic: when split is active, includes a `splitView` field so a single status call doubles as layout discovery.
+
+### Setting up the split — Phase 16: Claude controls the UI itself
+
+Phase 15 shipped read-only — the user had to click the split-toggle button manually. **Phase 16 (same-day follow-up) added the missing write side**: four new tools let Claude trigger the split layout from the CLI without touching the UI:
+
+| Tool | Effect |
+|---|---|
+| `chrome_split_enable({leftUrl?, rightUrl?, ratio?})` | Turn split ON. Optional URLs navigate each pane; reuses existing tabs or opens about:blank. Returns the resolved chrome_split_state. |
+| `chrome_split_disable()` | Collapse back to single-tab view (both tabs stay open, just un-pinned). |
+| `chrome_split_swap()` | Swap left and right panes. |
+| `chrome_split_set_ratio({ratio})` | Resize — `ratio` = left-pane width fraction (0.15-0.85). |
+
+Wire: `MCP → HTTP → chrome-controller.splitEnable → global.ccmBrowserSplit → webContents.send('browser:split-cmd') → app.js handler → mutates _browser → refreshChrome → _syncBrowserSplitState pushes layout back to main → splitState() resolves to CDP targetIds → returned in one MCP response`. The reqId pattern + ipcMain.once gives clean request/response semantics; 5-second timeout if the Browser panel isn't mounted.
+
+URL validation: `leftUrl`/`rightUrl` go through the same `_safeNavUrl` allowlist as direct navigation, so a prompt-injected `javascript:` URL is rejected before reaching the renderer.
+
+### Full canonical bootstrap (zero manual UI)
+
+```javascript
+// One call sets up the entire research workspace
+const split = await chrome_split_enable({
+  leftUrl:  'https://duckduckgo.com/?q=site:arxiv.org+attention+is+all+you+need',
+  rightUrl: 'https://notion.so/my-research-page',
+  ratio:    0.65,  // wider left for results, narrower right for notes
+});
+// split.left.targetId  = research pane CDP target
+// split.right.targetId = notes pane CDP target
+
+// Now loop:
+const results = await chrome_observe({ targetId: split.left.targetId });
+// ... LLM extracts top result link ...
+await chrome_step({
+  targetId: split.left.targetId,
+  action: 'click',
+  target: 'attention is all you need',
+});
+// new page loads in left pane — observe again
+const paper = await chrome_observe({ targetId: split.left.targetId });
+// ... extract abstract ...
+await chrome_step({
+  targetId: split.right.targetId,
+  action: 'type',
+  target: 'note',
+  value: 'Attention Is All You Need (Vaswani et al, 2017) — introduces transformer architecture...',
+  submit: true,
+});
+// repeat — both panes driven, no user click needed at any step
+```
+
+### Why this matters more than the visual feature
+
+The visual side-by-side is the chrome of the feature; **parallel pane control is the substance**. Patterns it unlocks:
+
+- **Research + notes** — what the user asked for. Read a docs page in pane A, take structured notes in a notebook app in pane B, all in one Claude turn.
+- **Diff review** — old version in pane A, new version in pane B, Claude switches between them comparing.
+- **Translation drafting** — source language in pane A, target editor in pane B, Claude reads + writes without flipping context.
+- **Bug repro + filing** — repro page in pane A (where Claude clicks to trigger the bug), GitHub issue form in pane B (where Claude pastes the observation), one continuous flow.
+- **Order placement + payment** — checkout page in pane A, banking/2FA tab in pane B, Claude reads OTPs from one and pastes into the other.
+
+This is the same pattern as Phase 10 multi-slot (one Claude session = one browser), pushed down one level: one Claude session = one browser = two driven panes.

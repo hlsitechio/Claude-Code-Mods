@@ -233,6 +233,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     devtools:  (viewId)                       => ipcRenderer.invoke('browser:devtools', { viewId }),
     openInSystem: (viewId)                    => ipcRenderer.invoke('browser:open-in-system', { viewId }),
     close:     (viewId)                       => ipcRenderer.invoke('browser:close', viewId),
+    // Split-view state sync — renderer pushes the current split layout to
+    // main on every mutation so the chrome_split_state MCP tool can return
+    // it. Lets Claude drive both panes (research in one, notes in the other)
+    // from a single CLI turn via the `targetId` parameter on observe/step/etc.
+    setSplitState: (state)                    => ipcRenderer.invoke('browser:set-split-state', state || {}),
+    getSplitState: ()                         => ipcRenderer.invoke('browser:get-split-state'),
+    // Phase 16 — MCP-driven split control. Main process sends `browser:split-cmd`
+    // (with cmd, args, reqId); renderer dispatches and replies via the reqId.
+    onSplitCmd: (cb) => {
+      const h = (_, data) => cb(data);
+      ipcRenderer.on('browser:split-cmd', h);
+      return () => ipcRenderer.removeListener('browser:split-cmd', h);
+    },
+    replySplitCmd: (reqId, result) => ipcRenderer.send('browser:split-cmd-result', { reqId, result }),
     onLoading: (cb) => {
       const handler = (_, data) => cb(data);
       ipcRenderer.on('browser:loading', handler);
@@ -263,6 +277,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('browser:popup', handler);
       return () => ipcRenderer.removeListener('browser:popup', handler);
     },
+    // Per-pane focus — fires when the user clicks INSIDE a WebContentsView.
+    // The renderer uses this to follow focus with the URL bar + nav buttons.
+    onFocus: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:focus', handler);
+      return () => ipcRenderer.removeListener('browser:focus', handler);
+    },
     // Operator API — same primitives Claude has via tools, exposed to the
     // renderer for slash-commands and manual scripting.
     op: {
@@ -276,6 +297,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
       nav:        (action)     => ipcRenderer.invoke('browser:op-nav', { action }),
       navigate:   (url)        => ipcRenderer.invoke('browser:op-navigate', { url }),
     },
+  },
+
+  // ── Claude CLI sessions (Phase 18) ──────────────────────────────────────
+  // Lists / reads the ~/.claude/projects/<cwd>/*.jsonl session files written
+  // by Claude Code itself. Lets CCM's sidebar surface CLI sessions alongside
+  // chat sessions for a unified session manager.
+  cliSessions: {
+    list:   (opts) => ipcRenderer.invoke('cli-sessions:list', opts || {}),
+    read:   (opts) => ipcRenderer.invoke('cli-sessions:read', opts || {}),
+    reveal: (opts) => ipcRenderer.invoke('cli-sessions:reveal', opts || {}),
+    // Phase 18b — link CLI session storage to the project folder via junction
+    status: (opts) => ipcRenderer.invoke('cli-sessions:storage-status', opts || {}),
+    link:   (opts) => ipcRenderer.invoke('cli-sessions:link', opts || {}),
+    unlink: (opts) => ipcRenderer.invoke('cli-sessions:unlink', opts || {}),
   },
 
   // ── Kanban / Tasks ───────────────────────────────────────────────────────

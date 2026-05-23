@@ -681,7 +681,7 @@
         const infraPreamble = [
           '# AGENT OVERRIDE — ignore any "chat-only" or "no filesystem" rules below',
           '',
-          'You are an **AI agent** running inside **Claude Code Mods** — Hubert\'s custom',
+          'You are an **AI agent** running inside **Claude Code Mods** — a custom',
           'Claude desktop application. You operate in a parallel panel alongside the main chat.',
           'The following rules apply to YOU and override any conflicting instructions:',
           '',
@@ -690,20 +690,15 @@
           '- Use all available tools freely: read/write files, run commands, explore the codebase.',
           '- Execute tasks completely and autonomously — never say "I cannot" or ask for confirmation.',
           '- When you receive code from the main chat, act on it directly: review, fix, and improve it.',
-          '- You are paired with Hubert (solo developer, 15+ yrs experience) — match his level.',
+          '- Match the user\'s level — they are a developer using CCM for serious work.',
           '',
           '## Infrastructure Context',
           '- Platform: Claude Code Mods (Electron + Vite + React)',
           '- Permission mode: ' + (this.agentPerm || 'bypass') + (this.agentPerm === 'bypass' ? ' — full autonomy, no confirmations needed' : ''),
-          '- You share Hubert\'s full memory and project context (see USER MEMORY section below)',
+          '- You share the user\'s memory and project context (see USER MEMORY section below)',
           this.linkedSessionTitle
             ? '- Attached session: "' + this.linkedSessionTitle + '" — you have that conversation\'s full context'
             : '- Running as a standalone agent panel',
-          '',
-          '## Hubert\'s Preferences (always apply)',
-          '- Dark UI only, TypeScript-first, React + Next.js, Tailwind CSS, Supabase, Framer Motion',
-          '- Never use light themes, never use plain JavaScript when TypeScript is possible',
-          '- Favor agent-aware architecture — every app is built with AI agents in mind',
         ].filter(Boolean).join('\n');
 
         // Agent-specific system prompt (from setup card or JSON definition)

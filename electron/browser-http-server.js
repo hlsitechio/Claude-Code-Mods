@@ -86,6 +86,14 @@ async function _handle(req, res) {
   if (req.socket.remoteAddress !== '127.0.0.1' && req.socket.remoteAddress !== '::1' && req.socket.remoteAddress !== '::ffff:127.0.0.1') {
     return _sendJson(res, 403, { error: 'Forbidden' });
   }
+  // DNS-rebinding defense: a malicious site could lure the user to attacker.com,
+  // CNAME-flip the resolver to 127.0.0.1, and POST through the victim's browser.
+  // The bearer token already defeats this (attacker has no token), but explicit
+  // Host-header allowlisting closes the door even if the token ever leaks.
+  const host = (req.headers.host || '').toLowerCase().split(':')[0];
+  if (host && host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]') {
+    return _sendJson(res, 403, { error: 'Forbidden (bad host)' });
+  }
   // Bearer token check — constant-time compare to defeat timing oracles.
   const auth = req.headers.authorization || '';
   const expected = 'Bearer ' + _token;
@@ -225,6 +233,15 @@ async function _handle(req, res) {
       case 'chrome-picker-install':      result = await chrome.pickerInstall(); break;
       case 'chrome-picker-capture':      result = await chrome.pickerCapture(body); break;
       case 'chrome-picker-cancel':       result = await chrome.pickerCancel(); break;
+
+      // Phase 15 — split-view state (which CDP target = left/right pane)
+      case 'chrome-split-state':         result = await chrome.splitState(); break;
+
+      // Phase 16 — Claude controls the split layout itself
+      case 'chrome-split-enable':        result = await chrome.splitEnable(body); break;
+      case 'chrome-split-disable':       result = await chrome.splitDisable(); break;
+      case 'chrome-split-swap':          result = await chrome.splitSwap(); break;
+      case 'chrome-split-set-ratio':     result = await chrome.splitSetRatio(body); break;
 
       // Input
       case 'chrome-input-click':         result = await chrome.inputClick(body); break;
