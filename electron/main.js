@@ -896,6 +896,287 @@ function _safeBrowseUrl(url) {
   return url;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 20 — OAuth + Cloudflare friendliness
+// ══════════════════════════════════════════════════════════════════════════
+// Two embedded-browser pain points fixed in this block:
+//
+// 1. **OAuth popups** — Google sign-in, Microsoft, GitHub, etc. open a popup
+//    via window.open() and wait for window.opener.postMessage(...) to fire
+//    after the sign-in redirect chain completes. If we deny the popup (the
+//    old behavior), sign-in completes silently but the callback never reaches
+//    the original page → user is stuck staring at a "sign in" button that
+//    won't change state.
+//    Fix: detect OAuth provider patterns in setWindowOpenHandler and return
+//    {action:'allow'} with shared session so cookies + state persist.
+//
+// 2. **Cloudflare / bot detection** — Electron's Chromium leaks fingerprints
+//    that real Chrome doesn't have: navigator.webdriver defined late,
+//    navigator.plugins empty, no window.chrome.runtime, WebGL UNMASKED_* not
+//    matching real GPU, etc. Even with UA spoofing, deep fingerprinting
+//    catches us.
+//    Fix: inject a stealth script via the CDP `Page.addScriptToEvaluate
+//    OnNewDocument` API (same as puppeteer-stealth). The script runs in
+//    main world BEFORE any page script on every navigation, so even
+//    Cloudflare's inline detection script sees the spoofed values.
+
+// Common stealth tricks applied via Page.addScriptToEvaluateOnNewDocument.
+// Modeled on puppeteer-extra-plugin-stealth but stripped to the highest-
+// signal evasions (the ones Cloudflare's "Just a moment..." actually checks).
+const STEALTH_SCRIPT = `
+(() => {
+  // 1. navigator.webdriver — most common automation flag.
+  //    Real Chrome with no automation: undefined. We force undefined.
+  try {
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      get: () => undefined,
+      configurable: true,
+    });
+  } catch (_) {}
+
+  // 2. navigator.plugins — Electron returns 0 entries; real Chrome 130 has
+  //    ~5 (PDF viewers). Detection libs compare length.
+  try {
+    const fakePlugins = [
+      { name: 'PDF Viewer',                filename: 'internal-pdf-viewer' },
+      { name: 'Chrome PDF Viewer',         filename: 'internal-pdf-viewer' },
+      { name: 'Chromium PDF Viewer',       filename: 'internal-pdf-viewer' },
+      { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer' },
+      { name: 'WebKit built-in PDF',       filename: 'internal-pdf-viewer' },
+    ];
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => Object.freeze(fakePlugins),
+      configurable: true,
+    });
+    Object.defineProperty(navigator, 'mimeTypes', {
+      get: () => Object.freeze([{ type: 'application/pdf', suffixes: 'pdf' }]),
+      configurable: true,
+    });
+  } catch (_) {}
+
+  // 3. navigator.languages — must be non-empty.
+  try {
+    if (!navigator.languages || navigator.languages.length === 0) {
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // 4. window.chrome.runtime — Electron lacks this; real Chrome always has it.
+  try {
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+    if (!window.chrome.csi) window.chrome.csi = () => ({ startE: Date.now() });
+    if (!window.chrome.loadTimes) window.chrome.loadTimes = () => ({});
+  } catch (_) {}
+
+  // 5. Permissions API consistency — sites probe Notification permission via
+  //    navigator.permissions.query AND Notification.permission. If they
+  //    disagree, that's a tell. Make the API mirror Notification.permission.
+  try {
+    if (window.navigator.permissions) {
+      const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+      window.navigator.permissions.query = (params) => {
+        if (params && params.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission, onchange: null });
+        }
+        return originalQuery(params);
+      };
+    }
+  } catch (_) {}
+
+  // 6. WebGL UNMASKED_VENDOR / UNMASKED_RENDERER — Electron's ANGLE returns
+  //    "Google Inc. (Google)" / "ANGLE (Google, ...)" which is a tell that
+  //    we're not a real desktop Chrome. Return common NVIDIA-on-Windows values.
+  try {
+    const proto = WebGLRenderingContext.prototype;
+    const origGetParam = proto.getParameter;
+    proto.getParameter = function (parameter) {
+      // UNMASKED_VENDOR_WEBGL  = 0x9245 = 37445
+      // UNMASKED_RENDERER_WEBGL = 0x9246 = 37446
+      if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+      if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+      return origGetParam.apply(this, arguments);
+    };
+    // Mirror to WebGL2 if present
+    if (window.WebGL2RenderingContext) {
+      const proto2 = WebGL2RenderingContext.prototype;
+      const origGetParam2 = proto2.getParameter;
+      proto2.getParameter = function (parameter) {
+        if (parameter === 37445) return 'Google Inc. (NVIDIA)';
+        if (parameter === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+        return origGetParam2.apply(this, arguments);
+      };
+    }
+  } catch (_) {}
+
+  // 7. window.outerHeight / outerWidth — Electron's WebContentsView reports
+  //    the view rect; real Chrome reports the window rect. When they're
+  //    smaller than innerHeight (because the view is partial), it's a tell.
+  //    Soft fix: ensure outer* >= inner*.
+  try {
+    const oh = window.outerHeight, ow = window.outerWidth;
+    if (oh < window.innerHeight) {
+      Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+    }
+    if (ow < window.innerWidth) {
+      Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
+    }
+  } catch (_) {}
+
+  // 8. Function.prototype.toString — anti-tamper libs check if our overrides
+  //    show as native code. Without restoring toString, fingerprint scripts
+  //    detect "function getParameter() { [PATCH] }" vs "function getParameter() { [native code] }".
+  //    This is partial — defeating sophisticated toString checks needs Proxy-
+  //    based wrapping; we just patch the common case.
+  try {
+    const native = Function.prototype.toString;
+    const _origGetParam = WebGLRenderingContext.prototype.getParameter;
+    Function.prototype.toString = new Proxy(native, {
+      apply(target, thisArg, args) {
+        if (thisArg === _origGetParam || (thisArg && thisArg.name === 'getParameter')) {
+          return 'function getParameter() { [native code] }';
+        }
+        return target.apply(thisArg, args);
+      },
+    });
+  } catch (_) {}
+})();
+`;
+
+// Install the stealth script on a WebContents via the CDP debugger.
+// Page.addScriptToEvaluateOnNewDocument runs in MAIN world before ANY page
+// script, including inline ones in the HTML — far better than waiting for
+// did-finish-load to executeJavaScript (which races inline detection).
+function _setupStealthForWebContents(wc) {
+  if (!wc || wc.isDestroyed?.()) return false;
+  try {
+    // If devtools already attached, attach() throws. Skip silently.
+    if (!wc.debugger.isAttached()) {
+      wc.debugger.attach('1.3');
+    }
+    wc.debugger.sendCommand('Page.enable').catch(() => {});
+    wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+      source: STEALTH_SCRIPT,
+      runImmediately: true,
+    }).catch(e => console.warn('[stealth] addScriptToEvaluateOnNewDocument failed:', e.message));
+    // If devtools opens later, our debugger detaches. Re-attach when needed.
+    wc.debugger.on('detach', (_e, reason) => {
+      // 'target closed' = page navigated away in a way that detached us; ok.
+      // 'replaced with devtools' = user opened devtools; expected.
+      if (reason && reason !== 'target closed') {
+        console.log('[stealth] debugger detached:', reason);
+      }
+    });
+    return true;
+  } catch (e) {
+    // attach() throws if the WebContents is gone or devtools is already
+    // attached. Soft failure — page still works without stealth.
+    console.warn('[stealth] setup failed:', e.message);
+    return false;
+  }
+}
+
+// OAuth popup detection. Return true if the URL looks like an identity
+// provider's sign-in popup that needs window.opener.postMessage support.
+// Conservative — we'd rather miss some OAuth flows (and have the user fall
+// back to the existing browser:popup → new-tab behavior) than open
+// every popup as a child window.
+function _isOAuthPopup(parsedUrl) {
+  const host = parsedUrl.hostname.toLowerCase();
+  const path = parsedUrl.pathname.toLowerCase();
+  // Major OAuth providers
+  if (host === 'accounts.google.com')                  return true;
+  if (host === 'oauth2.googleapis.com')                return true;
+  if (host === 'login.microsoftonline.com')            return true;
+  if (host === 'login.live.com')                       return true;
+  if (host === 'appleid.apple.com')                    return true;
+  if (host === 'github.com' && path.startsWith('/login'))                       return true;
+  if (host === 'github.com' && path.includes('/oauth'))                         return true;
+  if (host === 'gitlab.com' && (path.startsWith('/users/sign_in') || path.includes('/oauth')))  return true;
+  if (host === 'bitbucket.org' && path.includes('/login'))                      return true;
+  if (host === 'www.facebook.com' && (path.startsWith('/login') || path.includes('/oauth')))    return true;
+  if (host === 'www.linkedin.com' && (path.startsWith('/oauth') || path.includes('/uas/login'))) return true;
+  if (host === 'twitter.com' || host === 'x.com')      return path.includes('/oauth') || path.includes('/login');
+  if (host === 'discord.com' && path.startsWith('/oauth'))                      return true;
+  if (host === 'slack.com' && path.includes('/oauth')) return true;
+  if (host === 'auth0.com' || host.endsWith('.auth0.com'))                      return true;
+  if (host === 'okta.com' || host.endsWith('.okta.com'))                        return true;
+  if (host.endsWith('.amazon.com') && path.includes('/ap/'))                    return true;
+  if (host === 'twitch.tv' && path.includes('/oauth')) return true;
+  if (host === 'oauth.lovable.app')                    return true; // Lovable.dev OAuth flow
+  // Generic OAuth fingerprint: client_id + redirect_uri query params
+  if (parsedUrl.searchParams.has('client_id') && parsedUrl.searchParams.has('redirect_uri')) return true;
+  // OAuth 1.0 / OpenID
+  if (parsedUrl.searchParams.has('oauth_token'))       return true;
+  if (parsedUrl.searchParams.has('openid.return_to'))  return true;
+  return false;
+}
+
+// Returns the value setWindowOpenHandler should return for a given popup
+// request. Split out so the same logic applies to popups from OAuth child
+// windows (which can themselves open more popups during multi-step flows).
+function _handleBrowserWindowOpen({ url, features }, parentViewId) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return { action: 'deny' }; }
+
+  // Reject non-web schemes (matches _safeNavUrl threat model)
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    const entry = _browserViews.get(parentViewId);
+    if (entry) {
+      const ownerWc = BrowserWindow.getAllWindows()
+        .map(w => w.webContents)
+        .find(w => w.id === entry.ownerWebContentsId);
+      ownerWc?.send('browser:popup-blocked', { viewId: parentViewId, url });
+    }
+    return { action: 'deny' };
+  }
+
+  // OAuth popups → allow as proper child windows so window.opener works
+  if (_isOAuthPopup(parsed)) {
+    const entry = _browserViews.get(parentViewId);
+    const parentWin = entry ? BrowserWindow.fromWebContents(entry.view.webContents) || entry.win : null;
+    const w = parseInt(features?.match(/width=(\d+)/)?.[1])  || 500;
+    const h = parseInt(features?.match(/height=(\d+)/)?.[1]) || 650;
+    console.log('[oauth-popup] allowing child window:', parsed.hostname + parsed.pathname);
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        parent: parentWin || undefined,
+        modal:  false,
+        width:  Math.min(900, Math.max(400, w)),
+        height: Math.min(950, Math.max(500, h)),
+        title:  'Sign in',
+        backgroundColor: '#0b0b0c',
+        autoHideMenuBar: true,
+        webPreferences: {
+          // CRITICAL — must share the parent's session so OAuth state cookies
+          // are visible across the redirect chain. Without this the IdP sets
+          // a cookie in a new partition, the redirect comes back, and the
+          // original site has no idea who you are.
+          session:          entry?.view.webContents.session,
+          contextIsolation: true,
+          nodeIntegration:  false,
+          sandbox:          true,
+          webSecurity:      true,
+        },
+      },
+    };
+  }
+
+  // Default: open as a new tab in our owner window (existing behavior)
+  const entry = _browserViews.get(parentViewId);
+  if (entry) {
+    const ownerWc = BrowserWindow.getAllWindows()
+      .map(w => w.webContents)
+      .find(w => w.id === entry.ownerWebContentsId);
+    ownerWc?.send('browser:popup', { viewId: parentViewId, url });
+  }
+  return { action: 'deny' };
+}
+
 function _attachBrowserViewListeners(viewId, view) {
   const wc = view.webContents;
   const owner = _browserViews.get(viewId)?.ownerWebContentsId;
@@ -952,17 +1233,22 @@ function _attachBrowserViewListeners(viewId, view) {
   // split-view: clicking the right pane should make the URL bar show its URL.
   wc.on('focus', () => send('browser:focus', {}));
 
-  // Popups (target=_blank, window.open) → open in a new tab in this owner window
-  wc.setWindowOpenHandler(({ url }) => {
-    try {
-      const u = new URL(url);
-      if (u.protocol === 'http:' || u.protocol === 'https:') {
-        send('browser:popup', { url });
-      } else {
-        send('browser:popup-blocked', { url });
-      }
-    } catch (_) {}
-    return { action: 'deny' };
+  // Popups (target=_blank, window.open) → most open in a new tab in this
+  // owner window, but OAuth popups need real child-window behavior because
+  // their flow depends on `window.opener.postMessage(...)` firing back to
+  // the original page after sign-in. If we open OAuth as a regular new tab
+  // there's no `window.opener` and the callback is lost — that's the
+  // "page doesn't return after Google sign-in" bug.
+  wc.setWindowOpenHandler((details) => {
+    return _handleBrowserWindowOpen(details, viewId);
+  });
+
+  // Apply stealth to any child window the embedded view creates (OAuth
+  // popups land here once setWindowOpenHandler returns {action:'allow'}).
+  // Without this, OAuth popups fail Cloudflare-style fingerprint checks
+  // even though their parent page passed.
+  wc.on('did-create-window', (childWin) => {
+    try { _setupStealthForWebContents(childWin.webContents); } catch (_) {}
   });
 }
 
@@ -1012,15 +1298,12 @@ ipcMain.handle('browser:create', (event, opts = {}) => {
     },
   });
 
-  // Wipe a few automation fingerprints AT DOCUMENT START. Sites that check
-  // navigator.webdriver / chrome.runtime use these to gate sign-in flows.
-  view.webContents.on('did-finish-load', () => {
-    view.webContents.executeJavaScript(`
-      try {
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      } catch (_) {}
-    `, false).catch(() => {});
-  });
+  // Phase 20 — install stealth via CDP Page.addScriptToEvaluateOnNewDocument
+  // BEFORE any page loads. The old did-finish-load → executeJavaScript path
+  // patched navigator.webdriver AFTER Cloudflare's inline detector had
+  // already run. Now the spoof is installed in main world before document
+  // parse starts, so even the first inline <script> sees the patched values.
+  _setupStealthForWebContents(view.webContents);
 
   const viewId = _nextBrowserViewId++;
   _browserViews.set(viewId, {

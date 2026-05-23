@@ -8,6 +8,13 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ## [Unreleased]
 
+### Added
+
+- **Phase 20 — OAuth + Cloudflare friendliness** — two embedded-browser pain points fixed.
+  - **OAuth popups now open as real child windows.** Previous behavior denied every popup, which broke Google / Microsoft / GitHub / Apple / Auth0 / Okta sign-in flows that rely on `window.opener.postMessage(...)` firing back to the original page after sign-in. New `_isOAuthPopup()` detects provider patterns (major IdP hostnames + generic OAuth fingerprint: `client_id` + `redirect_uri` query params); `setWindowOpenHandler` returns `{action:'allow'}` with `overrideBrowserWindowOptions` using the parent's session so OAuth state cookies persist across the redirect chain. Non-OAuth popups still route through the existing new-tab handler.
+  - **Stealth fingerprint via CDP `Page.addScriptToEvaluateOnNewDocument`.** Same technique as puppeteer-stealth. Installed via `webContents.debugger.attach('1.3')` on view creation, runs in main world BEFORE any page script on every navigation — including inline detection scripts. Spoofs: `navigator.webdriver` (undefined), `navigator.plugins` (5 fake PDF viewers, length matching real Chrome), `navigator.languages` (non-empty fallback), `window.chrome.runtime/csi/loadTimes` (present), `navigator.permissions.query` (mirrors `Notification.permission`), WebGL `UNMASKED_VENDOR_WEBGL` / `UNMASKED_RENDERER_WEBGL` (NVIDIA-on-Windows values), `window.outerHeight/outerWidth` (>= innerHeight/Width), `Function.prototype.toString` (returns "native code" for our patched WebGL getter). The old `did-finish-load` → `executeJavaScript` patch was deleted — it ran AFTER Cloudflare's inline detector and was useless.
+  - Stealth is also applied to OAuth child windows via `did-create-window` so a Cloudflare-protected sign-in popup (rare but possible) still passes.
+
 ### Security
 
 - **Privilege-escalation block in `chrome_*` MCP tools** — `_pageById` now filters through `_isBrowserableUrl`, refusing to address the CCM main renderer or any non-browseable Electron context. Prevents a prompt-injected MCP caller from chaining `chrome_cdp_raw{Target.getTargets}` → `chrome_runtime_eval{targetId:<CCM_UI>}` to execute privileged JS in the renderer with full `electronAPI` IPC access. `chrome_cdp_raw` also validates `params.targetId` through the same filter.
