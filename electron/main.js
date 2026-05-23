@@ -1377,15 +1377,20 @@ ipcMain.handle('browser:create', async (event, opts = {}) => {
   });
 
   // Phase 20 — install stealth via CDP Page.addScriptToEvaluateOnNewDocument
-  // BEFORE any page loads. The old did-finish-load → executeJavaScript path
-  // patched navigator.webdriver AFTER Cloudflare's inline detector had
-  // already run. Now the spoof is installed in main world before document
-  // parse starts, so even the first inline <script> sees the patched values.
-  // AWAIT — without this, loadURL below races the CDP roundtrip and the
-  // first navigation misses the spoof.
-  const stealthResult = await _setupStealthForWebContents(view.webContents);
+  // BEFORE any page loads. Race against a 750ms timeout — typical CDP
+  // roundtrip is <50ms but webContents.debugger can hang indefinitely
+  // when puppeteer is already attached at the browser level
+  // (--remote-debugging-port). Without the timeout, browser:create never
+  // resolves and the renderer hangs waiting for the tab to appear —
+  // which is exactly the regression the user reported as "not even
+  // opening any new website."
+  const stealthResult = await Promise.race([
+    _setupStealthForWebContents(view.webContents),
+    new Promise(resolve => setTimeout(() => resolve({ ok: false, error: 'timeout after 750ms' }), 750)),
+  ]);
   if (!stealthResult.ok) {
-    console.warn('[browser:create] stealth setup failed:', stealthResult.error);
+    console.warn('[browser:create] stealth setup skipped:', stealthResult.error,
+                 '— browser still works, just no Cloudflare bypass on first page');
   }
 
   const viewId = _nextBrowserViewId++;
