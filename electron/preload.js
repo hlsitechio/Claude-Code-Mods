@@ -233,6 +233,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     devtools:  (viewId)                       => ipcRenderer.invoke('browser:devtools', { viewId }),
     openInSystem: (viewId)                    => ipcRenderer.invoke('browser:open-in-system', { viewId }),
     close:     (viewId)                       => ipcRenderer.invoke('browser:close', viewId),
+    // Phase 20 diagnostic — runs in the embedded webContents to see whether
+    // the stealth spoofs are actually applied. Call from devtools console:
+    //   await window.electronAPI.browser.stealthCheck(<viewId>)
+    // → { ok, raw: {webdriver, pluginsLength, chromeRuntime, ...},
+    //     webdriverHidden, hasPlugins, chromeRuntimePresent, ... }
+    stealthCheck: (viewId)                    => ipcRenderer.invoke('browser:stealth-check', viewId),
     // Split-view state sync — renderer pushes the current split layout to
     // main on every mutation so the chrome_split_state MCP tool can return
     // it. Lets Claude drive both panes (research in one, notes in the other)
