@@ -1,0 +1,58 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please check open issues + the [CHANGELOG](../blob/main/CHANGELOG.md) — it may already be known/fixed.
+
+        **For security issues, see [SECURITY.md](../blob/main/SECURITY.md) and report privately.** Don't file public security bug reports here.
+
+  - type: input
+    id: ccm-version
+    attributes:
+      label: CCM version
+      description: From `package.json` or the About dialog
+      placeholder: "0.5.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS + version
+      placeholder: "Windows 11 24H2 / Ubuntu 22.04 / macOS 14"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version`
+      placeholder: "v20.10.0"
+    validations:
+      required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code CLI version
+      description: Output of `claude --version`
+      placeholder: "2.1.141"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Steps to reproduce + what you expected vs. what you got
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Console output, stderr from `npm run electron:dev`, etc. Redact anything sensitive.
+      render: shell

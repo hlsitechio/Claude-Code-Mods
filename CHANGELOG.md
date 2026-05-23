@@ -2,11 +2,56 @@
 
 All notable changes to this project are documented here.
 
+This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loosely) and [Semantic Versioning](https://semver.org).
+
 ---
 
 ## [Unreleased]
 
+### Security
+
+- **Privilege-escalation block in `chrome_*` MCP tools** — `_pageById` now filters through `_isBrowserableUrl`, refusing to address the CCM main renderer or any non-browseable Electron context. Prevents a prompt-injected MCP caller from chaining `chrome_cdp_raw{Target.getTargets}` → `chrome_runtime_eval{targetId:<CCM_UI>}` to execute privileged JS in the renderer with full `electronAPI` IPC access. `chrome_cdp_raw` also validates `params.targetId` through the same filter.
+- **Personal info scrubbed from defaults** — name and email no longer hardcoded in `app.js` / `index.html` / `split-chat.js`. Defaults are `'You'` / `''`; profile loads from `localStorage`.
+
 ### Added
+
+- **ccm-browser Phase 18b — Link CLI sessions to project folder** — one-click "Link to project" button in the sidebar's CLI section migrates `~/.claude/projects/<encoded-cwd>/*.jsonl` to `<project>/sessions/claude_session_cli/` and creates a junction (Windows) / dir symlink (Mac/Linux) so future sessions land in the project folder transparently. Claude Code keeps writing to its expected location; files end up where the user wants them. Idempotent, with `.before-link.bak` recovery hedge and an `unlink` op that restores the original storage.
+
+- **ccm-browser Phase 18 — CLI session tracker in sidebar** — new "CLI" section between Recent and Bottom in the sidebar lists Claude Code CLI sessions for the current project. `electron/cli-session-tracker.js` scans `~/.claude/projects/<encoded-cwd>/*.jsonl`, parses metadata cheaply (only first 8KB per file to extract `firstUserMessage`), sorts by `lastActivity`. New IPC: `cli-sessions:list / read / reveal / storage-status / link / unlink`. Auto-refresh every 60s; manual ⟳ button. Click a row to reveal in OS file explorer.
+
+- **ccm-browser Phase 17 — `targetId` parameter on every tool + PID enrichment** — 21 functions in `chrome-controller.js` (page/runtime/dom/input/cm/picker/console) now accept optional `targetId` to bind directly to a specific CDP target instead of using `_activePage()`. Eliminates the active-tab race condition between parallel sub-agents — two sub-agents calling `chrome_page_navigate({targetId:A, url:X})` and `chrome_page_navigate({targetId:B, url:Y})` concurrently now succeed without interference. 18 MCP schemas auto-updated. Backward-compatible: omitting `targetId` falls back to `_activePage()`. `chrome_target_list` now also includes `pid` (from `webContents.getOSProcessId()`) and `viewId` per tab for OS-level introspection.
+
+- **ccm-browser Phase 16 — Claude-controlled split-view** — four new MCP tools let Claude orchestrate the embedded browser's split layout itself: `chrome_split_enable({leftUrl?, rightUrl?, ratio?})` turns split on (opens/navigates each pane), `chrome_split_disable`, `chrome_split_swap`, `chrome_split_set_ratio({ratio:0.15..0.85})`. Wire: MCP → HTTP → controller → `global.ccmBrowserSplit` → `webContents.send('browser:split-cmd', {cmd, args, reqId})` → renderer dispatches → replies via `ipcMain.once('browser:split-cmd-result:<reqId>')`. 5s timeout if the Browser panel isn't mounted.
+
+- **ccm-browser Phase 15 — split-view state for parallel pane control** — `chrome_split_state` MCP tool returns `{active, ratio, left:{viewId,url,title,targetId}, right:{...}}` so Claude can drive BOTH panes in a single turn (research in left, notes in right). `chrome_target_list` annotates each tab with `pane: 'left'|'right'|null` + top-level `splitActive/splitLeftId/splitRightId`. `chrome_status` surfaces `splitView` inline. Renderer mirrors split state to main via `browser:set-split-state` IPC on every layout change; controller resolves view URLs to CDP targetIds via URL match.
+
+- **ccm-browser Phase 14 — gap everything (audit hardening)** — fourteen security + correctness fixes from the four-agent code review:
+  - `_safeNavUrl` URL-scheme allowlist applied to `pageNavigate / targetNewTab / cmOpenAtLine / cmEnsureEditor` — blocks `javascript:`, `data:`, `file:`, `vbscript:`, `ms-msdt:` from reaching `page.goto()` (prompt-injection RCE close)
+  - `chrome_step` scoring fixed: filter floor raised from `>0` to `>=15`, viewport bonus dropped, ambiguity gap widened from 8 to 20 — eliminates the "swamped by visible-but-irrelevant candidates" failure mode
+  - `chrome_step` `select` action now drives ARIA combobox/listbox (clicks matching `[role=option]`) AND uses the React-safe native-setter trick on `<select>`
+  - `chrome_observe` ref stability — counter persists across observes via `window.__ccmObserve.nextRef`; surviving elements keep the same ref number so cached refs don't silently point at wrong elements after re-observe
+  - `chrome_observe_delta` sweeps landmarks (h1/h2/form/nav/main/dialog) symmetric with `observe`
+  - `clickRef/typeRef/focusRef` now throw "ref N no longer exists — call chrome_observe again" instead of returning silent no-ops on stale refs
+  - Picker uses closure-scoped `ownNodes` Set instead of public `data-picker` attribute — pages can no longer DoS the picker by attribute-spamming
+  - `_extCall` uses `_isBrowserAlive()` helper (Puppeteer v22+ dropped `isConnected()` for a `.connected` property — direct call would crash)
+  - HTTP server Host-header allowlist (DNS-rebinding defense in depth)
+  - `chrome-files.js` `_assertSafePath` blocks `__proto__/prototype/constructor` in prefs/preferences dotted-path setters (prototype-pollution close)
+  - `_validatePolicyName` regex allowlist on `policySet/policyDelete`; `REG_EXPAND_SZ` explicitly blocked (env-var expansion persistence vector)
+  - Companion MV3 extension permissions diet — dropped `<all_urls>`, `debugger`, `webRequest`, `cookies`, `scripting`, `tts`, `webNavigation`, `contextMenus`; `host_permissions` tightened to `http://127.0.0.1/*` + `http://localhost/*`
+  - Split-screen drag handler + Alt+Click pinning + `.browser-split-divider` CSS + `.browser-tab__split-dot` R badge (the original split-screen UI was rendering but couldn't actually be dragged)
+  - `is-focused` class on the pane the user last clicked into — URL bar + back/fwd/reload now act on the focused pane, not always the structurally-left one
+
+- **UI polish — window-promotion + split-view ergonomics**
+  - Closing the primary CCM window while a secondary is open now promotes the secondary to primary (previously stranded — its spawn button stayed hidden, no way back to dual-window mode)
+  - Tab strip order matches pane order in split view — left tab in strip = left pane (was insertion-order which desynced after swap)
+  - Swap button (⇄) appears in the tab strip when split is active — mirrors `chrome_split_swap` MCP tool
+  - Pane-focus indicator: `is-focused` style on the tab the user last clicked, accent border + glow
+
+### Changed
+
+- **`package.json`** — version bumped from `0.2.0` to `0.5.0` to reflect Phase 12-18b scope. Added `engines: { node: '>=18' }`, stub `test` and `lint` scripts, `start` script aliasing `electron:dev`.
+
+### Earlier work (Phases 1-13, already shipped to main)
 
 - **ccm-browser Phase 12 — `chrome_step` intent resolver** — one-call high-level action: `{ action, target, role?, value?, near? }` runs a fresh `chrome_observe`, fuzzy-matches `target` against accessible names of role-appropriate elements, then dispatches to the matching ref-based action with auto-stabilize + bundled `observe_delta`. Ambiguous matches (top-two scores within 8) refuse and return top-5 candidates so the caller can disambiguate with `role` or `near`. The LLM does NL→structured intent; the MCP does resolution + execute + observe in a single round-trip.
 

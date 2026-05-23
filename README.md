@@ -38,6 +38,31 @@ This project is built around the three official Claude Code extension mechanisms
 
 ---
 
+## ccm-browser MCP — 183 tools driving the embedded browser
+
+CCM ships its own MCP server (`bin/browser-mcp.mjs`) that exposes **183 tools** for AI-driven browser automation. It connects to the same Chromium that powers the Browser panel — your real cookies, your real extensions, your real login state — via the Chrome DevTools Protocol.
+
+The headline primitive is `chrome_step({action, target, role?, value?, near?})` — give it a structured intent and a fuzzy accessible-name match, and it observes → resolves → executes → stabilizes in one round-trip. No selectors required.
+
+**Highlights:**
+
+| Category | Notable tools |
+|---|---|
+| **Semantic observation** | `chrome_observe`, `chrome_observe_delta` — ARIA-tree snapshot with stable refs that survive re-renders |
+| **Intent resolver** | `chrome_step` — NL target → role-filtered fuzzy match → dispatched action |
+| **Ref-based actions** | `chrome_click_ref`, `chrome_type_ref`, `chrome_focus_ref` — addressable element clicks with auto-stabilize + bundled `observe_delta` |
+| **Parallel control** | Every tool accepts an optional `targetId` (Phase 17) so two sub-agents can drive two tabs concurrently without racing on a shared "active tab" |
+| **Split-view orchestration** | `chrome_split_enable / disable / swap / set_ratio` — Claude sets up side-by-side panes itself (research left, notes right) |
+| **CodeMirror primitives** | `chrome_cm_replace_line / edit_atomic / open_at_line` — surgical in-browser code editing for Lovable.dev / v0 / Bolt-style workflows |
+| **Element picker** | `chrome_picker_install / capture` — React fiber `_debugSource` walker returns `file:line` for any clicked element in a dev-mode app |
+| **Closed-Chrome editors** | `chrome_flags_set / prefs_set / policy_set / bookmarks_json_write` — modify the Chrome profile while the browser is closed |
+| **Companion ext bridge** | 30+ `chrome_ext_*` tools for `chrome.tabGroups / sessions / readingList / history / bookmarks / downloads / dnr / system` (APIs CDP can't reach) |
+| **Multi-slot** | Run N CCMs in parallel (slot 1 on CDP `:9222`, slot 2 on `:9223`, ...) for fully isolated parallel Claude sessions |
+
+**Why this stack instead of Playwright-MCP / Stagehand / browser-use:** CCM drives the user's *real* browser with real cookies and real extensions. The MCP is the substrate; the desktop app is the workspace. See the [`sessions/claude_session_cli/ccm_browser_mcp_playbook.md`](sessions/claude_session_cli/ccm_browser_mcp_playbook.md) for the canonical Lovable-edit + research-and-notes workflows.
+
+---
+
 ## Feature overview
 
 ### 🪟 Dockview workspace

@@ -1,7 +1,7 @@
 {
   "name": "claude-code-desktop",
-  "version": "0.2.0",
-  "description": "Fan-made Electron desktop UI for the Claude Code CLI — live context panel, permission modes, JSX preview, workspace awareness",
+  "version": "0.5.0",
+  "description": "Fan-made Electron desktop UI for the Claude Code CLI — 183-tool ccm-browser MCP, multi-pane parallel control, live context panel, permission modes, JSX preview, workspace awareness",
   "author": {
     "name": "hlsitechio",
     "email": "23203953+hlsitechio@users.noreply.github.com"
@@ -28,7 +28,11 @@
   ],
   "private": true,
   "main": "electron/main.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
+    "start": "npm run electron:dev",
     "dev": "vite --port 5182",
     "build": "vite build",
     "preview": "vite preview --port 5183",
@@ -40,7 +44,9 @@
     "dist": "npm run build && electron-builder --x64",
     "dist:dir": "npm run build && electron-builder --x64 --dir",
     "dist:linux": "npm run build && electron-builder --linux --x64",
-    "dist:win": "npm run build && electron-builder --win --x64"
+    "dist:win": "npm run build && electron-builder --win --x64",
+    "lint": "node -c electron/main.js && node -c electron/chrome-controller.js && node -c electron/browser-http-server.js && node -c electron/preload.js && node -c electron/cli-session-tracker.js && node -c app.js && node --check bin/browser-mcp.mjs && echo \"lint: syntax-check OK\"",
+    "test": "echo \"No automated test suite yet. Run 'npm run lint' for syntax checks.\" && exit 0"
   },
   "devDependencies": {
     "autoprefixer": "^10.5.0",
