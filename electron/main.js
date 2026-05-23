@@ -1376,22 +1376,23 @@ ipcMain.handle('browser:create', async (event, opts = {}) => {
     },
   });
 
-  // Phase 20 — install stealth via CDP Page.addScriptToEvaluateOnNewDocument
-  // BEFORE any page loads. Race against a 750ms timeout — typical CDP
-  // roundtrip is <50ms but webContents.debugger can hang indefinitely
-  // when puppeteer is already attached at the browser level
-  // (--remote-debugging-port). Without the timeout, browser:create never
-  // resolves and the renderer hangs waiting for the tab to appear —
-  // which is exactly the regression the user reported as "not even
-  // opening any new website."
-  const stealthResult = await Promise.race([
-    _setupStealthForWebContents(view.webContents),
-    new Promise(resolve => setTimeout(() => resolve({ ok: false, error: 'timeout after 750ms' }), 750)),
-  ]);
-  if (!stealthResult.ok) {
-    console.warn('[browser:create] stealth setup skipped:', stealthResult.error,
-                 '— browser still works, just no Cloudflare bypass on first page');
-  }
+  // Phase 20 stealth — FIRE AND FORGET. Do NOT await. The
+  // webContents.debugger.attach() can conflict with puppeteer's attachment
+  // at the browser-level --remote-debugging-port, hanging indefinitely.
+  // We tried Promise.race against a timeout but even that introduces
+  // latency on every tab creation. Better: kick off stealth setup in the
+  // background — if it succeeds before the first inline detection script,
+  // great. If it doesn't, the browser still works.
+  //
+  // For deterministic stealth on Cloudflare-protected sites, Phase 20.5
+  // will route the addScriptToEvaluateOnNewDocument call through the
+  // existing puppeteer connection (which is already attached and won't
+  // conflict with itself) instead of opening a second debugger session
+  // per webContents.
+  setImmediate(() => {
+    _setupStealthForWebContents(view.webContents).catch(e =>
+      console.warn('[stealth] background setup failed:', e.message));
+  });
 
   const viewId = _nextBrowserViewId++;
   _browserViews.set(viewId, {
@@ -1408,7 +1409,10 @@ ipcMain.handle('browser:create', async (event, opts = {}) => {
   const startUrl = _safeBrowseUrl(opts.url) || 'about:blank';
   view.webContents.loadURL(startUrl).catch(() => {});
 
-  return { ok: true, viewId, stealth: stealthResult.ok };
+  // Stealth fires asynchronously via setImmediate above — we don't know its
+  // outcome at this point. Renderer can poll via browser:stealth-check if
+  // it cares; for the common case the tab UI just needs viewId.
+  return { ok: true, viewId, stealth: 'pending' };
 });
 
 // Diagnostic IPC — call from renderer to see what the embedded view's
