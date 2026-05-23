@@ -1285,17 +1285,44 @@ function _attachBrowserViewListeners(viewId, view) {
   // Cancel the debounce when the WebContents is destroyed (tab closed,
   // OAuth popup closed, browser panel torn down) — otherwise the timer
   // could fire mid-destruction.
-  wc.once('destroyed', () => clearTimeout(_titleDebounce));
+  // Also prune _browserViews and notify the renderer so the tab strip
+  // stays consistent when the destruction came from outside the IPC
+  // close path (e.g. CDP Target.closeTarget from chrome_target_close_tab,
+  // window.close() from the page, or owner-window teardown).
+  wc.once('destroyed', () => {
+    clearTimeout(_titleDebounce);
+    _browserViews.delete(viewId);
+    send('browser:destroyed', {});
+  });
 
   wc.on('did-start-loading',  ()                 => send('browser:loading', { loading: true }));
   wc.on('did-stop-loading',   ()                 => send('browser:loading', { loading: false }));
+  // Helper: read navigationHistory safely. Returns { canBack, canFwd } or
+  // nulls if the wc is destroyed. Without this, did-navigate fires after
+  // the wc is gone (race during renderer hot-reload, OAuth popup close,
+  // tab destruction) → wc.navigationHistory === undefined → throws.
+  const _navInfo = () => {
+    if (!wc || wc.isDestroyed?.()) return { canBack: false, canFwd: false };
+    try {
+      const nh = wc.navigationHistory;
+      if (!nh) return { canBack: false, canFwd: false };
+      return { canBack: nh.canGoBack(), canFwd: nh.canGoForward() };
+    } catch (_) { return { canBack: false, canFwd: false }; }
+  };
   wc.on('did-navigate',       (_e, url)          => {
+    if (wc.isDestroyed?.()) return;
     _invalidateActiveTabCache();
     _lastRecordedUrl = null;        // new URL, reset debounce target
     _scheduleProfileRecord();
-    send('browser:nav', { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() });
+    const nav = _navInfo();
+    send('browser:nav', { url, canBack: nav.canBack, canFwd: nav.canFwd });
   });
-  wc.on('did-navigate-in-page',(_e, url)         => { _invalidateActiveTabCache(); send('browser:nav', { url, canBack: wc.navigationHistory.canGoBack(), canFwd: wc.navigationHistory.canGoForward() }); });
+  wc.on('did-navigate-in-page',(_e, url)         => {
+    if (wc.isDestroyed?.()) return;
+    _invalidateActiveTabCache();
+    const nav = _navInfo();
+    send('browser:nav', { url, canBack: nav.canBack, canFwd: nav.canFwd });
+  });
   wc.on('page-title-updated', (_e, title)        => {
     _invalidateActiveTabCache();
     _scheduleProfileRecord();      // reschedule with the latest title
@@ -1420,7 +1447,7 @@ ipcMain.handle('browser:stealth-check', async (_, viewId) => {
 });
 
 ipcMain.handle('browser:set-bounds', (_, { viewId, x, y, width, height, visible }) => {
-  const entry = _browserViews.get(viewId);
+  const entry = _liveBrowserEntry(viewId);
   if (!entry) return { ok: false, error: 'Unknown view' };
   // Clamp to integers — WebContentsView is finicky about fractional pixels
   entry.view.setBounds({
@@ -1433,8 +1460,17 @@ ipcMain.handle('browser:set-bounds', (_, { viewId, x, y, width, height, visible 
   return { ok: true };
 });
 
-ipcMain.handle('browser:load-url', (_, { viewId, url }) => {
+function _liveBrowserEntry(viewId) {
   const entry = _browserViews.get(viewId);
+  if (!entry || !entry.view || !entry.view.webContents || entry.view.webContents.isDestroyed()) {
+    if (entry) _browserViews.delete(viewId);
+    return null;
+  }
+  return entry;
+}
+
+ipcMain.handle('browser:load-url', (_, { viewId, url }) => {
+  const entry = _liveBrowserEntry(viewId);
   if (!entry) return { ok: false, error: 'Unknown view' };
   const safe = _safeBrowseUrl(url);
   if (!safe) return { ok: false, error: 'Refused URL' };
@@ -1443,7 +1479,7 @@ ipcMain.handle('browser:load-url', (_, { viewId, url }) => {
 });
 
 ipcMain.handle('browser:nav', (_, { viewId, action }) => {
-  const entry = _browserViews.get(viewId);
+  const entry = _liveBrowserEntry(viewId);
   if (!entry) return { ok: false, error: 'Unknown view' };
   const nh = entry.view.webContents.navigationHistory;
   switch (action) {
@@ -1456,7 +1492,7 @@ ipcMain.handle('browser:nav', (_, { viewId, action }) => {
 });
 
 ipcMain.handle('browser:devtools', (_, { viewId }) => {
-  const entry = _browserViews.get(viewId);
+  const entry = _liveBrowserEntry(viewId);
   if (!entry) return { ok: false };
   const wc = entry.view.webContents;
   if (wc.isDevToolsOpened()) wc.closeDevTools();
@@ -1469,7 +1505,7 @@ ipcMain.handle('browser:devtools', (_, { viewId }) => {
 // the user can one-click pop it open in their real Chrome. Same URL
 // allowlist as setWindowOpenHandler — only http(s) reach the OS.
 ipcMain.handle('browser:open-in-system', (_, { viewId }) => {
-  const entry = _browserViews.get(viewId);
+  const entry = _liveBrowserEntry(viewId);
   if (!entry) return { ok: false, error: 'Unknown view' };
   const url = entry.view.webContents.getURL();
   try {
