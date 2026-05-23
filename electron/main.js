@@ -1050,32 +1050,99 @@ const STEALTH_SCRIPT = `
 // Page.addScriptToEvaluateOnNewDocument runs in MAIN world before ANY page
 // script, including inline ones in the HTML — far better than waiting for
 // did-finish-load to executeJavaScript (which races inline detection).
-function _setupStealthForWebContents(wc) {
-  if (!wc || wc.isDestroyed?.()) return false;
+//
+// ASYNC by design — the caller MUST await before loadURL or the first
+// navigation will race the addScriptToEvaluateOnNewDocument call and miss
+// the spoofed values for that load.
+async function _setupStealthForWebContents(wc) {
+  if (!wc || wc.isDestroyed?.()) return { ok: false, error: 'wc destroyed' };
   try {
-    // If devtools already attached, attach() throws. Skip silently.
+    // If devtools is already attached, attach() throws. Skip silently —
+    // when devtools is open, stealth is moot anyway (the user is debugging).
     if (!wc.debugger.isAttached()) {
       wc.debugger.attach('1.3');
     }
-    wc.debugger.sendCommand('Page.enable').catch(() => {});
-    wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+    // Reattach hook — when devtools opens later, the debugger detaches and
+    // we lose stealth on subsequent navigations. Reattach when devtools
+    // closes. (Common for users debugging Cloudflare in DevTools — we
+    // restore stealth automatically the moment they close devtools.)
+    if (!wc._ccmStealthDetachHookInstalled) {
+      wc._ccmStealthDetachHookInstalled = true;
+      wc.debugger.on('detach', (_e, reason) => {
+        if (reason === 'target closed') return; // page gone, expected
+        console.log('[stealth] debugger detached (' + reason + ') — re-attempt on next nav');
+        wc._ccmStealthNeedsReattach = true;
+      });
+      // Re-attach on next navigation if needed
+      wc.on('did-start-navigation', async () => {
+        if (wc._ccmStealthNeedsReattach && !wc.isDestroyed() && !wc.debugger.isAttached()) {
+          wc._ccmStealthNeedsReattach = false;
+          await _setupStealthForWebContents(wc);
+        }
+      });
+    }
+    await wc.debugger.sendCommand('Page.enable');
+    const scriptResult = await wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
       source: STEALTH_SCRIPT,
       runImmediately: true,
-    }).catch(e => console.warn('[stealth] addScriptToEvaluateOnNewDocument failed:', e.message));
-    // If devtools opens later, our debugger detaches. Re-attach when needed.
-    wc.debugger.on('detach', (_e, reason) => {
-      // 'target closed' = page navigated away in a way that detached us; ok.
-      // 'replaced with devtools' = user opened devtools; expected.
-      if (reason && reason !== 'target closed') {
-        console.log('[stealth] debugger detached:', reason);
-      }
     });
-    return true;
+    console.log('[stealth] installed on webContents', wc.id, '— scriptIdentifier:', scriptResult?.identifier);
+    return { ok: true, scriptIdentifier: scriptResult?.identifier };
   } catch (e) {
     // attach() throws if the WebContents is gone or devtools is already
     // attached. Soft failure — page still works without stealth.
-    console.warn('[stealth] setup failed:', e.message);
-    return false;
+    console.warn('[stealth] setup failed for webContents', wc?.id, ':', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Diagnostic: run the spoof-detection probe in a webContents and return
+// what the page sees. Exposed via IPC so the user can verify stealth
+// from the renderer. Returns { webdriver, plugins, chrome, languages,
+// webglVendor, webglRenderer, notificationPermissionsMatch } — each
+// flag is true when "looks like real Chrome", false when "looks like
+// automation/Electron".
+async function _stealthSelfTest(wc) {
+  if (!wc || wc.isDestroyed?.()) return { ok: false, error: 'wc unavailable' };
+  try {
+    const result = await wc.executeJavaScript(`(() => {
+      let canvas, gl, vendor, renderer;
+      try {
+        canvas = document.createElement('canvas');
+        gl = canvas.getContext('webgl');
+        vendor   = gl?.getParameter(37445);
+        renderer = gl?.getParameter(37446);
+      } catch (_) {}
+      let permsMatch = null;
+      try {
+        // We can't await here because executeJavaScript returns sync result;
+        // skip permissions check (the user can spot-check separately).
+      } catch (_) {}
+      return {
+        webdriver:        navigator.webdriver,
+        pluginsLength:    navigator.plugins?.length ?? 0,
+        chromeRuntime:    typeof window.chrome?.runtime,
+        languages:        Array.from(navigator.languages || []),
+        userAgent:        navigator.userAgent,
+        webglVendor:      String(vendor || ''),
+        webglRenderer:    String(renderer || ''),
+        url:              location.href,
+      };
+    })()`, true);
+    // Score each criterion
+    return {
+      ok:                    true,
+      raw:                   result,
+      webdriverHidden:       result.webdriver === undefined,
+      hasPlugins:            (result.pluginsLength || 0) >= 3,
+      chromeRuntimePresent:  result.chromeRuntime === 'object',
+      languagesNonEmpty:     (result.languages?.length || 0) > 0,
+      webglSpoofed:          !/Google/i.test(result.webglRenderer || '') ||
+                             /NVIDIA|Intel|AMD/i.test(result.webglRenderer || ''),
+      uaSpoofed:             !/Electron/i.test(result.userAgent || ''),
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
 
@@ -1201,13 +1268,24 @@ function _attachBrowserViewListeners(viewId, view) {
   function _scheduleProfileRecord() {
     clearTimeout(_titleDebounce);
     _titleDebounce = setTimeout(() => {
-      const url = wc.getURL();
+      // Guard against the WebContents being destroyed before the debounce
+      // fires — common in OAuth popups (open, sign-in, close in ~3s — well
+      // under the 1.5s debounce window). Without this guard, wc.getURL()
+      // throws "Object has been destroyed" → uncaughtException in main.
+      if (!wc || wc.isDestroyed?.()) return;
+      let url, title;
+      try { url = wc.getURL(); title = wc.getTitle(); }
+      catch (_) { return; }   // race: destroyed between isDestroyed check and call
       if (!url || !/^https?:/i.test(url)) return;
       if (url === _lastRecordedUrl) return;
-      try { ccmBrowserProfile.recordVisit({ url, title: wc.getTitle() }); } catch (_) {}
+      try { ccmBrowserProfile.recordVisit({ url, title }); } catch (_) {}
       _lastRecordedUrl = url;
     }, 1500);
   }
+  // Cancel the debounce when the WebContents is destroyed (tab closed,
+  // OAuth popup closed, browser panel torn down) — otherwise the timer
+  // could fire mid-destruction.
+  wc.once('destroyed', () => clearTimeout(_titleDebounce));
 
   wc.on('did-start-loading',  ()                 => send('browser:loading', { loading: true }));
   wc.on('did-stop-loading',   ()                 => send('browser:loading', { loading: false }));
@@ -1252,7 +1330,7 @@ function _attachBrowserViewListeners(viewId, view) {
   });
 }
 
-ipcMain.handle('browser:create', (event, opts = {}) => {
+ipcMain.handle('browser:create', async (event, opts = {}) => {
   const ownerWin = BrowserWindow.fromWebContents(event.sender);
   if (!ownerWin) return { ok: false, error: 'No owner window' };
 
@@ -1303,7 +1381,12 @@ ipcMain.handle('browser:create', (event, opts = {}) => {
   // patched navigator.webdriver AFTER Cloudflare's inline detector had
   // already run. Now the spoof is installed in main world before document
   // parse starts, so even the first inline <script> sees the patched values.
-  _setupStealthForWebContents(view.webContents);
+  // AWAIT — without this, loadURL below races the CDP roundtrip and the
+  // first navigation misses the spoof.
+  const stealthResult = await _setupStealthForWebContents(view.webContents);
+  if (!stealthResult.ok) {
+    console.warn('[browser:create] stealth setup failed:', stealthResult.error);
+  }
 
   const viewId = _nextBrowserViewId++;
   _browserViews.set(viewId, {
@@ -1320,7 +1403,16 @@ ipcMain.handle('browser:create', (event, opts = {}) => {
   const startUrl = _safeBrowseUrl(opts.url) || 'about:blank';
   view.webContents.loadURL(startUrl).catch(() => {});
 
-  return { ok: true, viewId };
+  return { ok: true, viewId, stealth: stealthResult.ok };
+});
+
+// Diagnostic IPC — call from renderer to see what the embedded view's
+// page actually sees for the spoofed properties. Use in the browser
+// panel devtools console: window.electronAPI.browser.stealthCheck(viewId).
+ipcMain.handle('browser:stealth-check', async (_, viewId) => {
+  const entry = _browserViews.get(viewId);
+  if (!entry) return { ok: false, error: 'unknown viewId ' + viewId };
+  return _stealthSelfTest(entry.view.webContents);
 });
 
 ipcMain.handle('browser:set-bounds', (_, { viewId, x, y, width, height, visible }) => {
