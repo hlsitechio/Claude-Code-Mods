@@ -1168,6 +1168,163 @@ function render() {
   window.dispatchEvent(new CustomEvent('ccmod:render'));
 }
 
+// ---------- CLI sessions sidebar section (Phase 18) ----------
+// Surfaces Claude Code CLI sessions from ~/.claude/projects/<cwd>/*.jsonl in
+// the sidebar so the user has ONE place to see chat + CLI sessions.
+// Phase 18b: also offers a "Link to project" button that creates a junction
+// so future CLI sessions land in <project>/sessions/claude_session_cli/.
+async function renderCliSessions({ cwd } = {}) {
+  const listEl  = document.getElementById('cli-list');
+  const countEl = document.getElementById('cli-count');
+  if (!listEl) return;
+  if (!window.electronAPI?.cliSessions?.list) {
+    listEl.innerHTML = '<div style="padding:8px;font-size:11px;color:#6a6a72;">CLI tracker unavailable — restart CCM.</div>';
+    return;
+  }
+  // Scope to the current project's cwd when known. global._projectCwd is set
+  // by main during boot; falls back to global scan if unset.
+  const scope = cwd || window.__ccmProjectCwd || null;
+
+  // Render the link-status banner at the top of the list (when we know the
+  // project root). Tells the user where sessions are stored and offers the
+  // one-click link button.
+  async function renderStatusBanner() {
+    if (!scope || !window.electronAPI.cliSessions.status) return '';
+    try {
+      const r = await window.electronAPI.cliSessions.status({ projectRoot: scope });
+      if (!r?.ok) return '';
+      const s = r.status;
+      if (s.linked) {
+        return `<div class="cli-storage-banner cli-storage-banner--linked" title="${escapeHTML(s.projectDir)}">
+          <i data-phosphor="link-simple" style="font-size:10px;"></i>
+          <span>Linked to project</span>
+          <button class="cli-storage-btn" data-act="unlink" title="Remove junction (files stay in project)">unlink</button>
+        </div>`;
+      }
+      return `<div class="cli-storage-banner cli-storage-banner--unlinked" title="${escapeHTML(s.claudeDir)}">
+        <i data-phosphor="warning" style="font-size:10px;"></i>
+        <span>In <code>~/.claude</code></span>
+        <button class="cli-storage-btn cli-storage-btn--primary" data-act="link" title="Move sessions to ${escapeHTML(s.projectDir)} and junction so future ones land there">link to project →</button>
+      </div>`;
+    } catch (_) { return ''; }
+  }
+
+  try {
+    const res = await window.electronAPI.cliSessions.list({ cwd: scope, limit: 25 });
+    if (!res?.ok) {
+      listEl.innerHTML = `<div style="padding:8px;font-size:11px;color:#9a4a3a;">Error: ${escapeHTML(res?.error || 'unknown')}</div>`;
+      return;
+    }
+    const sessions = res.sessions || [];
+    if (countEl) countEl.textContent = String(sessions.length);
+    const banner = await renderStatusBanner();
+    if (!sessions.length) {
+      listEl.innerHTML = banner +
+        `<div style="padding:8px;font-size:11px;color:#6a6a72;">No CLI sessions yet${scope ? ' for this project' : ''}. Launch <code>claude</code> in a terminal and refresh.</div>`;
+      _wireCliBannerActions(listEl, scope);
+      return;
+    }
+    listEl.innerHTML = banner;
+    _wireCliBannerActions(listEl, scope);
+    for (const s of sessions) {
+      const row = document.createElement('div');
+      row.className = 'session has-msgs';
+      row.style.cursor = 'pointer';
+      row.title = (s.firstUserMessage || s.sessionId) + '\nClick to reveal file in explorer';
+      row.dataset.sessionId = s.sessionId;
+      row.dataset.project   = s.project;
+      const ts = s.lastActivity ? new Date(s.lastActivity) : null;
+      const timeStr = ts ? ts.toLocaleDateString() + ' ' + ts.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+      const title   = s.firstUserMessage
+        ? s.firstUserMessage.slice(0, 60)
+        : s.sessionId.slice(0, 8) + '…';
+      row.innerHTML = `
+        <span class="session__dot" style="background:#7ab389;"></span>
+        <span class="session__title">${escapeHTML(title)}</span>
+        <span class="session__time">${escapeHTML(timeStr)}</span>
+        <span class="session__actions">
+          <button class="icon-btn icon-btn--sm" data-act="reveal" title="Show file in explorer">
+            <i data-phosphor="folder-open" style="font-size:11px;"></i>
+          </button>
+        </span>
+      `;
+      row.addEventListener('click', async (e) => {
+        const act = e.target.closest('[data-act]')?.dataset.act;
+        if (act === 'reveal' || !act) {
+          await window.electronAPI.cliSessions.reveal({ sessionId: s.sessionId, project: s.project });
+        }
+      });
+      listEl.append(row);
+    }
+    window.renderIcons?.(listEl);
+  } catch (e) {
+    listEl.innerHTML = `<div style="padding:8px;font-size:11px;color:#9a4a3a;">Render failed: ${escapeHTML(e.message)}</div>`;
+  }
+}
+
+// Wire the link/unlink buttons inside the CLI list banner. Called every
+// render — re-binding to the (newly-created) banner elements is fine,
+// listeners die with their nodes.
+function _wireCliBannerActions(listEl, scope) {
+  if (!scope) return;
+  const api = window.electronAPI?.cliSessions;
+  if (!api) return;
+  listEl.querySelector('[data-act="link"]')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const ok = window.confirm(
+      'Move existing Claude CLI session files into\n' +
+      '  ' + scope + '\\sessions\\claude_session_cli\\\n\n' +
+      'and create a junction so future sessions land there?\n\n' +
+      '⚠ Close any open Claude CLI terminals first — open files cannot be moved.'
+    );
+    if (!ok) return;
+    const res = await api.link({ projectRoot: scope });
+    if (!res?.ok) {
+      window.showToast?.('Link failed: ' + (res?.error || 'unknown'), 'error', 5000);
+    } else if (res.alreadyLinked) {
+      window.showToast?.('Already linked.', 'info', 2500);
+    } else {
+      window.showToast?.(
+        `Linked! Copied ${res.copied?.length || 0} file(s) to project. Junction created.`,
+        'success', 3500,
+      );
+    }
+    renderCliSessions();
+  });
+  listEl.querySelector('[data-act="unlink"]')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const ok = window.confirm(
+      'Remove the junction?\n\n' +
+      'Files stay in the project folder. Future Claude CLI sessions will\n' +
+      'write to ~/.claude/projects/ again (the default).'
+    );
+    if (!ok) return;
+    const res = await api.unlink({ projectRoot: scope });
+    if (!res?.ok) window.showToast?.('Unlink failed: ' + (res?.error || 'unknown'), 'error', 5000);
+    else         window.showToast?.('Unlinked. Project files retained.', 'success', 2500);
+    renderCliSessions();
+  });
+}
+
+// Wire refresh button + initial load. Idempotent — safe to call again on
+// project switch (which is what we do via the ccmod:render event below).
+function initCliSessionsSection() {
+  document.getElementById('cli-refresh')?.addEventListener('click', (e) => {
+    e.stopPropagation();   // don't toggle the collapsible
+    renderCliSessions();
+  });
+  // Initial render (deferred so the main render pass finishes first)
+  setTimeout(() => renderCliSessions(), 250);
+  // Re-render every 60s in case the user spawns claude in an external terminal
+  setInterval(() => renderCliSessions(), 60_000);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initCliSessionsSection);
+} else {
+  initCliSessionsSection();
+}
+
 // ---------- Actions ----------
 function findSession(id) {
   for (const p of state.projects) {
@@ -1728,8 +1885,8 @@ navToggle.addEventListener('click', () => {
 
 // ---------- Profile modal (Profile / Avatar / Greeting tabs) ----------
 const profileState = {
-  name:        localStorage.getItem('ccmod.profile.name')        || '[redacted]',
-  email:       '[redacted]',
+  name:        localStorage.getItem('ccmod.profile.name')        || 'You',
+  email:       localStorage.getItem('ccmod.profile.email')       || '',
   avatarColor: localStorage.getItem('ccmod.profile.avatarColor') || '#c96442',
   avatarImage: localStorage.getItem('ccmod.profile.avatarImage') || null,  // data: URL when user uploaded a photo
   greeting:    localStorage.getItem('ccmod.profile.greeting')    || 'How can I help you today?',
@@ -1975,7 +2132,7 @@ function showAppearanceMenu(anchor) {
 // ---------- User / account menu (gear icon in the sidebar footer) ----------
 const userBtn = document.getElementById('user-menu-btn');
 const userState = {
-  email: '[redacted]',
+  email: localStorage.getItem('ccmod.user.email') || '',
   language: 'en-US',
   languages: [
     { id: 'en-US', label: 'English (United States)' },
@@ -6323,7 +6480,13 @@ async function initTachesPanel() {
 
 const _browser = {
   tabs: [],           // [{ viewId, url, title, favicon, loading, canBack, canFwd }]
-  activeId: null,     // viewId of currently visible tab
+  activeId: null,     // viewId of currently visible tab (LEFT pane in split mode)
+  splitId: null,      // viewId of the RIGHT-pane tab when split view is on
+  // focusedId — viewId of the pane the user last clicked INTO. Drives the
+  // URL bar + nav buttons so they act on the pane you're looking at, not
+  // always the structurally-left pane. Defaults to activeId.
+  focusedId: null,
+  splitRatio: 0.5,    // 0..1 — width fraction of the left pane
   resizeObserver: null,
   cleanups: [],       // IPC unsubscribe fns
   mounted: false,
@@ -6332,28 +6495,104 @@ const _browser = {
 function _browserActiveTab() {
   return _browser.tabs.find(t => t.viewId === _browser.activeId) || null;
 }
+function _browserSplitTab() {
+  return _browser.tabs.find(t => t.viewId === _browser.splitId) || null;
+}
+// _browserFocusedTab — the tab the toolbar acts on. Falls back to the active
+// (left) tab when focusedId is unset or stale. Single source of truth for the
+// URL bar value + back/fwd/reload/devtools buttons in renderBrowserPanel.
+function _browserFocusedTab() {
+  if (_browser.focusedId) {
+    const f = _browser.tabs.find(t => t.viewId === _browser.focusedId);
+    if (f) return f;
+  }
+  return _browserActiveTab();
+}
+function _browserFocusedViewId() {
+  return _browserFocusedTab()?.viewId || _browser.activeId;
+}
+
+// Push current split-view layout to main process. The MCP layer reads it via
+// `chrome_split_state` to know which CDP target == which pane, so Claude can
+// drive both in parallel (research in one, notes in the other). Debounced
+// implicitly by being awaited from mutators — multiple back-to-back calls
+// just overwrite the global with the latest state.
+function _syncBrowserSplitState() {
+  try {
+    const api = window.electronAPI?.browser;
+    if (!api?.setSplitState) return;
+    const left  = _browserActiveTab();
+    const right = _browserSplitTab();
+    api.setSplitState({
+      active:      !!_browser.splitId,
+      leftViewId:  _browser.activeId,
+      rightViewId: _browser.splitId,
+      leftUrl:     left?.url || null,
+      rightUrl:    right?.url || null,
+      leftTitle:   left?.title || null,
+      rightTitle:  right?.title || null,
+      ratio:       _browser.splitRatio || 0.5,
+    });
+  } catch (_) { /* never break the panel because of a sync error */ }
+}
 
 function renderBrowserPanel() {
   // The toolbar + tab bar are rendered here. The actual web content is a
   // native WebContentsView pinned over `#browser-viewport` by the main process.
-  const t = _browserActiveTab();
-  const tabs = _browser.tabs;
+  // The TOOLBAR (URL bar, back/fwd/reload) follows the FOCUSED pane — the one
+  // the user last clicked into — not the structurally-left pane.
+  const t = _browserFocusedTab();
+  // Tab strip order = pane order when split is active. Otherwise tabs render
+  // in their natural insertion order. Without this, splitting + swapping
+  // panes makes the strip's left/right desync from the actual panes (the
+  // bug the user spotted: DDG-tab-on-the-left but Google-pane-on-the-left).
+  let tabs;
+  if (_browser.splitId) {
+    const active  = _browserActiveTab();
+    const right   = _browserSplitTab();
+    const others  = _browser.tabs.filter(t =>
+      t.viewId !== _browser.activeId && t.viewId !== _browser.splitId);
+    tabs = [active, right, ...others].filter(Boolean);
+  } else {
+    tabs = _browser.tabs;
+  }
   return `
     <div class="browser-panel" data-browser-root>
       <!-- Tab strip -->
       <div class="browser-tabs" id="browser-tabs">
         ${tabs.map(tab => {
-          const isActive = tab.viewId === _browser.activeId;
+          const isActive  = tab.viewId === _browser.activeId;
+          const isSplit   = tab.viewId === _browser.splitId;
+          // is-focused = the pane the user last clicked INTO. Visually
+          // stronger than is-active so the user can tell at a glance which
+          // pane the URL bar + nav buttons will act on.
+          const isFocused = tab.viewId === _browserFocusedViewId();
           const favicon = tab.favicon
             ? `<img class="browser-tab__icon" src="${escapeHTML(tab.favicon)}" alt="" />`
             : `<i class="browser-tab__icon" data-phosphor="globe"></i>`;
-          return `<div class="browser-tab${isActive ? ' is-active' : ''}" data-view-id="${tab.viewId}" title="${escapeHTML(tab.title || tab.url || '')}">
+          const cls = 'browser-tab'
+            + (isActive  ? ' is-active'      : '')
+            + (isSplit   ? ' is-split-right' : '')
+            + (isFocused ? ' is-focused'     : '');
+          const splitDot = isSplit ? '<span class="browser-tab__split-dot" title="Right pane in split view">R</span>' : '';
+          return `<div class="${cls}" data-view-id="${tab.viewId}" title="${escapeHTML(tab.title || tab.url || '')}\nAlt+Click to pin as right pane">
             ${tab.loading ? '<span class="browser-tab__spin"></span>' : favicon}
             <span class="browser-tab__title">${escapeHTML(tab.title || tab.url || 'New tab')}</span>
+            ${splitDot}
             <button class="browser-tab__close" data-close-view="${tab.viewId}" title="Close tab"><i data-phosphor="x"></i></button>
           </div>`;
         }).join('')}
         <button class="browser-tab__new" id="browser-new-tab" title="New tab (Ctrl+T)"><i data-phosphor="plus"></i></button>
+        <button class="browser-tab__new" id="browser-split-toggle"
+                title="${_browser.splitId ? 'Exit split view' : 'Split view (open a 2nd tab side-by-side)'}"
+                data-active="${_browser.splitId ? 'true' : 'false'}">
+          <i data-phosphor="${_browser.splitId ? 'rectangle' : 'columns'}"></i>
+        </button>
+        ${_browser.splitId ? `
+        <button class="browser-tab__new" id="browser-split-swap"
+                title="Swap left ↔ right panes">
+          <i data-phosphor="arrows-left-right"></i>
+        </button>` : ''}
         <!-- Mode badge — pinned right. Click switches CLI <→ Direct so Claude can drive the browser. -->
         <button class="browser-mode-pill" id="browser-mode-pill"
                 data-direct="${window.modelState?.directMode ? 'true' : 'false'}"
@@ -6389,6 +6628,7 @@ function renderBrowserPanel() {
             <i data-phosphor="globe" style="font-size:32px;opacity:.25"></i>
             <p style="opacity:.5">Click <strong>+</strong> in the tab strip above to start browsing.</p>
           </div>` : ''}
+        ${_browser.splitId ? `<div class="browser-split-divider" id="browser-split-divider" title="Drag to resize panes"></div>` : ''}
       </div>
     </div>`;
 }
@@ -6403,6 +6643,11 @@ function _browserPanelCleanup() {
   }
   _browser.tabs = [];
   _browser.activeId = null;
+  _browser.splitId = null;
+  _browser.focusedId = null;
+  _browser.splitRatio = 0.5;
+  // Clear the split state mirrored in main so MCP queries report inactive
+  try { window.electronAPI?.browser?.setSplitState({ active: false }); } catch (_) {}
   _browser.cleanups.forEach(fn => { try { fn(); } catch (_) {} });
   _browser.cleanups = [];
   try { _browser.resizeObserver?.disconnect(); } catch (_) {}
@@ -6560,29 +6805,61 @@ async function initBrowserPanel(bodyEl) {
 
   _browser.mounted = true;
 
-  // ── Position the active WebContentsView over the viewport rect ─────────
+  // ── Position the active WebContentsView(s) over the viewport rect ──────
+  // Single mode: one view fills the viewport.
+  // Split mode: two views side-by-side with a 6px gap; the .browser-split-divider
+  //             HTML element sits in that gap as the drag handle.
   function repositionActive() {
     const viewport = document.getElementById('browser-viewport');
     if (!viewport) return;
     if (!_browser.activeId) return;
-    // If a modal is on top, KEEP the views suspended — modal must win.
     if (_browser.suspended || _browserAnyModalVisible()) {
       _browserSuspendViews();
       return;
     }
     const r = viewport.getBoundingClientRect();
-    // Also bail if the viewport is hidden (panel collapsed, dockview tab inactive)
     if (r.width < 4 || r.height < 4) return;
-    // Convert viewport coords → BrowserWindow content area coords.
-    api.setBounds(_browser.activeId,
-      r.left + window.scrollX,
-      r.top  + window.scrollY,
-      r.width, r.height,
-      true,
-    );
-    // Park all OTHER tabs off-screen invisibly
+
+    const visibleIds = new Set();
+    visibleIds.add(_browser.activeId);
+
+    if (_browser.splitId && _browser.splitId !== _browser.activeId
+        && _browser.tabs.some(t => t.viewId === _browser.splitId)) {
+      // ── Split layout ────────────────────────────────────────────────
+      const GAP = 6;
+      const ratio = Math.max(0.15, Math.min(0.85, _browser.splitRatio || 0.5));
+      const leftW  = Math.max(40, Math.round(r.width * ratio) - Math.round(GAP / 2));
+      const rightX = Math.round(r.left + leftW + GAP);
+      const rightW = Math.max(40, Math.round(r.right - rightX));
+      api.setBounds(_browser.activeId,
+        Math.round(r.left + window.scrollX),
+        Math.round(r.top  + window.scrollY),
+        leftW, Math.round(r.height), true);
+      api.setBounds(_browser.splitId,
+        Math.round(rightX + window.scrollX),
+        Math.round(r.top   + window.scrollY),
+        rightW, Math.round(r.height), true);
+      visibleIds.add(_browser.splitId);
+
+      // Position the divider DOM element inside the viewport (viewport-local coords)
+      const divider = document.getElementById('browser-split-divider');
+      if (divider) {
+        divider.style.left = (leftW) + 'px';
+        divider.style.width = GAP + 'px';
+      }
+    } else {
+      // ── Single layout ───────────────────────────────────────────────
+      api.setBounds(_browser.activeId,
+        r.left + window.scrollX,
+        r.top  + window.scrollY,
+        r.width, r.height,
+        true,
+      );
+    }
+
+    // Park every tab that isn't currently visible
     for (const t of _browser.tabs) {
-      if (t.viewId !== _browser.activeId) {
+      if (!visibleIds.has(t.viewId)) {
         api.setBounds(t.viewId, -10000, -10000, 1, 1, false);
       }
     }
@@ -6606,6 +6883,9 @@ async function initBrowserPanel(bodyEl) {
     if (newToolbar) toolbarEl.replaceWith(newToolbar);
     if (window.renderIcons) window.renderIcons(root);
     wireChrome();
+    // Mirror current split state to main process so the MCP layer's
+    // chrome_split_state tool can return which CDP target = which pane.
+    _syncBrowserSplitState();
   }
 
   // ── Open a new tab ─────────────────────────────────────────────────────
@@ -6618,6 +6898,8 @@ async function initBrowserPanel(bodyEl) {
     };
     _browser.tabs.push(tab);
     _browser.activeId = tab.viewId;
+    // Seed focusedId to the new tab — opening a tab means you want to see it.
+    _browser.focusedId = tab.viewId;
     // Tear out the welcome placeholder — it lives inside the viewport, so when
     // the WebContentsView is suspended on blur the user would otherwise see it
     // peek back through. Once any tab exists, the welcome is forever gone.
@@ -6631,17 +6913,76 @@ async function initBrowserPanel(bodyEl) {
   async function closeTab(viewId) {
     await api.close(viewId);
     _browser.tabs = _browser.tabs.filter(t => t.viewId !== viewId);
+    if (_browser.splitId === viewId) _browser.splitId = null;
     if (_browser.activeId === viewId) {
-      _browser.activeId = _browser.tabs[_browser.tabs.length - 1]?.viewId || null;
+      _browser.activeId = _browser.tabs.find(t => t.viewId !== _browser.splitId)?.viewId
+        || _browser.tabs[_browser.tabs.length - 1]?.viewId
+        || null;
     }
+    // If only one tab is left, drop split mode entirely
+    if (_browser.splitId && _browser.splitId === _browser.activeId) _browser.splitId = null;
+    // If the focused tab was closed, fall back to whatever activeId is now
+    if (_browser.focusedId === viewId) _browser.focusedId = _browser.activeId;
     refreshChrome();
     if (_browser.activeId) requestAnimationFrame(repositionActive);
   }
 
   // ── Switch to a tab ────────────────────────────────────────────────────
-  function activateTab(viewId) {
+  function activateTab(viewId, opts = {}) {
+    // Clicking a tab implies you want focus there too — the toolbar should
+    // immediately reflect this tab's URL/canBack/loading state.
+    _browser.focusedId = viewId;
+    // Alt+Click (or opts.asRightPane) → pin/unpin as the right pane
+    if (opts.asRightPane) {
+      if (_browser.splitId === viewId) {
+        _browser.splitId = null;             // toggle off
+      } else if (viewId === _browser.activeId) {
+        // Can't split a tab against itself — pick another tab as left, this one as right
+        const otherLeft = _browser.tabs.find(t => t.viewId !== viewId)?.viewId;
+        if (!otherLeft) return;              // only one tab — nothing to do
+        _browser.activeId = otherLeft;
+        _browser.splitId = viewId;
+      } else {
+        _browser.splitId = viewId;
+      }
+      refreshChrome();
+      requestAnimationFrame(repositionActive);
+      return;
+    }
     if (_browser.activeId === viewId) return;
+    // If user activates the current split-right tab, swap panes instead of stealing it
+    if (_browser.splitId === viewId) {
+      _browser.splitId = _browser.activeId;
+    }
     _browser.activeId = viewId;
+    refreshChrome();
+    requestAnimationFrame(repositionActive);
+  }
+
+  // ── Toggle split view ──────────────────────────────────────────────────
+  function toggleSplit() {
+    if (_browser.splitId) {
+      _browser.splitId = null;
+    } else {
+      // Pick the next tab that isn't the active one; if none, open a blank tab as the right pane
+      const other = _browser.tabs.find(t => t.viewId !== _browser.activeId);
+      if (other) {
+        _browser.splitId = other.viewId;
+      } else {
+        openTab('about:blank').then(tab => {
+          if (tab?.viewId) {
+            const id = tab.viewId;
+            // openTab activated the new tab — flip so the original stays on the left
+            const original = _browser.tabs.find(t => t.viewId !== id)?.viewId;
+            if (original) _browser.activeId = original;
+            _browser.splitId = id;
+            refreshChrome();
+            requestAnimationFrame(repositionActive);
+          }
+        });
+        return;
+      }
+    }
     refreshChrome();
     requestAnimationFrame(repositionActive);
   }
@@ -6653,6 +6994,17 @@ async function initBrowserPanel(bodyEl) {
 
     root.querySelector('#browser-new-tab')?.addEventListener('click', () => openTab('about:blank'));
     root.querySelector('#browser-welcome-newtab')?.addEventListener('click', () => openTab('https://duckduckgo.com'));
+    root.querySelector('#browser-split-toggle')?.addEventListener('click', toggleSplit);
+    // Swap left ↔ right panes. Mirrors the chrome_split_swap MCP tool, so
+    // either path (UI click or Claude tool call) reaches the same state.
+    root.querySelector('#browser-split-swap')?.addEventListener('click', () => {
+      if (!_browser.splitId) return;
+      const a = _browser.activeId;
+      _browser.activeId = _browser.splitId;
+      _browser.splitId  = a;
+      refreshChrome();
+      requestAnimationFrame(repositionActive);
+    });
 
     // Mode pill — one-click toggle between CLI and Direct
     root.querySelector('#browser-mode-pill')?.addEventListener('click', () => {
@@ -6669,14 +7021,53 @@ async function initBrowserPanel(bodyEl) {
       refreshChrome(); // re-render so the pill label updates
     });
 
-    // Tab click → activate; close-button click → close
+    // Tab click → activate; Alt+Click → pin as right pane; close-button → close
     root.querySelectorAll('.browser-tab').forEach(tabEl => {
       const id = parseInt(tabEl.dataset.viewId, 10);
       tabEl.addEventListener('click', e => {
         if (e.target.closest('[data-close-view]')) return;
+        if (e.altKey) {
+          // Alt+Click pins/unpins this tab as the right pane in split view
+          activateTab(id, { asRightPane: true });
+          return;
+        }
         activateTab(id);
       });
     });
+
+    // ── Split-view divider drag handle ─────────────────────────────────────
+    // The divider DOM element is rendered into #browser-viewport when split
+    // mode is active. Without this handler the ratio was permanently locked
+    // (read on every repositionActive but never written). We attach
+    // window-level listeners on mousedown so the drag keeps tracking even
+    // when the cursor crosses over the WebContentsView (which would
+    // otherwise eat mousemove events because it's a native layer).
+    const divider = root.querySelector('#browser-split-divider');
+    if (divider) {
+      divider.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const viewport = root.querySelector('#browser-viewport');
+        if (!viewport) return;
+        const rect = viewport.getBoundingClientRect();
+        divider.classList.add('is-dragging');
+        document.body.style.cursor = 'col-resize';
+        const onMove = (ev) => {
+          const ratio = (ev.clientX - rect.left) / rect.width;
+          _browser.splitRatio = Math.max(0.15, Math.min(0.85, ratio));
+          repositionActive();
+        };
+        const onUp = () => {
+          window.removeEventListener('mousemove', onMove, true);
+          window.removeEventListener('mouseup',   onUp,   true);
+          divider.classList.remove('is-dragging');
+          document.body.style.cursor = '';
+          // Push final ratio to main so the MCP split-state reflects it
+          _syncBrowserSplitState();
+        };
+        window.addEventListener('mousemove', onMove, true);
+        window.addEventListener('mouseup',   onUp,   true);
+      });
+    }
     root.querySelectorAll('[data-close-view]').forEach(btn => {
       btn.addEventListener('click', e => {
         e.stopPropagation();
@@ -6684,29 +7075,42 @@ async function initBrowserPanel(bodyEl) {
       });
     });
 
-    // Nav buttons
-    root.querySelector('#browser-back')?.addEventListener('click',    () => _browser.activeId && api.nav(_browser.activeId, 'back'));
-    root.querySelector('#browser-forward')?.addEventListener('click', () => _browser.activeId && api.nav(_browser.activeId, 'forward'));
-    root.querySelector('#browser-reload')?.addEventListener('click',  () => _browser.activeId && api.nav(_browser.activeId, _browserActiveTab()?.loading ? 'stop' : 'reload'));
-    root.querySelector('#browser-devtools')?.addEventListener('click',() => _browser.activeId && api.devtools(_browser.activeId));
+    // Nav buttons — act on the FOCUSED pane (the one the user last clicked
+    // into), not always the structurally-left activeId. In split view this
+    // means clicking Reload while focused on the right pane reloads the right.
+    root.querySelector('#browser-back')?.addEventListener('click',    () => {
+      const id = _browserFocusedViewId(); if (id) api.nav(id, 'back');
+    });
+    root.querySelector('#browser-forward')?.addEventListener('click', () => {
+      const id = _browserFocusedViewId(); if (id) api.nav(id, 'forward');
+    });
+    root.querySelector('#browser-reload')?.addEventListener('click',  () => {
+      const id = _browserFocusedViewId(); if (!id) return;
+      api.nav(id, _browserFocusedTab()?.loading ? 'stop' : 'reload');
+    });
+    root.querySelector('#browser-devtools')?.addEventListener('click',() => {
+      const id = _browserFocusedViewId(); if (id) api.devtools(id);
+    });
     // Escape hatch for sites that refuse to load in WebContentsView
     // (Google OAuth, banks with strict frame-ancestors, etc).
     root.querySelector('#browser-open-system')?.addEventListener('click', async () => {
-      if (!_browser.activeId) return;
-      const res = await api.openInSystem(_browser.activeId);
+      const id = _browserFocusedViewId(); if (!id) return;
+      const res = await api.openInSystem(id);
       if (res?.ok) window.showToast?.('Opened in your default browser', 'success', 2000);
       else        window.showToast?.('Could not open: ' + (res?.error || 'unknown'), 'warning');
     });
 
-    // URL bar — Enter submits, focus selects all
+    // URL bar — Enter submits to the FOCUSED pane (so typing a URL while
+    // focused on the right pane navigates the right pane, not the left).
     const urlInput = root.querySelector('#browser-url');
     if (urlInput) {
       urlInput.addEventListener('keydown', async (e) => {
         if (e.key !== 'Enter') return;
         const url = urlInput.value.trim();
         if (!url) return;
-        if (!_browser.activeId) await openTab(url);
-        else                    api.loadUrl(_browser.activeId, url);
+        const id = _browserFocusedViewId();
+        if (!id) await openTab(url);
+        else     api.loadUrl(id, url);
       });
       urlInput.addEventListener('focus', () => urlInput.select());
     }
@@ -6726,6 +7130,16 @@ async function initBrowserPanel(bodyEl) {
   _browser.cleanups.push(api.onNav    (({ viewId, url, canBack, canFwd }) => updateTab(viewId, { url, canBack, canFwd })));
   _browser.cleanups.push(api.onTitle  (({ viewId, title }) => updateTab(viewId, { title })));
   _browser.cleanups.push(api.onFavicon(({ viewId, favicon }) => updateTab(viewId, { favicon })));
+  // Pane focus — the user clicked INTO a WebContentsView. Update focusedId
+  // and re-render so the tab's is-focused class + URL bar value follow.
+  if (api.onFocus) {
+    _browser.cleanups.push(api.onFocus(({ viewId }) => {
+      if (_browser.focusedId !== viewId) {
+        _browser.focusedId = viewId;
+        refreshChrome();
+      }
+    }));
+  }
   _browser.cleanups.push(api.onFail   (({ viewId, code, desc, url }) => {
     console.warn('[browser] did-fail-load', code, desc, url);
     window.showToast?.(`Failed: ${desc}`, 'error', 4000);
@@ -6734,6 +7148,117 @@ async function initBrowserPanel(bodyEl) {
     // target=_blank / window.open → open as a new tab in the same browser
     await openTab(url);
   }));
+
+  // ── Phase 16: receive split-view commands from MCP (via main process) ──
+  // Claude calls chrome_split_enable/disable/swap/set_ratio → main process
+  // sends { cmd, args, reqId } here → we dispatch + reply via reqId.
+  if (api.onSplitCmd) {
+    _browser.cleanups.push(api.onSplitCmd(async ({ cmd, args, reqId }) => {
+      const reply = (result) => { try { api.replySplitCmd(reqId, result); } catch (_) {} };
+      try {
+        if (cmd === 'enable') {
+          const result = await _splitEnable(args || {});
+          reply(result);
+        } else if (cmd === 'disable') {
+          _browser.splitId = null;
+          refreshChrome();
+          requestAnimationFrame(repositionActive);
+          reply({ ok: true, active: false });
+        } else if (cmd === 'swap') {
+          if (!_browser.splitId) { reply({ ok: false, error: 'split not active — call enable first' }); return; }
+          const a = _browser.activeId;
+          _browser.activeId = _browser.splitId;
+          _browser.splitId  = a;
+          refreshChrome();
+          requestAnimationFrame(repositionActive);
+          reply({ ok: true, leftViewId: _browser.activeId, rightViewId: _browser.splitId });
+        } else if (cmd === 'set-ratio') {
+          const r = parseFloat(args?.ratio);
+          if (!Number.isFinite(r)) { reply({ ok: false, error: 'ratio must be a number 0.15-0.85' }); return; }
+          _browser.splitRatio = Math.max(0.15, Math.min(0.85, r));
+          repositionActive();
+          _syncBrowserSplitState();
+          reply({ ok: true, ratio: _browser.splitRatio });
+        } else {
+          reply({ ok: false, error: 'unknown split cmd: ' + cmd });
+        }
+      } catch (e) {
+        reply({ ok: false, error: e.message || String(e) });
+      }
+    }));
+  }
+
+  // Internal: ensure split is active and panes have the requested URLs.
+  // Order of operations matters: open/navigate FIRST, then mutate splitId,
+  // then refresh+reposition. _syncBrowserSplitState runs inside refreshChrome
+  // so the new layout is mirrored to main before our reply.
+  async function _splitEnable(opts) {
+    const { leftUrl, rightUrl, ratio } = opts;
+    // Apply ratio first if given (so layout calc uses it)
+    if (typeof ratio === 'number') {
+      _browser.splitRatio = Math.max(0.15, Math.min(0.85, ratio));
+    }
+    // Step 1: ensure a LEFT tab exists
+    if (!_browser.activeId || _browser.tabs.length === 0) {
+      const left = await openTab(leftUrl || 'about:blank');
+      if (!left?.viewId) throw new Error('failed to open left tab');
+      _browser.activeId = left.viewId;
+    } else if (leftUrl) {
+      // If a leftUrl is requested and current activeId points to a different URL,
+      // navigate the active tab. Don't open a new tab — keep activeId stable.
+      const cur = _browserActiveTab();
+      if (cur && cur.url !== leftUrl) {
+        api.loadUrl(cur.viewId, leftUrl);
+        cur.url = leftUrl; // optimistic — onNav will update for real
+      }
+    }
+    // Step 2: ensure a RIGHT tab. Reuse existing if URL matches, else open new.
+    let rightId = _browser.splitId;
+    if (!rightId) {
+      if (rightUrl) {
+        const existing = _browser.tabs.find(t => t.viewId !== _browser.activeId && t.url === rightUrl);
+        if (existing) {
+          rightId = existing.viewId;
+        } else {
+          const tab = await openTab(rightUrl);
+          if (!tab?.viewId) throw new Error('failed to open right tab');
+          rightId = tab.viewId;
+          // openTab activated the new tab; flip activeId back to the LEFT tab
+          const leftCandidate = _browser.tabs.find(t => t.viewId !== rightId);
+          if (leftCandidate) _browser.activeId = leftCandidate.viewId;
+        }
+      } else {
+        // No URL given — reuse another existing tab if any, else open about:blank
+        const other = _browser.tabs.find(t => t.viewId !== _browser.activeId);
+        if (other) {
+          rightId = other.viewId;
+        } else {
+          const tab = await openTab('about:blank');
+          if (!tab?.viewId) throw new Error('failed to open right tab');
+          rightId = tab.viewId;
+          const leftCandidate = _browser.tabs.find(t => t.viewId !== rightId);
+          if (leftCandidate) _browser.activeId = leftCandidate.viewId;
+        }
+      }
+    } else if (rightUrl) {
+      // Right pane exists but URL change requested — navigate it
+      const cur = _browserSplitTab();
+      if (cur && cur.url !== rightUrl) {
+        api.loadUrl(cur.viewId, rightUrl);
+        cur.url = rightUrl;
+      }
+    }
+    _browser.splitId = rightId;
+    refreshChrome();
+    await new Promise(r => requestAnimationFrame(() => r()));
+    repositionActive();
+    return {
+      ok: true,
+      leftViewId:  _browser.activeId,
+      rightViewId: _browser.splitId,
+      ratio:       _browser.splitRatio,
+    };
+  }
 
   // ── Watch viewport size — reposition the active view on every change ───
   const viewport = bodyEl.querySelector('#browser-viewport');
@@ -11044,11 +11569,14 @@ let _streamInterval = setInterval(() => {
                       : tier === 'max'            ? 'Max'
                       : tier === 'pro'            ? 'Pro'
                       : tier;
-      emailEl.textContent = `${tierLabel} · hlaro…@gmail.com`;
+      const emailHint = userState.email
+        ? userState.email.replace(/(.{1,5}).*(@.*)$/, '$1…$2')
+        : '';
+      emailEl.textContent = emailHint ? `${tierLabel} · ${emailHint}` : tierLabel;
     } else if (status?.mode === 'apikey' && status.valid) {
-      emailEl.textContent = 'API Key · hlaro…@gmail.com';
+      emailEl.textContent = 'API Key';
     } else {
-      emailEl.textContent = 'Not connected · hlaro…@gmail.com';
+      emailEl.textContent = 'Not connected';
     }
   }
 

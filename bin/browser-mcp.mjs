@@ -142,6 +142,13 @@ async function callOp(cmd, body = {}) {
 }
 
 // ── Tool schemas (mirror electron/claude-service.js BROWSER_TOOLS) ─────────
+
+// Phase 17/19c — single source of truth for the targetId schema fragment.
+// Was previously duplicated inline 21× across tool schemas (mechanical bloat
+// from the Phase 17 auto-transform). Schemas reference this constant by name;
+// the MCP host sees identical JSON either way.
+const TARGET_ID_PROP = { type: 'string', description: 'CDP target id (from chrome_target_list or chrome_split_state). Omit to use the active tab. Pass to drive a specific pane in parallel — eliminates the active-tab race when sub-agents share the controller.' };
+
 const TOOLS = [
   {
     name: 'browser_get_state',
@@ -463,7 +470,7 @@ const TOOLS = [
   // ── Target / tabs ──────────────────────────────────────────────────────
   {
     name: 'chrome_target_list',
-    description: 'List all open browser-panel tabs. Returns { tabs: [{ id, url, title, type, lastActivated, attached }], count, attachedId }. `attached: true` marks the tab the MCP is currently driving — use this to disambiguate two identical-URL tabs. `lastActivated` is the unix-ms timestamp of the last activate/navigate this session (null if untouched). Sorted attached-first, then most-recently-activated.',
+    description: 'List all open browser-panel tabs. Returns { tabs: [{ id, url, title, type, lastActivated, attached, pane, pid, viewId }], count, attachedId, splitActive, splitLeftId, splitRightId }. `id` is the CDP targetId — pass it as `targetId:` to ANY tool to drive a specific tab in parallel (Phase 17 — eliminates active-tab races between sub-agents). `pid` is the OS process id of the renderer (each Chromium tab is its own process) for memory/CPU introspection. `viewId` is the Electron WebContentsView id. `attached: true` marks the tab the MCP is currently driving. `pane: "left"|"right"|null` marks which side of the split-view layout each tab occupies. Sorted attached-first, then most-recently-activated.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -508,6 +515,7 @@ const TOOLS = [
         timeout:     { type: 'integer', description: 'Max ms for navigation (default 30000)' },
         stabilize:   { type: 'boolean', description: 'Auto-wait for network + DOM idle after load (default true)' },
         stabilizeMs: { type: 'number',  description: 'Stabilize timeout in ms (default 5000)' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['url'],
       additionalProperties: false,
@@ -518,7 +526,9 @@ const TOOLS = [
     description: 'Reload Chrome\'s active tab.',
     inputSchema: {
       type: 'object',
-      properties: { waitUntil: { type: 'string' }, timeout: { type: 'integer' } },
+      properties: { waitUntil: { type: 'string' }, timeout: { type: 'integer' },
+ targetId: TARGET_ID_PROP,
+},
       additionalProperties: false,
     },
   },
@@ -530,6 +540,7 @@ const TOOLS = [
       properties: {
         fullPage: { type: 'boolean', description: 'Capture entire scrollable page (default false)' },
         quality:  { type: 'integer', description: 'JPEG quality 1-100 (default 75)' },
+        targetId: TARGET_ID_PROP,
       },
       additionalProperties: false,
     },
@@ -542,6 +553,7 @@ const TOOLS = [
       properties: {
         landscape:       { type: 'boolean' },
         printBackground: { type: 'boolean', description: 'Include background colors/images (default true)' },
+        targetId: TARGET_ID_PROP,
       },
       additionalProperties: false,
     },
@@ -551,7 +563,9 @@ const TOOLS = [
     description: 'Wait for the next navigation to complete on Chrome\'s active tab. Useful when a click triggers a SPA route change you need to wait out.',
     inputSchema: {
       type: 'object',
-      properties: { timeout: { type: 'integer', description: 'Max ms to wait (default 30000)' } },
+      properties: { timeout: { type: 'integer', description: 'Max ms to wait (default 30000)' },
+ targetId: TARGET_ID_PROP,
+},
       additionalProperties: false,
     },
   },
@@ -565,6 +579,7 @@ const TOOLS = [
       properties: {
         expression:   { type: 'string', description: 'JS expression to evaluate' },
         awaitPromise: { type: 'boolean', description: 'Await the expression if it resolves to a promise (default true)' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['expression'],
       additionalProperties: false,
@@ -575,7 +590,9 @@ const TOOLS = [
     description: 'Execute a STATEMENT BLOCK of JavaScript in Chrome\'s active tab (sibling of chrome_runtime_eval but for multi-statement code). Wraps in `(async () => { CODE })()` so you can declare variables, run for-loops, `await` multiple things, and `return` at the end. Use this when chrome_runtime_eval gives you "Unexpected token \';\'".',
     inputSchema: {
       type: 'object',
-      properties: { code: { type: 'string', description: 'JS statement block (use `return X` at the end to get a value back)' } },
+      properties: { code: { type: 'string', description: 'JS statement block (use `return X` at the end to get a value back)' },
+ targetId: TARGET_ID_PROP,
+},
       required: ['code'],
       additionalProperties: false,
     },
@@ -587,7 +604,9 @@ const TOOLS = [
     description: 'querySelector on Chrome\'s active page. Returns text, bounding rect, and visibility flag. Use this to FIND an element before clicking.',
     inputSchema: {
       type: 'object',
-      properties: { selector: { type: 'string' } },
+      properties: { selector: { type: 'string' },
+ targetId: TARGET_ID_PROP,
+},
       required: ['selector'],
       additionalProperties: false,
     },
@@ -600,6 +619,7 @@ const TOOLS = [
       properties: {
         selector: { type: 'string' },
         limit:    { type: 'integer', description: 'Max matches to return (default 50)' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['selector'],
       additionalProperties: false,
@@ -610,7 +630,9 @@ const TOOLS = [
     description: 'Get the innerText of an element on Chrome\'s active page.',
     inputSchema: {
       type: 'object',
-      properties: { selector: { type: 'string' } },
+      properties: { selector: { type: 'string' },
+ targetId: TARGET_ID_PROP,
+},
       required: ['selector'],
       additionalProperties: false,
     },
@@ -620,7 +642,9 @@ const TOOLS = [
     description: 'Click a CSS selector with AUTO-SCROLL-INTO-VIEW + visible-rect clamping. Prefer this over chrome_input_click when the target may be outside the visible viewport (overflowed in a horizontal split, below the fold, etc) — fixes the "clicked dead air outside the window" silent failure from real-session feedback.',
     inputSchema: {
       type: 'object',
-      properties: { selector: { type: 'string' } },
+      properties: { selector: { type: 'string' },
+ targetId: TARGET_ID_PROP,
+},
       required: ['selector'],
       additionalProperties: false,
     },
@@ -641,7 +665,9 @@ const TOOLS = [
     description: 'Jump the CodeMirror editor caret to a specific line via CM6\'s default Ctrl+G keymap. Focuses the editor first, then opens the goto-line dialog, types N, hits Enter.',
     inputSchema: {
       type: 'object',
-      properties: { line: { type: 'integer', description: '1-indexed line number' } },
+      properties: { line: { type: 'integer', description: '1-indexed line number' },
+ targetId: TARGET_ID_PROP,
+},
       required: ['line'],
       additionalProperties: false,
     },
@@ -655,6 +681,7 @@ const TOOLS = [
         line:    { type: 'integer', description: '1-indexed line to replace' },
         content: { type: 'string',  description: 'New full content for that line (no trailing newline)' },
         save:    { type: 'boolean', description: 'Send Ctrl+S after editing (default true)' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['line', 'content'],
       additionalProperties: false,
@@ -677,6 +704,7 @@ const TOOLS = [
       properties: {
         file: { type: 'string',  description: 'Repo-relative file path (e.g. "src/pages/Auth.tsx")' },
         line: { type: 'integer', description: '1-indexed line to jump to (optional but recommended)' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['file'],
       additionalProperties: false,
@@ -704,6 +732,7 @@ const TOOLS = [
         },
         save:         { type: 'boolean', description: 'Send Ctrl+S per file boundary + at the end (default true)' },
         ensureEditor: { type: 'boolean', description: 'Call cm_ensure_editor before each file switch (default true)' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['edits'],
       additionalProperties: false,
@@ -721,6 +750,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         timeoutMs: { type: 'integer', description: 'Max ms to wait for click (default 30000, max 300000)' },
+        targetId: TARGET_ID_PROP,
       },
       additionalProperties: false,
     },
@@ -729,6 +759,48 @@ const TOOLS = [
     name: 'chrome_picker_cancel',
     description: 'Remove the picker overlay from the active page without capturing anything. Use when you want to abort an open picker session.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase 15 — Split-view state (drive BOTH panes in one turn)
+  // ════════════════════════════════════════════════════════════════════════
+  {
+    name: 'chrome_split_state',
+    description: 'Get the current split-view layout of the embedded browser. When the user has split the browser panel into two side-by-side tabs, this returns the CDP targetId of EACH pane so you can drive both in parallel within one turn — e.g. `chrome_observe { targetId: left.targetId }` to read a research page, then `chrome_step { targetId: right.targetId, action:"type", target:"note input", value:"..." }` to write notes in the other pane. Returns `{ active: false }` when no split is active. When active: `{ active: true, ratio, left: { viewId, url, title, targetId }, right: { viewId, url, title, targetId } }`. This is the canonical workflow for "research in one pane + notes in the other" — no active-tab flipping required.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_split_enable',
+    description: 'Turn ON split-view in the CCM Browser panel — Claude drives the UI itself, no manual button-click required. Optional `leftUrl` / `rightUrl` navigate each pane to a specific URL; if omitted, reuses existing tabs (or opens about:blank). Returns the full chrome_split_state output with CDP targetIds so you can immediately observe/step both panes. Use this to bootstrap the canonical "research + notes" workflow: `chrome_split_enable({leftUrl:"https://duckduckgo.com/?q=foo", rightUrl:"https://notes.example.com"})` → grabs both targetIds → loop observe(left)+type(right).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        leftUrl:  { type: 'string', description: 'URL for the left pane (default: keep current active tab)' },
+        rightUrl: { type: 'string', description: 'URL for the right pane (default: reuse another tab or open about:blank)' },
+        ratio:    { type: 'number', description: 'Left-pane width fraction 0.15-0.85 (default 0.5)' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'chrome_split_disable',
+    description: 'Turn OFF split-view, collapsing back to a single visible tab (the current left pane stays active; the right-pane tab remains open but un-pinned). Returns { ok, active: false }.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_split_swap',
+    description: 'Swap left and right panes in split-view. Useful when you want to act on the OTHER pane and your auto-stabilize / observe loop is keyed to "active = left". Returns the new chrome_split_state.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'chrome_split_set_ratio',
+    description: 'Resize the split — `ratio` is the left-pane width fraction (0.15 to 0.85). Useful when one pane needs more room (e.g. wide research table on the left, narrow notes input on the right → ratio 0.7).',
+    inputSchema: {
+      type: 'object',
+      properties: { ratio: { type: 'number', description: '0.15 to 0.85' } },
+      required: ['ratio'],
+      additionalProperties: false,
+    },
   },
 
   // ── Input ───────────────────────────────────────────────────────────────
@@ -746,6 +818,7 @@ const TOOLS = [
         y:           { type: 'number', description: 'Y coord in CSS pixels (if no selector)' },
         stabilize:   { type: 'boolean', description: 'Auto-wait for network + DOM idle after click (default false)' },
         stabilizeMs: { type: 'number' },
+        targetId: TARGET_ID_PROP,
       },
       additionalProperties: false,
     },
@@ -761,6 +834,7 @@ const TOOLS = [
         delay:       { type: 'integer', description: 'Per-keystroke delay in ms (default 20)' },
         stabilize:   { type: 'boolean' },
         stabilizeMs: { type: 'number' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['text'],
       additionalProperties: false,
@@ -776,6 +850,7 @@ const TOOLS = [
         modifiers:   { type: 'array', items: { type: 'string', enum: ['Control', 'Shift', 'Alt', 'Meta'] } },
         stabilize:   { type: 'boolean' },
         stabilizeMs: { type: 'number' },
+        targetId: TARGET_ID_PROP,
       },
       required: ['key'],
       additionalProperties: false,
@@ -789,6 +864,7 @@ const TOOLS = [
       properties: {
         amount:    { type: 'integer', description: 'Pixels (default 600)' },
         direction: { type: 'string', enum: ['up', 'down'] },
+        targetId: TARGET_ID_PROP,
       },
       additionalProperties: false,
     },
@@ -900,7 +976,7 @@ const TOOLS = [
 
   {
     name: 'chrome_step',
-    description: 'High-level intent resolver. Given { action, target } it runs a fresh observe, fuzzy-matches `target` against accessible names of role-appropriate elements, and executes — one round-trip per intent. Auto-stabilizes and bundles observe_delta. Use this INSTEAD OF chrome_observe + chrome_click_ref/type_ref when you already know the human-readable target name. Returns { resolved, candidates, delta, stabilized }. On ambiguous match (top two scores within 8), refuses and returns top-5 candidates so the caller can disambiguate with `role` or `near`.',
+    description: 'High-level intent resolver. Given { action, target } it runs a fresh observe, fuzzy-matches `target` against accessible names of role-appropriate elements, and executes — one round-trip per intent. Auto-stabilizes and bundles observe_delta. Use this INSTEAD OF chrome_observe + chrome_click_ref/type_ref when you already know the human-readable target name. Scoring: exact=100, startsWith=55, includes=40, token-overlap up to 30, disabled −50. Filter floor: candidates must score ≥15 to be considered. Returns { resolved, candidates, delta, stabilized }. On ambiguous match (top two scores within 20), refuses and returns top-5 candidates so the caller can disambiguate with `role` or `near`. `select` action handles BOTH native `<select>` (via React-safe value setter) AND ARIA listbox/combobox (clicks the matching `[role=option]`).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1114,7 +1190,9 @@ const TOOLS = [
   { name: 'chrome_console_subscribe', description: 'Start capturing console.log / pageerror messages on the active tab (circular buffer of 500). Auto-on after first chrome_console_recent call.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'chrome_console_recent', description: 'Get the most recent N console messages from the active tab. Set clear=true to flush after reading.',
-    inputSchema: { type: 'object', properties: { limit: { type: 'integer', description: 'Default 100, max 500' }, clear: { type: 'boolean' } }, additionalProperties: false } },
+    inputSchema: { type: 'object', properties: { limit: { type: 'integer', description: 'Default 100, max 500' }, clear: { type: 'boolean' },
+ targetId: TARGET_ID_PROP,
+}, additionalProperties: false } },
   { name: 'chrome_a11y_enable', description: 'Enable accessibility tree generation for the active tab.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'chrome_a11y_tree', description: 'Get the FULL accessibility tree — often a better page representation for LLMs than raw DOM (labeled, pruned to interactive content).',
@@ -1365,6 +1443,15 @@ async function execTool(name, args = {}) {
     case 'chrome_picker_install':   return callOp('chrome-picker-install');
     case 'chrome_picker_capture':   return callOp('chrome-picker-capture', args);
     case 'chrome_picker_cancel':    return callOp('chrome-picker-cancel');
+
+    // ── Phase 15 · split-view state (parallel pane control) ─────
+    case 'chrome_split_state':      return callOp('chrome-split-state');
+
+    // ── Phase 16 · Claude-controllable split layout ─────────────
+    case 'chrome_split_enable':     return callOp('chrome-split-enable', args);
+    case 'chrome_split_disable':    return callOp('chrome-split-disable');
+    case 'chrome_split_swap':       return callOp('chrome-split-swap');
+    case 'chrome_split_set_ratio':  return callOp('chrome-split-set-ratio', args);
 
     // ── Chrome · input ──────────────────────────────────────────
     case 'chrome_input_click':      return callOp('chrome-input-click', args);

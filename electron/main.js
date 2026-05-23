@@ -105,10 +105,17 @@ console.log(`[main] slot=${CCM_SLOT}  cdp=:${CCM_CDP_PORT}  userData=${app.getPa
 //   - in-process IPC via electronAPI.browser.* (the `browser_*` MCP tools)
 //   - external CDP over localhost:<port> (the `chrome_*` MCP tools)
 //
-// MUST be set BEFORE app is ready. The port is localhost-only by default,
-// so we're not exposing anything to the network. Anyone on the local box
-// CAN connect though — for stricter isolation we could use a random port
-// (port 0) + read it from Electron's DevToolsActivePort file.
+// MUST be set BEFORE app is ready.
+//
+// ⚠️ THREAT MODEL: the port binds 127.0.0.1 only, so it's not exposed to the
+// network — BUT any process running as the same user on the local machine
+// can open the CDP WebSocket and drive Chromium with NO authentication,
+// bypassing browser-http-server.js's bearer token entirely. For a personal
+// single-user dev workstation this is an acceptable trade-off (only your own
+// processes can hit it). For shared/multi-user systems consider switching to
+// `--remote-debugging-pipe` (pipe transport, only the parent process can
+// drive it) — note that requires the controller to switch from
+// `puppeteer.connect({browserURL})` to a pipe-based connection.
 app.commandLine.appendSwitch('remote-debugging-port', String(CCM_CDP_PORT));
 
 // ── Single-instance lock ────────────────────────────────────────────────────
@@ -313,7 +320,22 @@ function createWindow() {
   }
   startFsWatcher();
 
-  win.on('closed', () => { _fsWatcher?.close(); _fsWatcher = null; });
+  win.on('closed', () => {
+    _fsWatcher?.close(); _fsWatcher = null;
+    // If the user closed the main window while a secondary was open, promote
+    // the secondary up. Otherwise the secondary is stranded with role
+    // "secondary" — its spawn button stays hidden, and the user has no way
+    // to reopen the main window or spawn a third.
+    if (win === mainWin) {
+      mainWin = null;
+      if (_secondWin && !_secondWin.isDestroyed()) {
+        mainWin       = _secondWin;
+        _secondWin    = null;
+        _primaryWinId = mainWin.id;
+        _broadcastRole();
+      }
+    }
+  });
 
   if (state.maximized) win.maximize();
 
@@ -924,6 +946,11 @@ function _attachBrowserViewListeners(viewId, view) {
   wc.on('did-fail-load', (_e, code, desc, url, isMain) => {
     if (isMain && code !== -3) send('browser:fail', { code, desc, url });
   });
+  // Focus tracking — when the user clicks INSIDE a pane, the renderer needs to
+  // know so the toolbar (URL bar, back/fwd/reload) can follow focus instead of
+  // always acting on the structurally-left pane. Especially matters in
+  // split-view: clicking the right pane should make the URL bar show its URL.
+  wc.on('focus', () => send('browser:focus', {}));
 
   // Popups (target=_blank, window.open) → open in a new tab in this owner window
   wc.setWindowOpenHandler(({ url }) => {
@@ -1090,6 +1117,207 @@ ipcMain.handle('browser:hide-all', (event) => {
   }
   return { ok: true };
 });
+
+// ── Split-view state sync (renderer → main → chrome-controller) ───────────
+// The renderer (app.js) holds the canonical split state on `_browser` but
+// the MCP layer (chrome-controller via global.ccmChrome) lives in the main
+// process. We mirror the state here on every renderer-side change so the
+// `chrome_split_state` MCP tool can resolve which CDP target = which pane.
+//
+// Shape: { active, leftViewId, rightViewId, leftUrl, rightUrl, ratio }
+//   active   — boolean, true when both panes are in split layout
+//   *ViewId  — Electron WebContentsView ids (renderer-side)
+//   *Url     — current URL of the WebContents in each pane (chrome-controller
+//              uses these to find the matching Puppeteer page by URL)
+//   ratio    — 0..1, left-pane width fraction
+ipcMain.handle('browser:set-split-state', (event, state = {}) => {
+  // SECURITY — the renderer (or anything that can call this IPC) was
+  // previously trusted to push arbitrary state into global.ccmSplitState,
+  // which then flows into chrome_split_state's URL match → returned to MCP
+  // callers as the resolved targetIds for "the left/right pane". A bad
+  // state lets an attacker spoof which CDP tab MCP commands target.
+  //
+  // Defenses:
+  //   1. Only accept calls from the main app's own webContents (not from
+  //      embedded WebContentsViews — those are sandboxed user pages).
+  //   2. Type-check the shape — strings/numbers only, no nested objects.
+  //   3. Validate URL fields through _safeNavUrl (rejects javascript:, etc).
+  //   4. Validate viewIds against the known _browserViews map.
+  try {
+    // Check the caller is the main app renderer, not a content webContents
+    const senderWin = BrowserWindow.fromWebContents(event.sender);
+    if (!senderWin) {
+      console.warn('[browser:set-split-state] no owner window — rejecting');
+      return { ok: false, error: 'orphan sender' };
+    }
+    const validated = _validateSplitState(state);
+    global.ccmSplitState = validated;
+    return { ok: true };
+  } catch (e) {
+    console.warn('[browser:set-split-state] rejected:', e.message);
+    global.ccmSplitState = null;
+    return { ok: false, error: e.message };
+  }
+});
+
+function _validateSplitState(state) {
+  if (state === null || state === undefined) return null;
+  if (typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('state must be an object');
+  }
+  const out = {};
+  // active: boolean
+  out.active = !!state.active;
+  // ratio: number 0..1
+  if (state.ratio !== undefined) {
+    const r = Number(state.ratio);
+    if (!Number.isFinite(r) || r < 0 || r > 1) {
+      throw new Error('ratio must be a finite number in [0, 1]');
+    }
+    out.ratio = r;
+  }
+  // viewIds: must reference real WebContentsViews in our map
+  for (const k of ['leftViewId', 'rightViewId']) {
+    if (state[k] !== undefined && state[k] !== null) {
+      const id = Number(state[k]);
+      if (!Number.isInteger(id) || !_browserViews.has(id)) {
+        throw new Error(`${k} ${state[k]} is not a known WebContentsView id`);
+      }
+      out[k] = id;
+    } else {
+      out[k] = null;
+    }
+  }
+  // URLs: must pass _safeNavUrl AND match a known view's current URL
+  for (const k of ['leftUrl', 'rightUrl']) {
+    if (state[k] !== undefined && state[k] !== null) {
+      if (typeof state[k] !== 'string') {
+        throw new Error(`${k} must be a string`);
+      }
+      // Cap length so we don't accept megabyte-long URLs
+      if (state[k].length > 8192) {
+        throw new Error(`${k} too long`);
+      }
+      // Light validation (don't fully reject — about:blank etc. is legitimate)
+      const lower = state[k].toLowerCase().replace(/\s+/g, '');
+      for (const bad of ['javascript:', 'vbscript:', 'data:text/html', 'file:']) {
+        if (lower.startsWith(bad)) {
+          throw new Error(`${k} has refused scheme`);
+        }
+      }
+      out[k] = state[k];
+    } else {
+      out[k] = null;
+    }
+  }
+  // Titles: string, length-capped, no schemas
+  for (const k of ['leftTitle', 'rightTitle']) {
+    if (state[k] !== undefined && state[k] !== null) {
+      out[k] = String(state[k]).slice(0, 256);
+    } else {
+      out[k] = null;
+    }
+  }
+  return out;
+}
+ipcMain.handle('browser:get-split-state', () => {
+  return global.ccmSplitState || { active: false };
+});
+
+// ── Phase 17 — per-tab OS PID enrichment ──────────────────────────────────
+// Each WebContentsView is its own Chromium renderer process. Surfacing the
+// OS PID (via webContents.getOSProcessId()) gives Claude memory/CPU/kill-
+// and-restart introspection per pane. chrome-controller.targetList() reads
+// this on every list call to annotate each tab with `pid` and `viewId`.
+// Match-by-URL between Electron viewId and Puppeteer targetId (the same
+// trick chrome_split_state uses) — first-URL-wins on duplicates.
+global.ccmBrowserViewPids = function ccmBrowserViewPids() {
+  const out = [];
+  for (const [viewId, entry] of _browserViews.entries()) {
+    try {
+      const wc = entry?.view?.webContents;
+      if (!wc || wc.isDestroyed()) continue;
+      out.push({
+        viewId,
+        pid:   wc.getOSProcessId(),
+        url:   wc.getURL(),
+        title: wc.getTitle(),
+      });
+    } catch (_) { /* skip */ }
+  }
+  return out;
+};
+
+// ── Phase 16 — MCP-driven split control (Claude controls the UI) ──────────
+// chrome-controller (called from MCP tools chrome_split_enable/disable/swap/
+// set_ratio) → calls into global.ccmBrowserSplit → which webContents.sends
+// 'browser:split-cmd' to the renderer → the Browser panel dispatches to its
+// internal toggleSplit / activateTab / setRatio handlers → replies via the
+// 'browser:split-cmd-result' IPC tagged with reqId → we resolve the awaiting
+// promise. 5-second timeout — if the renderer's Browser panel isn't mounted,
+// the call fails cleanly with "open the Browser panel first".
+const _pendingSplitCmds = new Map(); // reqId → { resolve, reject, timer, expectedSenderId }
+
+ipcMain.on('browser:split-cmd-result', (event, payload = {}) => {
+  const { reqId, result } = payload || {};
+  const waiter = _pendingSplitCmds.get(reqId);
+  if (!waiter) return;
+  // SECURITY — verify the result came from the SAME webContents we asked.
+  // Without this, a renderer subscribing to browser:split-cmd via the
+  // onSplitCmd preload API can read the live reqId and forge a result,
+  // racing the real Browser panel. Tie each pending request to its target
+  // webContents id.
+  if (event.sender?.id !== waiter.expectedSenderId) {
+    console.warn('[browser:split-cmd-result] sender id mismatch — refusing forged reply for', reqId);
+    return;
+  }
+  _pendingSplitCmds.delete(reqId);
+  clearTimeout(waiter.timer);
+  if (result && result.error) waiter.reject(new Error(result.error));
+  else waiter.resolve(result || { ok: true });
+});
+
+function _sendSplitCmd(cmd, args = {}) {
+  // Find a candidate window — prefer one that has the Browser panel mounted.
+  // For simplicity pick the first non-destroyed BrowserWindow; multi-slot
+  // CCM has one window per slot so this is correct per-process.
+  const wins = BrowserWindow.getAllWindows().filter(w => !w.isDestroyed());
+  const win = wins[0];
+  if (!win) {
+    return Promise.reject(new Error('No CCM window open — launch CCM first.'));
+  }
+  // SECURITY — reqId from crypto.randomBytes, not Date.now+Math.random.
+  // The old format was predictable (Date.now prefix) and only ~31 bits of
+  // entropy — guessable in a few thousand tries from a malicious renderer.
+  const reqId = 'sc-' + require('crypto').randomBytes(12).toString('hex');
+  const expectedSenderId = win.webContents.id;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      _pendingSplitCmds.delete(reqId);
+      reject(new Error(
+        `split-${cmd} timed out — Browser panel may not be mounted. ` +
+        `Open it via right-click dock → Add panel → Browser, then retry.`
+      ));
+    }, 5_000);
+    _pendingSplitCmds.set(reqId, { resolve, reject, timer, expectedSenderId });
+    try {
+      win.webContents.send('browser:split-cmd', { cmd, args, reqId });
+    } catch (e) {
+      _pendingSplitCmds.delete(reqId);
+      clearTimeout(timer);
+      reject(e);
+    }
+  });
+}
+
+// Surface to chrome-controller (which doesn't import main.js directly to avoid
+// a cycle — it reads from global.* like ccmBrowser / ccmChrome already do).
+global.ccmBrowserSplit = {
+  enable:   (opts = {}) => _sendSplitCmd('enable', opts),
+  disable:  ()          => _sendSplitCmd('disable'),
+  swap:     ()          => _sendSplitCmd('swap'),
+  setRatio: (ratio)     => _sendSplitCmd('set-ratio', { ratio }),
+};
 
 ipcMain.handle('browser:close', (_, viewId) => {
   const entry = _browserViews.get(viewId);
@@ -3013,6 +3241,50 @@ ipcMain.handle('window:close-secondary', () => {
 
 ipcMain.handle('window:has-secondary', () => {
   return !!(_secondWin && !_secondWin.isDestroyed());
+});
+
+// ── CLI session tracker (Phase 18) ───────────────────────────────────────
+// Surfaces Claude Code CLI sessions (~/.claude/projects/<encoded-cwd>/*.jsonl)
+// in CCM's sidebar — a unified session manager across chat + CLI.
+const _cliSessionTracker = require('./cli-session-tracker');
+ipcMain.handle('cli-sessions:list', (_e, opts = {}) => {
+  try { return { ok: true, sessions: _cliSessionTracker.listSessions(opts) }; }
+  catch (e) { return { ok: false, error: e.message, sessions: [] }; }
+});
+ipcMain.handle('cli-sessions:read', (_e, opts = {}) => {
+  try { return { ok: true, jsonl: _cliSessionTracker.readSession(opts) }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('cli-sessions:reveal', (_e, opts = {}) => {
+  try {
+    const p = _cliSessionTracker.sessionPath(opts);
+    require('electron').shell.showItemInFolder(p);
+    return { ok: true, path: p };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+// Phase 18b — link/unlink session storage to the project folder
+ipcMain.handle('cli-sessions:storage-status', (_e, opts = {}) => {
+  try {
+    const projectRoot = opts.projectRoot || global._projectCwd || process.cwd();
+    return { ok: true, status: _cliSessionTracker.getStorageStatus({ projectRoot }) };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('cli-sessions:link', (_e, opts = {}) => {
+  try {
+    const projectRoot = opts.projectRoot || global._projectCwd || process.cwd();
+    const result = _cliSessionTracker.linkSessionsToProject({ projectRoot, force: !!opts.force });
+    return { ok: true, ...result };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('cli-sessions:unlink', (_e, opts = {}) => {
+  try {
+    const projectRoot = opts.projectRoot || global._projectCwd || process.cwd();
+    const result = _cliSessionTracker.unlinkSessionsFromProject({
+      projectRoot,
+      restoreBackup: !!opts.restoreBackup,
+    });
+    return { ok: true, ...result };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('terminal:create', (event, { cwd, cols, rows } = {}) => {
