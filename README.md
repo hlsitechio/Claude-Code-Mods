@@ -215,6 +215,56 @@ Other optional env vars:
 
 ---
 
+## Where your data lives
+
+CCM is **local-first** — everything it creates stays on your machine, in plain files you can read, back up, or delete. Nothing is sent to a CCM server (there isn't one). Here's exactly what gets written and where, so there are no surprises.
+
+### 1. In the project folder (next to the app — version-controllable, mostly git-ignored)
+
+| Path | What it holds |
+|------|---------------|
+| `sessions/*.json` | **Chat sessions** — every conversation's messages, one file per session |
+| `sessions/claude_session_cli/` | **Linked CLI transcripts** — Claude Code CLI session `.jsonl` files, if you used the sidebar's "link to project" |
+| `notes/*.md` | **Notes** panel — your persistent markdown scratchpad |
+| `memory/*.md` | **Memory** — your profile, preferences, tech stack (injected into every session as context) |
+| `agents/*.json` | **Agent** definitions — custom autonomous agents you've configured |
+| `skills/*.md` | **Skills** — domain-knowledge files, loaded via `CLAUDE.md` |
+| `knowledge/` | **Knowledge base** files surfaced in the KB editor |
+| `codeblocks/<id>/` | **Saved code artifacts** — code blocks you exported, rendered HTML included |
+| `screenshot/*.png` | **Images** — screenshots captured via the Screenshots panel |
+| `kanban.json` | **Tasks** — the per-project kanban board (shared with the CLI) |
+| `workspace-index.json` | **Workspace state** — projects/sessions/model/mode snapshot Claude reads for awareness |
+
+> The `.gitignore` keeps the personal ones (`sessions/`, `memory/`, `notes/`, `codeblocks/`, `workspace-index.json`, etc.) out of commits — fork the repo and your conversations stay yours.
+
+### 2. In the OS app-data folder (per-user, never in the repo)
+
+The exact path is your platform's standard app-data dir:
+- **Windows** — `%APPDATA%\claude-code-desktop\`
+- **macOS** — `~/Library/Application Support/claude-code-desktop/`
+- **Linux** — `~/.config/claude-code-desktop/`
+
+| Path | What it holds |
+|------|---------------|
+| `Partitions/ccm-browser/` | **Embedded browser session** — cookies, cache, localStorage, logins for the Browser panel |
+| `chrome-profile/` | Chrome profile for the CDP-driven browser |
+| `browser-profile/` | Claude's own bookmarks / history / read-list for the browser |
+| `claude-desktop-config.json` | API-key auth (if you use a raw key instead of OAuth) |
+| `gh-pat.enc` | Encrypted GitHub personal access token (for the Git/GitHub panels) |
+| `window-state.json` | Window position + size |
+
+### 3. In `~/.claude/` (shared with the Claude Code CLI + the CCM↔MCP bridge)
+
+| Path | What it holds |
+|------|---------------|
+| `projects/<cwd>/*.jsonl` | The CLI's own session transcripts — what the sidebar's **CLI tracker** reads |
+| `ccm-browser-endpoint.json` | MCP endpoint URL + bearer token (mode `0600`) so the ccm-browser MCP can reach the running app. Per-slot variants: `ccm-browser-endpoint-2.json`, etc. |
+| `.claude.json` / `settings.json` | Where CCM registers the `ccm-browser` MCP server |
+
+**To wipe everything CCM stored:** delete the OS app-data folder (zone 2) + the project-folder data dirs (zone 1). The `~/.claude/` files (zone 3) belong to the Claude Code CLI — leave those unless you're also resetting the CLI.
+
+---
+
 ## Stack
 
 | Layer | Tech |
