@@ -10,6 +10,16 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **One-line Windows installer (`setup.ps1`)** — `irm https://raw.githubusercontent.com/hlsitechio/Claude-Code-Mods/main/setup.ps1 | iex`. Scan-first, isolation-first:
+  - BETA warning + GitHub-issues link shown up front and again at the end
+  - Prerequisite check (Node 20+, git, Claude Code CLI — CLI is a soft warning)
+  - **Read-only scan** for existing installs (official Claude Desktop at `%LOCALAPPDATA%\AnthropicClaude` / `%APPDATA%\Claude`, prior CCM data at `%APPDATA%\claude-code-desktop`, CLI config at `~/.claude`) — reports them and explicitly leaves them untouched (security + no data loss)
+  - Asks **where** to install (refuses to clobber a non-empty non-CCM dir; updates in place if it's an existing clone)
+  - Asks **consent** before creating the local data backend
+  - Writes `Launch-CCM.cmd` that sets `CCM_USER_DATA_DIR=<install>\data` for **full isolation** — this install's sessions/cookies/profile never share or overwrite another install's data. Optional Desktop shortcut. No registry edits, no PATH changes.
+- **`CCM_USER_DATA_DIR` env var** (`electron/main.js`) — relocates ALL of CCM's `userData` (browser profiles, cookies, window state) to a chosen directory before any `app.getPath('userData')` call. Composes with the slot system. The lever the installer uses for isolation; also handy for portable installs.
+- **`npm run setup:win`** — runs the installer locally.
+
 - **Phase 20 — OAuth + Cloudflare friendliness** — two embedded-browser pain points fixed.
   - **OAuth popups now open as real child windows.** Previous behavior denied every popup, which broke Google / Microsoft / GitHub / Apple / Auth0 / Okta sign-in flows that rely on `window.opener.postMessage(...)` firing back to the original page after sign-in. New `_isOAuthPopup()` detects provider patterns (major IdP hostnames + generic OAuth fingerprint: `client_id` + `redirect_uri` query params); `setWindowOpenHandler` returns `{action:'allow'}` with `overrideBrowserWindowOptions` using the parent's session so OAuth state cookies persist across the redirect chain. Non-OAuth popups still route through the existing new-tab handler.
   - **Stealth fingerprint via CDP `Page.addScriptToEvaluateOnNewDocument`.** Same technique as puppeteer-stealth. Installed via `webContents.debugger.attach('1.3')` on view creation, runs in main world BEFORE any page script on every navigation — including inline detection scripts. Spoofs: `navigator.webdriver` (undefined), `navigator.plugins` (5 fake PDF viewers, length matching real Chrome), `navigator.languages` (non-empty fallback), `window.chrome.runtime/csi/loadTimes` (present), `navigator.permissions.query` (mirrors `Notification.permission`), WebGL `UNMASKED_VENDOR_WEBGL` / `UNMASKED_RENDERER_WEBGL` (NVIDIA-on-Windows values), `window.outerHeight/outerWidth` (>= innerHeight/Width), `Function.prototype.toString` (returns "native code" for our patched WebGL getter). The old `did-finish-load` → `executeJavaScript` patch was deleted — it ran AFTER Cloudflare's inline detector and was useless.

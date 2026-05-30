@@ -182,7 +182,22 @@ The CLI is never patched or intercepted — it runs as a child process with `--o
 - [Node.js](https://nodejs.org) 20+ (Vite 8 requires Node 20.19+/22.12+)
 - [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated (`claude` in `PATH`)
 
-### Install & run
+### Quick install — Windows (PowerShell)
+
+One line. It scans for any existing Claude install (read-only — never touches them), asks where to put an **isolated** copy, gets your consent for the local data folder, then installs and drops a one-click launcher:
+
+```powershell
+irm https://raw.githubusercontent.com/hlsitechio/Claude-Code-Mods/main/setup.ps1 | iex
+```
+
+> ⚠️ **Beta.** Expect rough edges. Bugs → [open an issue](https://github.com/hlsitechio/Claude-Code-Mods/issues) with steps to reproduce.
+
+**What the installer guarantees:**
+- **Won't touch your existing setup** — it detects the official Claude Desktop, any prior CCM data, and your Claude Code CLI config, and leaves all of them alone.
+- **Fully isolated** — all of this install's data lives under `<install>\data` (via `CCM_USER_DATA_DIR`), so nothing is shared or overwritten.
+- **No system changes** — no registry edits, no PATH changes. Delete the install folder to remove it completely.
+
+### Manual install (all platforms)
 
 ```bash
 git clone https://github.com/hlsitechio/Claude-Code-Mods.git
@@ -191,6 +206,9 @@ npm install
 
 # Development (hot-reload)
 npm run electron:dev
+
+# Isolate this install's data anywhere you like (optional):
+#   CCM_USER_DATA_DIR=/path/to/data npm run electron:dev
 
 # Build for your platform
 npm run dist:linux    # AppImage + .deb

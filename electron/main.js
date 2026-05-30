@@ -81,10 +81,29 @@ const CCM_SLOT = (() => {
 })();
 const CCM_CDP_PORT = 9222 + (CCM_SLOT - 1);
 
+// Custom userData root (installer isolation). When CCM_USER_DATA_DIR is set
+// — e.g. by the scan-first PowerShell installer (setup.ps1) — ALL of CCM's
+// local data (browser profiles, cookies, window state, kanban fallback)
+// lands there instead of the default %APPDATA%\claude-code-desktop. This is
+// how an isolated install guarantees it never shares or clobbers an
+// existing install's data dir. MUST run before any app.getPath('userData').
+if (process.env.CCM_USER_DATA_DIR) {
+  try {
+    const _udir = require('path').resolve(process.env.CCM_USER_DATA_DIR);
+    require('fs').mkdirSync(_udir, { recursive: true });
+    app.setPath('userData', _udir);
+    console.log(`[main] userData isolated to CCM_USER_DATA_DIR=${_udir}`);
+  } catch (e) {
+    console.warn('[main] CCM_USER_DATA_DIR could not be applied:', e.message);
+  }
+}
+
 // Slot > 1: relocate userData so each Electron has its own Chromium profile.
 // The single-instance lock below scopes to userData, so different paths =
 // different locks → slots can coexist. MUST happen before any code calls
 // app.getPath('userData') and before requestSingleInstanceLock().
+// Composes with CCM_USER_DATA_DIR: slot suffix is appended to whatever
+// base userData is now in effect.
 if (CCM_SLOT > 1) {
   const defaultUserData = app.getPath('userData');
   app.setPath('userData', `${defaultUserData}-slot-${CCM_SLOT}`);
