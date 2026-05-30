@@ -6910,21 +6910,30 @@ async function initBrowserPanel(bodyEl) {
   }
 
   // ── Close a tab ────────────────────────────────────────────────────────
-  async function closeTab(viewId) {
-    await api.close(viewId);
+  // State cleanup after a tab disappears — works whether the close was
+  // user-initiated (closeTab) or external (main process notified us via
+  // browser:destroyed because CDP / page-window.close() / window teardown
+  // took the WebContents out from under us).
+  function _pruneClosedTab(viewId) {
+    const before = _browser.tabs.length;
     _browser.tabs = _browser.tabs.filter(t => t.viewId !== viewId);
+    if (_browser.tabs.length === before) return false;  // not ours
     if (_browser.splitId === viewId) _browser.splitId = null;
     if (_browser.activeId === viewId) {
       _browser.activeId = _browser.tabs.find(t => t.viewId !== _browser.splitId)?.viewId
         || _browser.tabs[_browser.tabs.length - 1]?.viewId
         || null;
     }
-    // If only one tab is left, drop split mode entirely
     if (_browser.splitId && _browser.splitId === _browser.activeId) _browser.splitId = null;
-    // If the focused tab was closed, fall back to whatever activeId is now
     if (_browser.focusedId === viewId) _browser.focusedId = _browser.activeId;
     refreshChrome();
     if (_browser.activeId) requestAnimationFrame(repositionActive);
+    return true;
+  }
+
+  async function closeTab(viewId) {
+    await api.close(viewId);
+    _pruneClosedTab(viewId);
   }
 
   // ── Switch to a tab ────────────────────────────────────────────────────
@@ -7148,6 +7157,15 @@ async function initBrowserPanel(bodyEl) {
     // target=_blank / window.open → open as a new tab in the same browser
     await openTab(url);
   }));
+  // External-close notification — main process fires this when a
+  // WebContents is destroyed without going through our IPC close path
+  // (CDP Target.closeTarget, page-initiated window.close(), owner-window
+  // teardown). Without this hook the tab stays in the strip as a ghost
+  // and any subsequent IPC against it (load-url / nav / etc.) crashes
+  // main with "Cannot read properties of undefined".
+  if (api.onDestroyed) {
+    _browser.cleanups.push(api.onDestroyed(({ viewId }) => _pruneClosedTab(viewId)));
+  }
 
   // ── Phase 16: receive split-view commands from MCP (via main process) ──
   // Claude calls chrome_split_enable/disable/swap/set_ratio → main process

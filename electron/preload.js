@@ -283,6 +283,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('browser:popup', handler);
       return () => ipcRenderer.removeListener('browser:popup', handler);
     },
+    onDestroyed: (cb) => {
+      const handler = (_, data) => cb(data);
+      ipcRenderer.on('browser:destroyed', handler);
+      return () => ipcRenderer.removeListener('browser:destroyed', handler);
+    },
     // Per-pane focus — fires when the user clicks INSIDE a WebContentsView.
     // The renderer uses this to follow focus with the URL bar + nav buttons.
     onFocus: (cb) => {
