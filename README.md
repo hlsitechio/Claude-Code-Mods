@@ -71,14 +71,17 @@ A drag-and-drop panel canvas. Every tool in its own resizable, re-dockable panel
 | Panel | What it does |
 |-------|-------------|
 | **Chat** | Main conversation + 9 streaming state variants with gradient shimmer |
+| **Browser** | Embedded Chromium (real cookies, real extensions, real logins) — tabs, split view, and the 183-tool ccm-browser MCP surface that lets Claude drive it. See the [section above](#ccm-browser-mcp--183-tools-driving-the-embedded-browser). |
 | **Preview** | Live JSX/HTML/React iframe — Claude writes a component, click 👁 to render it |
 | **Terminal** | Embedded shell (PowerShell / bash) |
 | **Files** | Full project file tree |
 | **Skills** | Browse, edit, activate/deactivate skill files with inline editor + active badges |
 | **Notes** | Persistent markdown scratchpad with toolbar + live preview |
 | **Plan** | Claude's task plan rendered as a kanban-style checklist |
+| **Tasks** | Per-project kanban board (shared with the CLI via `kanban.json`) |
 | **MCP** | All connected MCP servers and their tools at a glance |
-| **Git** | Branch / status / diff view |
+| **Git** / **GitHub** | Branch / status / diff view + GitHub repo browsing |
+| **Diff** | Side-by-side diff viewer for the active change set |
 | **Context** | Live context window usage — real data from CLI `result` events, not estimates |
 | **Shortcuts** | Keyboard shortcut reference |
 
@@ -121,6 +124,19 @@ Claude writes a React component → click 👁 → it renders inline. No build s
 Real data from the CLI `result` event — not estimates:
 - Input / output / cache tokens, cost in USD, tool call count
 - Arc gauge showing % of context window used
+
+### 🌐 Embedded browser + split view
+A full Chromium browser panel running on **your real session** — your cookies, your logins, your extensions (via CDP attach, not a sandboxed throwaway).
+- Tabs, address bar, back/forward/reload, devtools
+- **Split view** — two panes side-by-side, drag the divider to resize, swap with one click. Claude can drive both panes in a single turn (research left, take notes right) via the ccm-browser MCP
+- OAuth-aware popup handling (Google / Microsoft / GitHub sign-in works) + fingerprint stealth so most Cloudflare challenges pass
+- "Open in system browser" escape hatch for sites that refuse to embed
+
+### 🗂️ CLI session tracker
+The sidebar surfaces your **Claude Code CLI sessions** (from `~/.claude/projects/`) alongside CCM's own chat sessions — one place to see both. Click a session to reveal its transcript; optionally **link** session storage into your project folder (`<project>/sessions/claude_session_cli/`) via a junction so CLI transcripts live with the code.
+
+### 🪟 Dual-window / multi-screen
+Spawn a second CCM window on another display — each window is an independent dockview workspace. Close the primary and the secondary is promoted automatically (no stranded window).
 
 ---
 
@@ -216,22 +232,33 @@ Other optional env vars:
 
 ## Roadmap
 
+- [x] **ccm-browser MCP** — 183-tool embedded-browser automation surface
+- [x] **Split-view** — Claude drives two browser panes in parallel
+- [x] **Multi-slot** — N parallel CCM instances, isolated browsers
+- [x] **CLI session tracker** — Claude Code CLI sessions in the sidebar
+- [x] Linux builds (AppImage + .deb)
 - [ ] Hooks editor — visual UI for every `CLAUDE.md` lifecycle hook
 - [ ] Skills marketplace — browse and install community skill packs
 - [ ] Session replay — step through a session's tool calls frame by frame
-- [ ] MCP server manager — install / configure MCP servers from the UI
-- [x] Linux builds (AppImage + .deb)
+- [ ] In-app MCP server manager — install / configure MCP servers from the UI
 - [ ] macOS builds
+- [ ] In-app JSONL viewer for CLI session transcripts
 
 ---
 
 ## Contributing
 
-PRs welcome. A few guidelines:
+PRs welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for dev setup, the three-layer IPC/MCP wiring rules, commit style, and the manual test plan.
 
+The short version:
 - Keep `app.js` and `style.css` as the single source of truth — no framework, no build pipeline for the renderer
-- Any new IPC channel needs a handler in `main.js` and an entry in `preload.js`
-- New skills go in `skills/` as plain markdown — they're loaded via `CLAUDE.md` automatically
+- Any new IPC channel needs a handler in `main.js` **and** an entry in `preload.js`
+- An ccm-browser MCP tool change touches three files: `electron/chrome-controller.js` (the function), `electron/browser-http-server.js` (the route), `bin/browser-mcp.mjs` (schema + dispatch)
+- New skills go in `skills/` as plain markdown — loaded via `CLAUDE.md` automatically
+
+## Security
+
+Found a vulnerability? See **[SECURITY.md](SECURITY.md)** — report privately via GitHub security advisory, don't open a public issue. That file also documents the security boundaries CCM actively maintains (bearer-token MCP auth, URL-scheme allowlist, browseable-target filter, etc.).
 
 ---
 
