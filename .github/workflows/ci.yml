@@ -14,7 +14,10 @@ jobs:
 
     strategy:
       matrix:
-        node: ['18', '20', '22']
+        # Node 18 dropped: Vite 8 requires Node 20.19+/22.12+ (uses the
+        # CustomEvent global, added in Node 19). Node 18 also hit EOL
+        # 2025-04-30.
+        node: ['20', '22']
       fail-fast: false
 
     steps:

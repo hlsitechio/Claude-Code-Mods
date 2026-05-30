@@ -17,7 +17,7 @@ npm run electron:dev
 ```
 
 Requirements:
-- Node.js 18+
+- Node.js 20+ (Vite 8 requires Node 20.19+/22.12+)
 - A working Claude Code CLI in your `PATH` (`claude --version` should respond)
 
 ## Code style — what to keep in mind

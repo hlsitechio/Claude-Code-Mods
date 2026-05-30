@@ -29,7 +29,7 @@
   "private": true,
   "main": "electron/main.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "start": "npm run electron:dev",

@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-active%20development-brightgreen)](https://github.com/hlsitechio/Claude-Code-Mods)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Electron](https://img.shields.io/badge/Electron-35-47848F?logo=electron&logoColor=white)](https://electronjs.org)
+[![Electron](https://img.shields.io/badge/Electron-42-47848F?logo=electron&logoColor=white)](https://electronjs.org)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-CLI%20wrapper-D97757?logo=anthropic&logoColor=white)](https://github.com/anthropics/claude-code)
 [![Topics](https://img.shields.io/badge/topics-claude--code%20%7C%20mcp%20%7C%20skills%20%7C%20hooks-5a67d8)](https://github.com/hlsitechio/Claude-Code-Mods/topics)
 
@@ -163,7 +163,7 @@ The CLI is never patched or intercepted — it runs as a child process with `--o
 ## Getting started
 
 ### Prerequisites
-- [Node.js](https://nodejs.org) 18+
+- [Node.js](https://nodejs.org) 20+ (Vite 8 requires Node 20.19+/22.12+)
 - [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated (`claude` in `PATH`)
 
 ### Install & run
@@ -184,7 +184,7 @@ npm run dist          # Auto-detect platform
 
 ### Linux notes
 
-Works on Ubuntu, Debian, Kali, Fedora, Arch — anywhere Electron 35 runs.
+Works on Ubuntu, Debian, Kali, Fedora, Arch — anywhere Electron 42 runs.
 
 The app auto-discovers the `claude` binary by checking common paths (`~/.npm-global/bin/claude`, `~/.local/bin/claude`, `/usr/local/bin/claude`). If your binary is elsewhere, set the env var:
 
@@ -203,12 +203,12 @@ Other optional env vars:
 
 | Layer | Tech |
 |-------|------|
-| Desktop | Electron 35 |
+| Desktop | Electron 42 |
 | Panels | dockview-core |
 | UI | Vanilla JS (ES modules) — no framework, no build pipeline for renderer |
 | Styles | Plain CSS with custom properties |
 | Icons | Phosphor Icons |
-| Build | Vite 5 |
+| Build | Vite 8 |
 | Packaging | electron-builder (NSIS installer + portable) |
 | JSX preview | Babel standalone + importmap + esm.sh |
 
