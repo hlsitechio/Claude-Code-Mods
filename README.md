@@ -12,6 +12,18 @@
 
 ---
 
+## Quick install — Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/hlsitechio/Claude-Code-Mods/main/setup.ps1 | iex
+```
+
+Scans for existing Claude installs (read-only — **never touches them**), asks where to put an **isolated** copy, then installs with a one-click launcher. Requires **Node 20+**, **git**, and the **Claude Code CLI**. → [full install details](#windows-installer--details) · [manual / other platforms](#manual-install-all-platforms)
+
+> ⚠️ **Beta** — expect rough edges. Bugs → [open an issue](https://github.com/hlsitechio/Claude-Code-Mods/issues) with repro steps.
+
+---
+
 ![Claude Code Mods — multi-panel workspace](assets/preview.png)
 
 ---
@@ -182,9 +194,9 @@ The CLI is never patched or intercepted — it runs as a child process with `--o
 - [Node.js](https://nodejs.org) 20+ (Vite 8 requires Node 20.19+/22.12+)
 - [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated (`claude` in `PATH`)
 
-### Quick install — Windows (PowerShell)
+### Windows installer — details
 
-One line. It scans for any existing Claude install (read-only — never touches them), asks where to put an **isolated** copy, gets your consent for the local data folder, then installs and drops a one-click launcher:
+The [one-liner](#quick-install--windows-powershell) at the top scans for any existing Claude install (read-only — never touches them), asks where to put an **isolated** copy, gets your consent for the local data folder, then installs and drops a one-click launcher:
 
 ```powershell
 irm https://raw.githubusercontent.com/hlsitechio/Claude-Code-Mods/main/setup.ps1 | iex
