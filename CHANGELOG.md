@@ -10,6 +10,8 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **"Restart CCM" in the system-tray menu** — sits between "Show Claude Code" and "Quit". Packaged builds use a clean `app.relaunch()`; in dev (where Electron runs under `concurrently -k`, which kills the Vite server on Electron exit) it spawns a fresh `npm run electron:dev` in a new terminal window so Vite + Electron both come back, then quits the current instance. Uses `cmd /c start "" cmd /k` on Windows (so `npm` resolves via `npm.cmd`, unaffected by PowerShell execution policy).
+
 - **One-line Windows installer (`setup.ps1`)** — `irm https://raw.githubusercontent.com/hlsitechio/Claude-Code-Mods/main/setup.ps1 | iex`. Scan-first, isolation-first:
   - BETA warning + GitHub-issues link shown up front and again at the end
   - Prerequisite check (Node 20+, git, Claude Code CLI — CLI is a soft warning)

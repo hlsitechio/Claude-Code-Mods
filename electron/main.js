@@ -213,6 +213,7 @@ function createTray(mainWin) {
 
     const menu = Menu.buildFromTemplate([
       { label: 'Show Claude Code', click: () => { mainWin.show(); mainWin.focus(); } },
+      { label: 'Restart CCM',      click: () => restartCCM() },
       { type: 'separator' },
       { label: 'Quit', click: () => { app.isQuiting = true; app.quit(); } },
     ]);
@@ -222,6 +223,40 @@ function createTray(mainWin) {
   } catch (e) {
     console.error('[tray]', e.message);
   }
+}
+
+// Restart the whole app. Behaviour differs by mode:
+//  - Packaged: standard Electron app.relaunch() — clean, in place.
+//  - Dev: Electron runs under `concurrently` (npm run electron:dev), whose
+//    -k flag kills the Vite dev server the instant Electron exits. A plain
+//    app.relaunch() would come back to a dead :5182. So we spawn a FRESH
+//    dev command in its own terminal window (you keep the logs), then quit
+//    this instance. The new process boots its own Vite + Electron.
+function restartCCM() {
+  console.log('[restart] restarting CCM (isDev=' + isDev + ')');
+  if (isDev) {
+    try {
+      const { spawn } = require('child_process');
+      if (process.platform === 'win32') {
+        // `start "" cmd /k ...` opens a new console that stays open (/k) so
+        // Vite + Electron output is visible. The empty "" is start's
+        // required title arg. npm resolves fine inside cmd.
+        spawn('cmd.exe', ['/c', 'start', '', 'cmd', '/k', 'npm run electron:dev'],
+          { cwd: APP_ROOT, detached: true, stdio: 'ignore' }).unref();
+      } else {
+        // macOS / Linux dev: relaunch the dev command detached in a shell.
+        spawn('npm', ['run', 'electron:dev'],
+          { cwd: APP_ROOT, detached: true, stdio: 'ignore', shell: true }).unref();
+      }
+    } catch (e) {
+      console.error('[restart] dev relaunch spawn failed, falling back to app.relaunch():', e.message);
+      app.relaunch();
+    }
+  } else {
+    app.relaunch();
+  }
+  app.isQuiting = true;  // so the window-close handler doesn't minimize-to-tray
+  app.quit();
 }
 
 /** Last-resort: generated orange circle, no external files needed */
