@@ -112,12 +112,9 @@ In rough priority order:
 
 ## Memory state
 
-Persisted to `~/.claude/projects/G--claude-code-mod-full-install/memory/`:
-- `user_profile.md` — Hubert, phone, email
-- `user_delivery_address.md` — [redacted]
-- `reference_google_messages_web.md` — paired, can read OTPs
-- `feedback_ordering_flow.md` — 10% tip, online pay, skip extras
-- `reference_favorite_food_sites.md` — Benny
+Per-user memory files live under `~/.claude/projects/<cwd>/memory/` (profile,
+preferences, references). These are personal and stay OUT of the repo — see
+`.gitignore` (`memory/`). [Personal details redacted from this note.]
 
 ## Bootstrap prompt for fresh chat
 

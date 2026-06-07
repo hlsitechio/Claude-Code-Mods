@@ -4159,12 +4159,18 @@ async function showNotesEditor() {
   // ── Simple MD → HTML renderer for the preview pane ──────────────────────
   function renderNotesMd(raw) {
     if (!raw) return '<p class="notes-preview__empty">Nothing to preview.</p>';
-    let html = raw
+    // SECURITY: escape FIRST so no raw HTML in the note survives into innerHTML.
+    // Notes can hold pasted/agent-written content; CSP blocks <script> exec but
+    // unescaped markup still allows content spoofing + remote <img> beacons.
+    // After this, the markdown regexes operate on escaped text (& < > stay
+    // literal for matching), and code blocks are already escaped — so the
+    // inner escapeHTML() calls are removed to avoid double-escaping.
+    let html = escapeHTML(raw)
       // Fenced code blocks
       .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-        `<pre class="notes-pre"><code>${escapeHTML(code.trim())}</code></pre>`)
+        `<pre class="notes-pre"><code>${code.trim()}</code></pre>`)
       // Inline code
-      .replace(/`([^`]+)`/g, (_, c) => `<code class="notes-inline-code">${escapeHTML(c)}</code>`)
+      .replace(/`([^`]+)`/g, (_, c) => `<code class="notes-inline-code">${c}</code>`)
       // Bold + italic
       .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
       .replace(/\*\*(.+?)\*\*/g,     '<strong>$1</strong>')
@@ -4662,7 +4668,7 @@ document.addEventListener('click', (e) => {
     const rawCode   = body?.innerText || code;
     const html      = buildPreviewSrcDoc(lang, rawCode);
     const needsNet  = ['jsx','tsx','react'].includes(lang);
-    const sandbox   = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+    const sandbox   = 'allow-scripts'  /* SECURITY: never allow-same-origin on srcdoc — it makes the preview same-origin with the app → window.parent.electronAPI reachable → RCE. esm.sh imports still work via CORS under the opaque origin. */;
     const title     = inferArtifactTitle(lang, rawCode) || null;
     // Normalise lang for storage
     const saveLang  = lang === 'javascript' ? 'js' : lang === 'react' ? 'jsx' : lang;
@@ -4743,7 +4749,7 @@ function togglePreviewInline(block, lang, code) {
     overlay = document.createElement('div');
     overlay.className = 'code-block__preview';
     const needsNetwork = ['jsx','tsx','react'].includes(lang);
-    const sandboxAttr  = needsNetwork ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+    const sandboxAttr  = 'allow-scripts';  /* SECURITY: no allow-same-origin (RCE via window.parent.electronAPI) */
     overlay.innerHTML = `<iframe sandbox="${sandboxAttr}" srcdoc="${buildPreviewSrcDoc(lang, code).replace(/"/g, '&quot;')}"></iframe>`;
     block.appendChild(overlay);
   }
@@ -4990,7 +4996,7 @@ function openCodePreview(lang, code) {
   document.getElementById('code-preview-lang').textContent = lang;
   const doc = buildPreviewSrcDoc(lang, code);
   const needsNet = ['jsx','tsx','react'].includes(lang);
-  const sb = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+  const sb = 'allow-scripts'  /* SECURITY: never allow-same-origin on srcdoc — it makes the preview same-origin with the app → window.parent.electronAPI reachable → RCE. esm.sh imports still work via CORS under the opaque origin. */;
   body.innerHTML = `<iframe sandbox="${sb}" srcdoc="${doc.replace(/"/g, '&quot;')}"></iframe>`;
   modal.classList.remove('hidden');
 }
@@ -5907,7 +5913,7 @@ function renderApercuPanel() {
   if (canRender) {
     const doc = buildPreviewSrcDoc(block.lang, block.code);
     const needsNet = ['jsx', 'tsx', 'react'].includes(block.lang);
-    const sb = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+    const sb = 'allow-scripts'  /* SECURITY: never allow-same-origin on srcdoc — it makes the preview same-origin with the app → window.parent.electronAPI reachable → RCE. esm.sh imports still work via CORS under the opaque origin. */;
     const toolbar = _apercuToolbar({
       langLabel,
       addressContent: `
@@ -7774,10 +7780,11 @@ async function initNotesPanel() {
   // ── shared MD renderer (same logic as overlay) ───────────────────────────
   function renderMd(raw) {
     if (!raw) return '<p class="notes-preview__empty">Nothing to preview.</p>';
-    let html = raw
+    // SECURITY: escape-first (see renderNotesMd) — no raw HTML into innerHTML.
+    let html = escapeHTML(raw)
       .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-        `<pre class="notes-pre"><code>${escapeHTML(code.trim())}</code></pre>`)
-      .replace(/`([^`]+)`/g, (_, c) => `<code class="notes-inline-code">${escapeHTML(c)}</code>`)
+        `<pre class="notes-pre"><code>${code.trim()}</code></pre>`)
+      .replace(/`([^`]+)`/g, (_, c) => `<code class="notes-inline-code">${c}</code>`)
       .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\*(.+?)\*/g, '<em>$1</em>')
@@ -12267,7 +12274,7 @@ let _streamInterval = setInterval(() => {
                              : detectedLang === 'react'      ? 'jsx'
                              : detectedLang;
           const needsNet  = ['jsx','tsx','react'].includes(normalLang);
-          const sandbox   = needsNet ? 'allow-scripts allow-same-origin' : 'allow-scripts';
+          const sandbox   = 'allow-scripts'  /* SECURITY: never allow-same-origin on srcdoc — it makes the preview same-origin with the app → window.parent.electronAPI reachable → RCE. esm.sh imports still work via CORS under the opaque origin. */;
           const title     = inferArtifactTitle(normalLang, rawSource) || null;
           const srcdoc    = buildPreviewSrcDoc(normalLang, rawSource);
           window.__cbEditingId = _autoPinCbId;  // tell pinArtifact to update not create

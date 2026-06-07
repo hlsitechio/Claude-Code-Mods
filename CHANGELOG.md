@@ -8,6 +8,19 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ## [Unreleased]
 
+### Security
+
+- **Full code security review (Phase 22)** — four-agent audit across Electron/IPC, MCP/HTTP/CDP, renderer XSS, and secrets/repo. The repo had no live credentials; findings fixed:
+  - **CRITICAL — JSX preview RCE.** Code-preview `srcdoc` iframes used `sandbox="allow-scripts allow-same-origin"`. On a srcdoc iframe `allow-same-origin` = same origin as the app, so Claude-authored preview code could call `window.parent.electronAPI.terminal.create()` → arbitrary shell exec — and one path auto-pinned a preview with no user click. Removed `allow-same-origin` from all 5 srcdoc preview sites (esm.sh imports still work via wildcard CORS under the opaque origin). External-URL preview iframes keep it (they carry the remote origin, not the app's).
+  - **HIGH — `chrome_frame_attach` could attach to the app renderer.** It looked up targets with no browseable filter, so a prompt-injected targetId (the CCM UI) → `chrome_frame_eval` = JS in the privileged renderer. Now refuses anything that isn't `type:'iframe'` with a browseable URL.
+  - **HIGH — `chrome_cdp_raw` escalation paths.** `Page.navigate{url}` bypassed the scheme allowlist; `Target.attachToTarget` could session-attach to any target. Now routes `Page.navigate` URLs through `_safeNavUrl` and blocks `Target.attachToTarget`/`attachToBrowserTarget`.
+  - **MEDIUM — plaintext secret fallback.** GH PAT + Anthropic API key fell back to writing cleartext (base64) when OS `safeStorage` was unavailable. Now refuses to persist rather than storing plaintext; PAT written `0600`.
+  - **MEDIUM — app-window navigation guard.** Added `will-navigate`/`will-redirect` guards pinning the privileged app window to its origin (blocks injection-driven navigation of the electronAPI-bearing frame; http(s) handed to the real browser). Both app windows now `sandbox: true`; `webSecurity` force-enabled when `app.isPackaged` (CCM_DEV_INSECURE is dev-only).
+  - **MEDIUM — renderer markdown XSS (CSP-mitigated).** `renderNotesMd`/`renderMd` now escape-first, so pasted/agent-written note content can't inject markup.
+  - **LOW — `_safeNavUrl`** extended with `blob:`/`filesystem:`/`intent:`/`ms-appx:`/`res:`; **memory:* IPC** ids validated against `^[\w.-]+\.md$`; **REG_BINARY** dropped from the `chrome_policy_set` schema (the editor never accepted it).
+  - **PII + repo hygiene.** Scrubbed a personal address/phone/email from a tracked session note (HEAD). `.gitignore` now covers `data/` (the isolated browser profile — was one `git add .` from publishing cookies/sessions), `Chats/`, `projects/`, `knowledge/`, `mcp/`, `*.enc`, `ccm-browser-endpoint*.json`.
+  - Confirmed solid (no change): bearer-token MCP auth (constant-time, 0600), `_pageById` browseable filter, `_safeNavUrl` whitespace-strip, `_assertSafePath` proto-pollution block, policy-name regex, companion-ext permissions diet, `git:action` flag denylist, `fs:*` realpath confinement, CSP, no `eval`/`webview`, no postMessage origin gaps, no secrets in tree or (current) build output, CI not fork-exploitable.
+
 ### Added
 
 - **"Restart CCM" in the system-tray menu** — sits between "Show Claude Code" and "Quit". Packaged builds use a clean `app.relaunch()`; in dev (where Electron runs under `concurrently -k`, which kills the Vite server on Electron exit) it spawns a fresh `npm run electron:dev` in a new terminal window so Vite + Electron both come back, then quits the current instance. Uses `cmd /c start "" cmd /k` on Windows (so `npm` resolves via `npm.cmd`, unaffected by PowerShell execution policy).

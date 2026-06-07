@@ -1355,7 +1355,7 @@ const TOOLS = [
   { name: 'chrome_policy_list', description: 'Enumerate Chrome group policies set under HKCU\\Software\\Policies\\Google\\Chrome (Windows-only). Read-only.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'chrome_policy_set', description: 'Set a Chrome group policy in HKCU (Windows-only). Examples: HomepageLocation, DefaultSearchProviderEnabled, RestoreOnStartup. Restart required.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string' }, value: {}, type: { type: 'string', enum: ['REG_SZ', 'REG_DWORD', 'REG_MULTI_SZ', 'REG_BINARY'] } }, required: ['name', 'value'], additionalProperties: false } },
+    inputSchema: { type: 'object', properties: { name: { type: 'string' }, value: {}, type: { type: 'string', enum: ['REG_SZ', 'REG_DWORD', 'REG_MULTI_SZ'] } }, required: ['name', 'value'], additionalProperties: false } },
   { name: 'chrome_policy_delete', description: 'Delete a Chrome group policy from HKCU (Windows-only).',
     inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'], additionalProperties: false } },
 ];

@@ -259,6 +259,42 @@ function restartCCM() {
   app.quit();
 }
 
+// SECURITY — pin a CCM app window to its own document. Without this, any
+// renderer-side injection that sets window.location / a <meta refresh> /
+// clicks a crafted link could navigate the PRIVILEGED app frame (the one
+// with the electronAPI bridge → fs/shell/terminal) to a remote origin,
+// turning content injection into full RCE. We allow only same-document
+// (hash) nav and the app's own origin (localhost:51xx in dev, file:// in
+// prod); everything else is blocked and, if it's http(s), opened in the
+// user's real browser instead. The embedded Browser panel uses its own
+// WebContentsViews and is NOT affected by this (different webContents).
+function _installNavGuard(win) {
+  if (!win || win.isDestroyed?.()) return;
+  const wc = win.webContents;
+  const isAppUrl = (url) => {
+    try {
+      const u = new URL(url);
+      if (u.protocol === 'file:') return true;                 // packaged
+      if ((u.protocol === 'http:' || u.protocol === 'https:')
+          && (u.hostname === 'localhost' || u.hostname === '127.0.0.1')) return true; // dev (Vite)
+      return false;
+    } catch (_) { return false; }
+  };
+  const guard = (e, url) => {
+    if (isAppUrl(url)) return;          // same app origin — allow
+    e.preventDefault();
+    console.warn('[nav-guard] blocked app-frame navigation to', url);
+    try {
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:') {
+        require('electron').shell.openExternal(url);  // hand off to real browser
+      }
+    } catch (_) {}
+  };
+  wc.on('will-navigate', guard);
+  wc.on('will-redirect', guard);
+}
+
 /** Last-resort: generated orange circle, no external files needed */
 function makeFallbackIcon() {
   const zlib = require('zlib');
@@ -338,15 +374,17 @@ function createWindow() {
       preload:          path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration:  false,
+      sandbox:          true,    // defense-in-depth: a renderer RCE lands sandboxed
       spellcheck:       false,
-      // webSecurity is ALWAYS on. Vite HMR works fine with it enabled.
-      // Set CCM_DEV_INSECURE=1 only if you're debugging a cross-origin issue.
-      webSecurity:      process.env.CCM_DEV_INSECURE !== '1',
+      // webSecurity is ALWAYS on in packaged builds. The CCM_DEV_INSECURE
+      // escape hatch is dev-only — never honour it once packaged.
+      webSecurity:      app.isPackaged ? true : (process.env.CCM_DEV_INSECURE !== '1'),
     },
     autoHideMenuBar: true,
   });
 
   mainWin = win;
+  _installNavGuard(win);
 
   // ── Filesystem watcher — notifies renderer when files change under FS_ROOT ──
   let _fsWatcher = null;
@@ -2552,10 +2590,20 @@ ipcMain.handle('memory:list', () => {
 });
 
 // Read a single memory file by filename (e.g. "user.md")
+// SECURITY — memory ids must be a single plain filename (no path parts, no
+// traversal, .md only). path.basename already strips dir components, but a
+// strict allowlist regex makes intent explicit and rejects odd names early.
+function _safeMemId(id) {
+  if (typeof id !== 'string' || !/^[\w.-]+\.md$/.test(id) || id.includes('..')) {
+    throw new Error('invalid memory id (expected a single *.md filename)');
+  }
+  return id;
+}
+
 ipcMain.handle('memory:read', async (_, id) => {
   memEnsureRoot();
-  const filePath = path.join(MEMORY_ROOT, path.basename(id));
   try {
+    const filePath = path.join(MEMORY_ROOT, _safeMemId(id));
     const content = fs.readFileSync(filePath, 'utf8');
     return { ok: true, content };
   } catch (e) { return { ok: false, error: e.message }; }
@@ -2564,8 +2612,8 @@ ipcMain.handle('memory:read', async (_, id) => {
 // Write / overwrite a memory file
 ipcMain.handle('memory:write', async (_, { id, content }) => {
   memEnsureRoot();
-  const filePath = path.join(MEMORY_ROOT, path.basename(id));
   try {
+    const filePath = path.join(MEMORY_ROOT, _safeMemId(id));
     fs.writeFileSync(filePath, content, 'utf8');
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
@@ -2573,9 +2621,10 @@ ipcMain.handle('memory:write', async (_, { id, content }) => {
 
 // Delete a memory file
 ipcMain.handle('memory:delete', async (_, id) => {
-  const filePath = path.join(MEMORY_ROOT, path.basename(id));
-  try { fs.unlinkSync(filePath); return { ok: true }; }
-  catch (e) { return { ok: false, error: e.message }; }
+  try {
+    const filePath = path.join(MEMORY_ROOT, _safeMemId(id));
+    fs.unlinkSync(filePath); return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 // Load ALL memory files concatenated — used for system-prompt injection
@@ -2848,13 +2897,21 @@ ipcMain.handle('github:token-get', () => _ghReadToken());
 ipcMain.handle('github:token-set', (_, tok) => {
   try {
     if (typeof tok !== 'string' || !tok.length) return { ok: false, error: 'Empty token' };
+    // SECURITY — never persist the PAT in plaintext. The old code fell back to
+    // writing cleartext to gh-pat.enc when OS encryption was unavailable
+    // (keyring-less Linux), which is a misleading filename AND a secret on
+    // disk in the clear. Refuse instead — the caller surfaces the message and
+    // the token simply isn't stored (the user re-enters per session).
     if (!safeStorage.isEncryptionAvailable()) {
-      // Encryption unavailable — write plaintext (Linux without keyring, etc.)
-      fs.writeFileSync(GH_PAT_FILE, tok, 'utf8');
-      return { ok: true, encrypted: false };
+      return {
+        ok: false,
+        error: 'OS secure storage is unavailable (no keyring/Keychain/DPAPI). ' +
+               'Refusing to store the GitHub token in plaintext. Install a system ' +
+               'keyring (e.g. gnome-keyring) or use it per-session without saving.',
+      };
     }
     const enc = safeStorage.encryptString(tok);
-    fs.writeFileSync(GH_PAT_FILE, enc);
+    fs.writeFileSync(GH_PAT_FILE, enc, { mode: 0o600 });
     return { ok: true, encrypted: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -3464,11 +3521,13 @@ ipcMain.handle('window:spawn-secondary', async (event) => {
       preload:          path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration:  false,
+      sandbox:          true,
       spellcheck:       false,
-      webSecurity:      process.env.CCM_DEV_INSECURE !== '1',
+      webSecurity:      app.isPackaged ? true : (process.env.CCM_DEV_INSECURE !== '1'),
     },
     show: false,
   });
+  _installNavGuard(_secondWin);
 
   const prodUrl = `file://${path.join(__dirname, '../dist/index.html')}`;
   if (isDev) {

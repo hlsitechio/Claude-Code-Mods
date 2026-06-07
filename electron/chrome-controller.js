@@ -101,6 +101,7 @@ const _SAFE_URL_SCHEMES = new Set(['http:', 'https:', 'about:']);
 const _DANGEROUS_URL_PREFIXES = [
   'javascript:', 'data:', 'file:', 'vbscript:', 'ms-msdt:',
   'mhtml:', 'view-source:', 'chrome-extension:',
+  'blob:', 'filesystem:', 'intent:', 'ms-appx:', 'res:',
 ];
 function _safeNavUrl(url) {
   if (typeof url !== 'string' || !url.trim()) {
@@ -1494,6 +1495,24 @@ async function cdpRaw({ method, params = {}, sessionId } = {}) {
   if (params && typeof params === 'object' && typeof params.targetId === 'string') {
     await _pageById(params.targetId); // throws if non-browseable
   }
+  // SECURITY — cdpRaw is a power-tool, but two CDP methods are escalation
+  // primitives that bypass the targetId filter, so we guard them even here:
+  //   1. Page.navigate{url} — sidesteps _safeNavUrl. Route its url through
+  //      the same allowlist so javascript:/file:/data: can't navigate a page.
+  //   2. Target.attachToTarget / attachToBrowserTarget — lets the caller
+  //      attach a session to ANY target (incl. the CCM renderer) and then
+  //      Runtime.evaluate on it. Block outright; legit frame work goes
+  //      through chrome_frame_attach (which is iframe-gated).
+  const _m = String(method);
+  if (_m === 'Page.navigate' && params && typeof params.url === 'string') {
+    params = { ...params, url: _safeNavUrl(params.url) }; // throws on bad scheme
+  }
+  if (_m === 'Target.attachToTarget' || _m === 'Target.attachToBrowserTarget') {
+    throw new Error(
+      `Refused: cdp_raw ${_m} is blocked (privilege-escalation primitive). ` +
+      `Use chrome_frame_attach for cross-origin iframes — it's browseable-gated.`
+    );
+  }
   // If caller passes a sessionId from chrome_frame_attach, route the call
   // into that frame's CDPSession instead of opening a fresh top-page one.
   if (sessionId) {
@@ -1550,6 +1569,23 @@ async function frameAttach({ targetId } = {}) {
   const browser = await _ensureBrowser();
   const target = browser.targets().find(t => t._targetId === targetId);
   if (!target) throw new Error(`no target with id ${targetId} (call chrome_frame_list to refresh)`);
+  // SECURITY — frameAttach is for OOPIF sub-frames ONLY. Without this gate a
+  // prompt-injected result could pass the CCM main-renderer's targetId (type
+  // 'page') here, get a CDP session on it, and frameEval arbitrary JS in the
+  // privileged Electron renderer with full electronAPI/IPC access — the exact
+  // escalation _pageById blocks on the page tools. Frames are type 'iframe';
+  // top-level pages (CCM UI, browser tabs) are 'page' and are refused. Also
+  // reject non-browseable iframe URLs as belt-and-suspenders.
+  if (target.type() !== 'iframe') {
+    throw new Error(
+      `Refused: target ${targetId} is type '${target.type()}', not 'iframe'. ` +
+      `frameAttach only attaches to cross-origin sub-frames. For a top-level ` +
+      `page use chrome_runtime_eval with targetId instead.`
+    );
+  }
+  if (!_isBrowserableUrl(target.url())) {
+    throw new Error(`Refused: iframe ${targetId} URL is not browseable (${target.url()}).`);
+  }
   const sess = await target.createCDPSession();
   // Stash the puppeteer Target on the session so frameList can mark "attached".
   try { sess._target = target; } catch (_) {}

@@ -44,17 +44,27 @@ function getRawApiKey() {
   const cfg = readConfig();
   if (!cfg.encryptedKey) return null;
   try {
+    // Only decrypt — we never store plaintext anymore (see setRawApiKey).
+    // If OS encryption isn't available, an existing blob can't be trusted as
+    // ciphertext, so return null rather than leaking a base64'd plaintext.
+    if (!safeStorage.isEncryptionAvailable()) return null;
     const buf = Buffer.from(cfg.encryptedKey, 'base64');
-    return safeStorage.isEncryptionAvailable()
-      ? safeStorage.decryptString(buf)
-      : buf.toString('utf8');
+    return safeStorage.decryptString(buf);
   } catch { return null; }
 }
 function setRawApiKey(key) {
+  // SECURITY — never persist the API key in plaintext. The old fallback
+  // base64'd the raw key when safeStorage was unavailable (keyring-less
+  // Linux) — base64 is not encryption. Refuse instead; the key stays
+  // in-memory for the session only.
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error(
+      'OS secure storage unavailable (no keyring/Keychain/DPAPI) — refusing to ' +
+      'store the API key in plaintext. Use OAuth sign-in, or run with a system keyring.'
+    );
+  }
   const cfg = readConfig();
-  cfg.encryptedKey = safeStorage.isEncryptionAvailable()
-    ? safeStorage.encryptString(key).toString('base64')
-    : Buffer.from(key, 'utf8').toString('base64');
+  cfg.encryptedKey = safeStorage.encryptString(key).toString('base64');
   writeConfig(cfg);
 }
 function clearRawApiKey() {
