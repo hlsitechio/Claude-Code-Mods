@@ -976,7 +976,10 @@
     try {
       if (localStorage.getItem('ccmod.spawnTeamOnLoad') === '1') {
         localStorage.removeItem('ccmod.spawnTeamOnLoad');
-        setTimeout(() => { try { window.electronAPI?.team?.spawn?.(); } catch (_) {} }, 700);
+        setTimeout(() => {
+          const r = window.electronAPI?.team?.spawn?.();
+          if (r && r.catch) r.catch(() => { try { window.showToast?.('Restart CCM to finish loading the agent team — the main process is running an older build.', 'error', 6000); } catch (_) {} });
+        }, 700);
       }
     } catch (_) {}
 

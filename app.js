@@ -13033,7 +13033,8 @@ let _streamInterval = setInterval(() => {
     const existing = list.find(w => w.name === WS_NAME);
     try {
       if (existing && existing.id === aid) {
-        window.electronAPI?.team?.spawn?.();          // already here → spawn now
+        const r = window.electronAPI?.team?.spawn?.();   // already here → spawn now
+        if (r && r.catch) r.catch(() => window.showToast?.('Restart CCM (tray → Restart CCM) to enable team spawn — the main process is running an older build.', 'error', 6000));
         return;
       }
       localStorage.setItem('ccmod.spawnTeamOnLoad', '1'); // fire after reload
