@@ -430,6 +430,34 @@ body:not([data-win-role="secondary"]) #secondary-sidebar-strip {
 .ws-ctx-item--danger { color: #e06c75; }
 .ws-ctx-item--danger:hover { background: #2a1a1c; color: #ff7b7b; }
 
+/* Workspace selector dropdown (the "+" menu) */
+.ws-add-menu { min-width: 200px; max-height: 60vh; overflow-y: auto; }
+.ws-ctx-head {
+  padding: 5px 10px 5px;
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: #6a6a74;
+  font-weight: 600;
+}
+.ws-ctx-sep { height: 1px; background: #2a2a32; margin: 4px 2px; }
+.ws-ctx-row { display: flex; align-items: center; gap: 8px; }
+.ws-ctx-dot { width: 7px; height: 7px; border-radius: 50%; background: #d97757; flex: none; }
+.ws-ctx-item--active { color: #e7e7ea; background: #1e1e24; }
+.ws-ctx-item--add { color: #8fb89a; font-weight: 500; }
+.ws-ctx-item--add:hover { background: #1d2a20; color: #a9d6b4; }
+
+/* Built-in (director.js-sourced) agent pill in the settings list */
+.agent-card__builtin {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #1f2330;
+  color: #8aa0c8;
+  border: 1px solid #2c3346;
+  letter-spacing: .02em;
+}
+
 /* Font toggle — 'system' overrides the Tailwind default */
 html[data-font="system"], html[data-font="system"] body { font-family: ui-sans-serif, system-ui, sans-serif !important; }
 

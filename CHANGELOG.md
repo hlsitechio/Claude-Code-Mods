@@ -10,6 +10,10 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **Workspace selector dropdown + team agents in Settings (Phase 26c)**
+  - **"+" is now a workspace selector**: clicking it opens a dropdown listing **every saved workspace** (click to switch, the active one highlighted) with a **"＋ New workspace"** action at the bottom — instead of silently creating one. Newly created workspaces appear in the list. The per-tab right-click menu also gains **Open** (alongside Rename / Delete), and its outside-click close is now containment-checked (clicking inside the menu no longer dismisses it).
+  - **Built-in team agents show in Settings → AI Agents** (after the agents sync on load), each tagged with a **"Built-in"** pill and grouped under type **"DevOps Team"**. Built-ins have no edit/delete (they're sourced from `director.js` and always available) — duplicate one to customise. They also appear in the chat agent dropdown (Phase 26b), so the 11 roles + Director are selectable everywhere agents are.
+
 - **Team roles in the agents dropdown (Phase 26b)** — the 11 specialists + Director now appear in the AI-agents menu too, not only via `team_spawn`, so you can launch any single role on its own. They're injected into `agents:load-all` straight from `director.js` (single source — no duplicate JSON files to drift), grouped under type **"DevOps Team"**, and marked `builtin` so `agents:save` never snapshots them to disk (always fresh). A disk/user agent of the same name **wins** (your custom "Code Reviewer" isn't overwritten or duplicated). Every team agent carries the **`ccm-browser`** MCP (plus its specialty MCP, e.g. Media→`ideogram`) so it can call `kanban_move` / `director_*` even when launched solo. Verified with a 10-assertion merge test.
 
 - **One-click team spawn — "a workspace ready to go" (Phase 26)** — stand up the whole agent team in one action: a Director terminal + one role-injected Claude terminal per agent (11) + the shared task board, all in the workspace. **+1 MCP tool → 196 total.**

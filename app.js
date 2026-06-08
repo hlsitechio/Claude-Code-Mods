@@ -2914,8 +2914,10 @@ function showConsole(initialPage = 'overview') {
                 <span class="agent-card__type">${escapeHTML(a.type)}</span>
                 <span class="ac-perm ${permClass[perm]||'ac-perm--bypass'}">${escapeHTML(permLabels[perm]||'Full auto')}</span>
                 <div style="flex:1"></div>
-                <button class="agent-card__edit" data-agent-edit="${i}">${iconSVG('pencil-simple')}</button>
-                <button class="agent-card__del" data-agent-del="${i}">${iconSVG('trash')}</button>
+                ${a.builtin
+                  ? `<span class="agent-card__builtin" title="Part of the built-in agent team — defined in the app, always available. Duplicate it to customise.">Built-in</span>`
+                  : `<button class="agent-card__edit" data-agent-edit="${i}">${iconSVG('pencil-simple')}</button>
+                <button class="agent-card__del" data-agent-del="${i}">${iconSVG('trash')}</button>`}
               </div>
               <div class="agent-card__body">
                 ${a.model  ? `<div class="agent-card__row"><span class="agent-card__key">Model</span><span class="agent-card__val">${escapeHTML(a.model)}</span></div>` : ''}
@@ -12966,8 +12968,14 @@ let _streamInterval = setInterval(() => {
 
   let _wsCtxMenu = null;
 
+  // Close on any click outside the open menu (containment-checked so clicks on
+  // menu items still fire their handlers).
+  function _docClose(ev) {
+    if (_wsCtxMenu && !_wsCtxMenu.contains(ev.target)) _closeCtxMenu();
+  }
   function _closeCtxMenu() {
     if (_wsCtxMenu) { _wsCtxMenu.remove(); _wsCtxMenu = null; }
+    document.removeEventListener('mousedown', _docClose);
   }
 
   function _showCtxMenu(e, ws) {
@@ -12975,6 +12983,15 @@ let _streamInterval = setInterval(() => {
     const menu = document.createElement('div');
     menu.className = 'ws-ctx-menu';
     _wsCtxMenu = menu;
+
+    const aid0 = window.Workspace?.wsGetActiveId() || '';
+    if (ws.id !== aid0) {
+      const open = document.createElement('button');
+      open.className = 'ws-ctx-item';
+      open.textContent = 'Open';
+      open.onclick = () => { _closeCtxMenu(); window.Workspace?.wsSwitch(ws.id); };
+      menu.appendChild(open);
+    }
 
     const rename = document.createElement('button');
     rename.className = 'ws-ctx-item';
@@ -13002,7 +13019,67 @@ let _streamInterval = setInterval(() => {
     menu.style.left = x + 'px';
     menu.style.top  = y + 'px';
 
-    setTimeout(() => document.addEventListener('mousedown', _closeCtxMenu, { once: true }), 0);
+    setTimeout(() => document.addEventListener('mousedown', _docClose), 0);
+  }
+
+  // The "+" workspace selector: lists every saved workspace (click to switch,
+  // active one highlighted) + a "New workspace" action at the bottom.
+  function _showAddMenu(e) {
+    _closeCtxMenu();
+    const menu = document.createElement('div');
+    menu.className = 'ws-ctx-menu ws-add-menu';
+    _wsCtxMenu = menu;
+
+    const list = window.Workspace?.wsGetList() || [];
+    const aid  = window.Workspace?.wsGetActiveId() || '';
+
+    const head = document.createElement('div');
+    head.className = 'ws-ctx-head';
+    head.textContent = 'Workspaces';
+    menu.appendChild(head);
+
+    for (const w of list) {
+      const item = document.createElement('button');
+      const active = w.id === aid;
+      item.className = 'ws-ctx-item ws-ctx-row' + (active ? ' ws-ctx-item--active' : '');
+      const dot = document.createElement('span');
+      dot.className = 'ws-ctx-dot';
+      if (!active) dot.style.opacity = '.18';
+      const label = document.createElement('span');
+      label.textContent = w.name;
+      item.appendChild(dot);
+      item.appendChild(label);
+      item.onclick = () => { _closeCtxMenu(); if (!active) window.Workspace?.wsSwitch(w.id); };
+      menu.appendChild(item);
+    }
+
+    const sep = document.createElement('div');
+    sep.className = 'ws-ctx-sep';
+    menu.appendChild(sep);
+
+    const add = document.createElement('button');
+    add.className = 'ws-ctx-item ws-ctx-item--add';
+    add.textContent = '＋  New workspace';
+    add.onclick = () => {
+      _closeCtxMenu();
+      const name = `Workspace ${(window.Workspace?.wsGetList().length || 0) + 1}`;
+      window.Workspace?.wsCreate(name);
+    };
+    menu.appendChild(add);
+
+    document.body.appendChild(menu);
+
+    // Anchor below the "+" button; flip up / clamp to viewport.
+    const r = (e.currentTarget || e.target).getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const mw = 210, mh = Math.min(vh * 0.6, 44 + list.length * 30 + 50);
+    let x = r.left, y = r.bottom + 6;
+    if (x + mw > vw) x = vw - mw - 8;
+    if (y + mh > vh) y = Math.max(8, r.top - mh - 6);
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+
+    setTimeout(() => document.addEventListener('mousedown', _docClose), 0);
   }
 
   function _startRename(id) {
@@ -13058,11 +13135,8 @@ let _streamInterval = setInterval(() => {
     const addBtn = document.createElement('button');
     addBtn.className   = 'ws-add';
     addBtn.textContent = '+';
-    addBtn.title       = 'New workspace';
-    addBtn.addEventListener('click', () => {
-      const name = `Workspace ${(window.Workspace?.wsGetList().length || 0) + 1}`;
-      window.Workspace?.wsCreate(name);
-    });
+    addBtn.title       = 'Workspaces — switch or create';
+    addBtn.addEventListener('click', e => { e.stopPropagation(); _showAddMenu(e); });
     container.appendChild(addBtn);
   }
 
