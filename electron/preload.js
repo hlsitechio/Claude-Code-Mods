@@ -344,6 +344,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // ── Agent team (Phase 26) ───────────────────────────────────────────────────
+  // Main sends `team:spawn` with the role payload; the renderer lays out the
+  // Director + agent terminals.
+  team: {
+    onSpawn: (cb) => {
+      const handler = (_, payload) => cb(payload);
+      ipcRenderer.on('team:spawn', handler);
+      return () => ipcRenderer.removeListener('team:spawn', handler);
+    },
+  },
+
   // ── Git integration ───────────────────────────────────────────────────────
   git: {
     status:   (cwd)                    => ipcRenderer.invoke('git:status',    cwd),

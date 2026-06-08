@@ -65,6 +65,61 @@ const STATUS = Object.freeze({
   TODO: 'todo', DOING: 'doing', REVIEW: 'review', DONE: 'done', BLOCKED: 'blocked',
 });
 
+// ── Role system prompts (injected per agent terminal via --append-system-prompt) ──
+// Kept single-line and free of shell-hostile chars ($ " ` \) so they survive
+// being typed into PowerShell (Windows) or bash without quoting surprises.
+const ROLE_SPECIALTY = {
+  director:   'You are the DIRECTOR of a Claude agent team. Decompose the goal into role-tagged tasks with the director_plan tool, dispatch ready work with director_next, review submissions with director_review, and finalize each with director_approve or director_reject. You ALONE move tasks to Done. Coordinate and unblock the team; do not write product code yourself.',
+  researcher: 'You are the RESEARCHER. Gather facts from the live web using the ccm browser tools (browser_navigate, browser_read_page, chrome_*). Summarize findings with concrete sources and links.',
+  architect:  'You are the ARCHITECT. Turn requirements into a clear technical design: components, interfaces, data flow, and a file-level plan the developers can follow.',
+  backend:    'You are the BACKEND developer. Implement server-side logic, APIs, and data access cleanly, with error handling and tests where it matters.',
+  frontend:   'You are the FRONTEND developer. Build the UI and client logic with accessible, modern, responsive components.',
+  data:       'You are the DATA engineer. Design schemas, migrations, and queries. Put data integrity and clear models first.',
+  qa:         'You are the QA engineer. Write and run tests, hunt edge cases, and report defects with exact reproduction steps.',
+  security:   'You are the SECURITY auditor. Review for vulnerabilities and unsafe patterns; propose concrete, minimal fixes.',
+  reviewer:   'You are the CODE REVIEWER. Check correctness, readability, and maintainability; give specific line-level feedback.',
+  media:      'You are the MEDIA creator. Generate images and brand assets with the ideogram tools to match the brief; iterate on prompt and style.',
+  devops:     'You are the DEVOPS engineer. Handle builds, CI, packaging, and deployment configuration; keep the pipeline green.',
+  docs:       'You are the TECH WRITER. Produce clear README, changelog, and usage docs that match what was actually built.',
+};
+
+// The shared kanban-bus + director-gated protocol every NON-director agent gets.
+const TEAM_PROTOCOL =
+  'You work as ONE agent on a Claude team coordinated by a Director through a shared task board. ' +
+  'Act ONLY on board cards whose assignee is your role. For each of your tasks: first call the ccm MCP tool kanban_move to set its col to doing (In progress); ' +
+  'do the work; then call kanban_move to set its col to review (Needs review) and STOP. ' +
+  'Never set your own task to done — the Director reviews and finalizes. If blocked, leave it in doing and explain why. Keep edits scoped to the task.';
+
+/** Full system prompt for a role: specialty + (for agents) the team protocol. */
+function roleSystemPrompt(role) {
+  const spec = ROLE_SPECIALTY[role] || ('You are the ' + role + '.');
+  return role === 'director' ? spec : spec + ' ' + TEAM_PROTOCOL;
+}
+
+/**
+ * Payload the main process ships to the renderer to spawn a team workspace.
+ * The renderer can't require() this module, so everything it needs (names,
+ * colours, MCP grants, and the assembled system prompts) is bundled here.
+ */
+function teamSpawnPayload(team = TEAM_DEVOPS) {
+  return {
+    team: team.name,
+    director: {
+      role: 'director',
+      name: team.director.name,
+      system: roleSystemPrompt('director'),
+    },
+    agents: team.agents.map(a => ({
+      role:   a.role,
+      name:   a.name,
+      color:  a.color,
+      mcp:    a.mcp || [],
+      skills: a.skills || [],
+      system: roleSystemPrompt(a.role),
+    })),
+  };
+}
+
 // Status values that map 1:1 to a kanban column (BLOCKED is internal-only).
 const BOARD_STATUSES = ['todo', 'doing', 'review', 'done'];
 
@@ -335,4 +390,5 @@ class Director {
 module.exports = {
   Director, TEAM_DEVOPS, STATUS, BOARD_STATUSES,
   toKanbanTask, fromKanbanTask,
+  ROLE_SPECIALTY, TEAM_PROTOCOL, roleSystemPrompt, teamSpawnPayload,
 };

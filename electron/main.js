@@ -213,6 +213,7 @@ function createTray(mainWin) {
 
     const menu = Menu.buildFromTemplate([
       { label: 'Show Claude Code', click: () => { mainWin.show(); mainWin.focus(); } },
+      { label: 'Spawn Agent Team', click: () => { try { global.ccmTeam?.teamSpawn(); mainWin.show(); mainWin.focus(); } catch (e) { console.error('[team]', e.message); } } },
       { label: 'Restart CCM',      click: () => restartCCM() },
       { type: 'separator' },
       { label: 'Quit', click: () => { app.isQuiting = true; app.quit(); } },
@@ -950,7 +951,17 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
 // whatever the agents (and the user dragging cards) have done.
 // ═══════════════════════════════════════════════════════════════════════════
 {
-  const { Director, TEAM_DEVOPS } = require('./director.js');
+  const { Director, TEAM_DEVOPS, teamSpawnPayload } = require('./director.js');
+
+  // Send the spawn command to the primary renderer window (the renderer owns
+  // dockview + the terminals). Returns false if no window is available yet.
+  const _spawnTeamInRenderer = (payload) => {
+    const wins = BrowserWindow.getAllWindows().filter(w => !w.isDestroyed());
+    const win = wins.find(w => w.isVisible()) || wins[0];
+    if (!win) return false;
+    win.webContents.send('team:spawn', payload);
+    return true;
+  };
 
   // Apply a Director's task statuses back onto the live board (match by id;
   // status → col, assignee/deps preserved). Adds tasks the board doesn't have.
@@ -985,6 +996,18 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
   };
 
   global.ccmTeam = {
+    // ── Spawn a ready-to-go team workspace ─────────────────────────────────────
+    // Builds the role payload (names + colours + assembled system prompts) and
+    // asks the renderer to lay out the Director + 11 agent terminals + the task
+    // board. The terminals are spawned in the renderer (it owns dockview/xterm).
+    teamSpawn() {
+      const payload = teamSpawnPayload(TEAM_DEVOPS);
+      const sent = _spawnTeamInRenderer(payload);
+      return sent
+        ? { ok: true, spawning: true, team: payload.team, agents: payload.agents.length }
+        : { ok: false, error: 'No app window available to spawn into' };
+    },
+
     // ── Team roster ──────────────────────────────────────────────────────────
     teamList() {
       return {

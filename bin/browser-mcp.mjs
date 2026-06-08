@@ -1366,6 +1366,8 @@ const TOOLS = [
   // architect, backend, frontend, data, qa, security, reviewer, media, devops, docs.
   { name: 'team_list', description: 'List the agent-team roster: the 11 specialist roles (researcher, architect, backend, frontend, data, qa, security, reviewer, media, devops, docs) + Director, with each role\'s skills, MCP servers, and colour. Call this first to learn the valid `assignee` values for director_plan.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'team_spawn', description: 'Spawn a ready-to-go team workspace in the CCM app: opens the shared task board plus a Director terminal and one role-injected Claude terminal per agent (each launched with its role system prompt). Use this to stand up the whole team in one call, then drive it with director_plan / director_next. Returns immediately while terminals spin up (staggered).',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'kanban_read', description: 'Read the shared task board (kanban) — columns (To do / In progress / Needs review / Done) and all tasks with id, col, title, body, tags, priority, assignee (agent role), deps (prerequisite task ids). This is the team\'s coordination bus.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'kanban_add', description: 'Add one task to the board. For team work set `assignee` (an agent role) and `deps` (ids of tasks that must reach Done first). Prefer director_plan to write a whole decomposition at once.',
@@ -1652,6 +1654,7 @@ async function execTool(name, args = {}) {
 
     // ── Phase 25b · Director + Team (app control) ──────────────────────────
     case 'team_list':        return callOp('team-list');
+    case 'team_spawn':       return callOp('team-spawn');
     case 'kanban_read':      return callOp('kanban-read');
     case 'kanban_add':       return callOp('kanban-add',     args);
     case 'kanban_update':    return callOp('kanban-update',  args);

@@ -416,6 +416,7 @@ async function _handle(req, res) {
       // Routed to global.ccmTeam so a Director-Claude can drive the team over
       // the same MCP it uses for the browser.
       case 'team-list':         result = team().teamList(); break;
+      case 'team-spawn':        result = team().teamSpawn(); break;
       case 'kanban-read':       result = team().kanbanRead(); break;
       case 'kanban-add':        result = team().kanbanAdd(body); break;
       case 'kanban-update':     result = team().kanbanUpdate(body); break;

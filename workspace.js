@@ -613,8 +613,17 @@
         // send `claude\r`. This is more reliable than a fixed timeout because
         // PowerShell 7 can take 0.5–2s to fully initialize.
         let _claudeLaunched = false;
-        // Build the claude launch command — plain `claude` or `claude --worktree`
-        const claudeCmd = isWorktree ? 'claude --worktree\r\n' : 'claude\r\n';
+        // Build the claude launch command. Agent terminals inject a role system
+        // prompt via --append-system-prompt. We HARD-STRIP shell-hostile chars
+        // (" ` $ \ and newlines) so the single typed command can't break out of
+        // the double-quoted arg, whatever shell the PTY runs (PowerShell/bash).
+        const agentSystem = typeof p.agentSystem === 'string'
+          ? p.agentSystem.replace(/["`$\\\r\n]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1600)
+          : '';
+        const _wtFlag = isWorktree ? ' --worktree' : '';
+        const claudeCmd = agentSystem
+          ? `claude${_wtFlag} --append-system-prompt "${agentSystem}"\r\n`
+          : (isWorktree ? 'claude --worktree\r\n' : 'claude\r\n');
         function _maybeAutoLaunch(chunk) {
           if (!isClaude || _claudeLaunched) return;
           // Shell prompt patterns: ends with "> " or "$ " (PowerShell / bash)
@@ -734,12 +743,15 @@
 
   function openTerminal(isClaude = false, opts = {}) {
     if (!dv) { _pendingTerminals.push({ isClaude, opts }); return; }
+    const agent = opts.agent || null;
+    if (agent) isClaude = true;                 // agents are always Claude sessions
     if (isClaude) _termClaudeSeq++; else _termShellSeq++;
     const isWorktree = isClaude && !!opts.worktree;
-    const label = isWorktree
-      ? `Worktree ${_termClaudeSeq}`
-      : isClaude ? `Claude ${_termClaudeSeq}` : `Shell ${_termShellSeq}`;
-    const id    = `term-${Date.now()}`;
+    const label = agent
+      ? (agent.name || agent.role || `Agent ${_termClaudeSeq}`)
+      : isWorktree ? `Worktree ${_termClaudeSeq}`
+      : isClaude   ? `Claude ${_termClaudeSeq}` : `Shell ${_termShellSeq}`;
+    const id    = `term-${Date.now()}-${_termClaudeSeq + _termShellSeq}`;
 
     // Find a reference panel to dock beside (prefer existing terminal panels)
     let refId = null;
@@ -757,12 +769,46 @@
       id,
       component: 'terminal-instance',
       title: label,
-      params: { isClaude, label, isWorktree },
+      params: { isClaude, label, isWorktree,
+                agentSystem: agent?.system, agentRole: agent?.role, agentColor: agent?.color },
       position: refId
         ? { direction: 'within', referencePanel: refId }
         : { direction: 'right',  referencePanel: 'chat' },
     });
-    try { dv.getPanel(id)?.api.setActive(); } catch { /**/ }
+    // During a staggered team spawn we don't steal focus on every agent.
+    if (opts.activate !== false) { try { dv.getPanel(id)?.api.setActive(); } catch { /**/ } }
+  }
+
+  /* ── Spawn a ready-to-go team workspace (Phase 26) ───────────────────────── */
+  // Lays out the shared task board + a Director terminal + one role-injected
+  // Claude terminal per agent. Terminals dock as tabs in one group (auto-ref);
+  // the user can tear roles out side-by-side. Spawns are STAGGERED so we don't
+  // spin up a dozen PTYs + `claude` launches in the same tick.
+  let _pendingTeam = null;
+  function spawnTeam(payload) {
+    if (!dv) { _pendingTeam = payload; return; }
+    const team   = payload || {};
+    const agents = Array.isArray(team.agents) ? team.agents : [];
+    try { window.showToast?.(`Spawning ${team.team || 'team'} — ${agents.length} agents…`, 'info', 3500); } catch (_) {}
+
+    // 1) Surface the task board (the coordination bus the Director writes to).
+    try { activatePanel('taches'); } catch (_) {}
+
+    // 2) Director terminal first.
+    if (team.director) {
+      openTerminal(true, { agent: {
+        role:   'director',
+        name:   team.director.name || 'Director',
+        system: team.director.system,
+        color:  team.director.color || '#d97757',
+      } });
+    }
+
+    // 3) Agents, staggered ~350ms apart; don't steal focus from the Director.
+    agents.forEach((a, i) => {
+      setTimeout(() => { try { openTerminal(true, { agent: a, activate: false }); } catch (_) {} }, 350 * (i + 1));
+    });
+    return { ok: true, agents: agents.length };
   }
 
   /* ── Pre-render all panels after layout restore ─────────────────── */
@@ -917,6 +963,12 @@
         });
       }, 100);
     }
+
+    // ── Team spawn (Phase 26): main sends team:spawn with the role payload ──
+    try {
+      window.electronAPI?.team?.onSpawn?.(payload => spawnTeam(payload));
+    } catch (_) {}
+    if (_pendingTeam) { const t = _pendingTeam; _pendingTeam = null; setTimeout(() => spawnTeam(t), 150); }
 
     /* ── Drag — suppress browser "Move" badge ────────────────────── */
     el.addEventListener('dragstart', e => {
@@ -1443,7 +1495,7 @@
   /* ── Export ───────────────────────────────────────────────────────── */
   window.Workspace = {
     init, activatePanel, isVisible, pinArtifact, resetLayout, setViewLocked, toggleToolsHidden, openSplitChat,
-    openTerminal,
+    openTerminal, spawnTeam,
     // Workspace management
     saveCurrentLayout,
     wsGetList, wsGetActiveId, wsCreate, wsSwitch, wsRename, wsDelete,

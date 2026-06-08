@@ -1,7 +1,7 @@
 {
   "name": "claude-code-desktop",
   "version": "0.5.0",
-  "description": "Fan-made Electron desktop UI for the Claude Code CLI — 195-tool ccm MCP (browser control + agent-team Director), multi-pane parallel control, live context panel, permission modes, JSX preview, workspace awareness",
+  "description": "Fan-made Electron desktop UI for the Claude Code CLI — 196-tool ccm MCP (browser control + agent-team Director + one-click team spawn), multi-pane parallel control, live context panel, permission modes, JSX preview, workspace awareness",
   "author": {
     "name": "hlsitechio",
     "email": "23203953+hlsitechio@users.noreply.github.com"
