@@ -1405,6 +1405,8 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
   { name: 'director_reject', description: 'Reject a reviewed task → back to In progress for rework (optionally with a reason).',
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id'], additionalProperties: false } },
+  { name: 'agent_send', description: 'Inject a prompt directly into a spawned agent\'s terminal (the Director\'s drive channel — the input half of the loop). The text is typed into that role\'s claude CLI and submitted. Use to kick off, nudge, or follow up with a specific agent. Note: director_next already auto-kicks each agent it assigns, so use this for ad-hoc messages or to re-prod a stalled agent. role = one of the team roles; the agent must have a live terminal (team_spawn first).',
+    inputSchema: { type: 'object', properties: { role: { type: 'string', description: 'Agent role (researcher, architect, backend, frontend, data, qa, security, reviewer, media, devops, docs, director)' }, text: { type: 'string', description: 'The message/prompt to type into that agent\'s terminal' } }, required: ['role', 'text'], additionalProperties: false } },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
@@ -1666,6 +1668,7 @@ async function execTool(name, args = {}) {
     case 'director_review':  return callOp('director-review');
     case 'director_approve': return callOp('director-approve', args);
     case 'director_reject':  return callOp('director-reject',  args);
+    case 'agent_send':       return callOp('agent-send',       args);
 
     default: throw new Error('Unknown tool: ' + name);
   }

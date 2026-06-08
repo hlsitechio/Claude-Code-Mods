@@ -609,6 +609,12 @@
         }
         const { termId } = result;
 
+        // Drive channel (Phase 26f): if this is an agent terminal, tell main
+        // which termId backs this role so the Director can inject prompts into it.
+        if (p.agentRole) {
+          try { window.electronAPI?.team?.registerAgent?.(p.agentRole, termId); } catch (_) {}
+        }
+
         // For Claude sessions: detect when the shell prompt first appears, then
         // send `claude\r`. This is more reliable than a fixed timeout because
         // PowerShell 7 can take 0.5–2s to fully initialize.
@@ -732,6 +738,7 @@
           termId, term, fitAddon,
           cleanup() {
             offData(); offExit(); offInput.dispose(); ro.disconnect();
+            if (p.agentRole) { try { window.electronAPI?.team?.unregisterAgent?.(p.agentRole, termId); } catch { /**/ } }
             try { api.terminal.close(termId); } catch { /**/ }
             try { term.dispose(); } catch { /**/ }
           },

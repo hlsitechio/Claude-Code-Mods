@@ -995,6 +995,20 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
     return dir;
   };
 
+  // ── Drive channel (Phase 26f) ──────────────────────────────────────────────
+  // role → termId, reported by each agent terminal at spawn. Lets the Director
+  // inject a prompt into a specific agent's claude CLI (the input side of the
+  // input/output loop the user asked for).
+  global.ccmAgentTerminals = global.ccmAgentTerminals || new Map();
+  const _agentWrite = (role, text) => {
+    const termId = global.ccmAgentTerminals.get(role);
+    if (termId == null) return { ok: false, error: `no live terminal for role '${role}' — spawn the team first` };
+    const t = terminals.get(termId);                 // terminals: termId → { ptyProc } (defined below, resolved at call time)
+    if (!t || !t.ptyProc) return { ok: false, error: `terminal for '${role}' is not active` };
+    try { t.ptyProc.write(String(text == null ? '' : text) + '\r'); return { ok: true, role, termId }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  };
+
   global.ccmTeam = {
     // ── Spawn a ready-to-go team workspace ─────────────────────────────────────
     // Builds the role payload (names + colours + assembled system prompts) and
@@ -1077,17 +1091,38 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
       return { ok: true, count: res.count, tasks: dir.toKanban() };
     },
     // Per-agent + overall snapshot for the team status panel / Director.
+    // liveTerminals = roles that currently have a reachable agent terminal.
     directorStatus() {
       const dir = _freshDirector();
-      return { ok: true, ...dir.status() };
+      return { ok: true, liveTerminals: [...(global.ccmAgentTerminals?.keys?.() || [])], ...dir.status() };
     },
-    // Compute + commit the next gated assignments (todo→doing for idle agents).
-    // Returns the tasks dispatched (the live PTY injection lands in Phase 26).
+    // Inject a prompt directly into an agent's terminal (the Director's drive
+    // channel — the "input" half of the loop). text is typed + submitted.
+    agentSend(body = {}) {
+      const { role, text } = body;
+      if (!role || typeof text !== 'string') return { ok: false, error: 'role + text required' };
+      return _agentWrite(role, text);
+    },
+    // Assign the next gated task per idle agent AND wake each one: inject a
+    // kickoff into its terminal so it reads its card and starts. Without this,
+    // tasks just sit in "doing" because the agents don't auto-poll the board.
     directorNext() {
       const dir = _freshDirector();
       const moved = dir.assignNext();
       _applyDirectorToBoard(dir);
-      return { ok: true, assigned: moved.map(t => ({ id: t.id, role: t.assignee, title: t.title })) };
+      const nudged = [], unreachable = [];
+      for (const t of moved) {
+        // No leading slash and no "@" — both trigger CLI affordances (slash
+        // commands / file-completion) and would corrupt the typed prompt.
+        const kick = `[Director] You have a task. Use the kanban_read tool, find the card with id ${t.id} (assignee ${t.assignee}) in the doing column, do exactly what its body says, then use kanban_move to set that card col to review and stop. Task title: ${t.title}. Begin now.`;
+        const r = _agentWrite(t.assignee, kick);
+        (r.ok ? nudged : unreachable).push(t.assignee);
+      }
+      return {
+        ok: true,
+        assigned: moved.map(t => ({ id: t.id, role: t.assignee, title: t.title })),
+        nudged, unreachable,
+      };
     },
     // The "Needs review" queue — tasks redirected to the Director for sign-off.
     directorReview() {
@@ -1117,6 +1152,15 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
   ipcMain.handle('team:spawn-request', () => {
     try { return global.ccmTeam?.teamSpawn?.() || { ok: false, error: 'team unavailable' }; }
     catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  // Agent terminals report their role → termId so the Director can drive them.
+  ipcMain.on('team:agent-registered', (_e, { role, termId } = {}) => {
+    if (role && termId != null) global.ccmAgentTerminals.set(role, termId);
+  });
+  ipcMain.on('team:agent-unregistered', (_e, { role, termId } = {}) => {
+    if (role && global.ccmAgentTerminals.get(role) === termId) global.ccmAgentTerminals.delete(role);
+    else if (role && termId == null) global.ccmAgentTerminals.delete(role);
   });
 }
 
@@ -2929,6 +2973,16 @@ function getPty() {
 const terminals = new Map(); // termId → { ptyProc, sender }
 let _nextTermId  = 1;
 
+// Drop any agent role→termId mapping for a terminal that has exited/closed, so
+// the Director's drive channel never writes to a dead PTY.
+function _unmapAgentTerminal(termId) {
+  try {
+    const reg = global.ccmAgentTerminals;
+    if (!reg) return;
+    for (const [role, id] of reg) if (id === termId) reg.delete(role);
+  } catch (_) {}
+}
+
 function getShellConfig() {
   const platform = process.platform;
   if (platform === 'win32') {
@@ -3943,6 +3997,7 @@ ipcMain.handle('terminal:create', (event, { cwd, cols, rows } = {}) => {
     ptyProc.onExit(({ exitCode }) => {
       send(`terminal:exit:${termId}`, exitCode ?? 0);
       terminals.delete(termId);
+      _unmapAgentTerminal(termId);   // drop role→termId if this was an agent
     });
 
     terminals.set(termId, { ptyProc, sender, isPty: true });
@@ -4008,4 +4063,5 @@ ipcMain.on('terminal:close', (_, termId) => {
     try { t.isPty ? t.ptyProc.kill() : t.proc.kill(); } catch { /* already dead */ }
     terminals.delete(termId);
   }
+  _unmapAgentTerminal(termId);
 });

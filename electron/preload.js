@@ -354,6 +354,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('team:spawn', handler);
       return () => ipcRenderer.removeListener('team:spawn', handler);
     },
+    // Map an agent role → its terminal id so the Director can inject prompts
+    // (the drive channel). Reported by each agent terminal when it spawns.
+    registerAgent:   (role, termId) => ipcRenderer.send('team:agent-registered',   { role, termId }),
+    unregisterAgent: (role, termId) => ipcRenderer.send('team:agent-unregistered', { role, termId }),
   },
 
   // ── Git integration ───────────────────────────────────────────────────────

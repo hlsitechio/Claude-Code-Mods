@@ -428,6 +428,7 @@ async function _handle(req, res) {
       case 'director-review':   result = team().directorReview(); break;
       case 'director-approve':  result = team().directorApprove(body); break;
       case 'director-reject':   result = team().directorReject(body); break;
+      case 'agent-send':        result = team().agentSend(body); break;
 
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }
