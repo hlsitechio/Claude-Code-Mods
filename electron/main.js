@@ -2618,11 +2618,48 @@ ipcMain.handle('agents:load-all', () => {
     }
   } catch (_) {}
 
+  // 3. Built-in DevOps team roster (single source: director.js). Added ONLY
+  //    when no disk/user agent of the same name exists (user edits win), and
+  //    marked builtin:true so agents:save never snapshots them to disk — they
+  //    always come fresh from director.js. Every team agent gets ccm-browser so
+  //    it can call the kanban_move / director_* tools even when launched solo
+  //    from the dropdown (not just via team_spawn).
+  try {
+    const { teamSpawnPayload } = require('./director.js');
+    const p = teamSpawnPayload();
+    const roleDefs = [
+      { role: 'director', name: p.director.name, system: p.director.system, color: '#d97757', skills: [], mcp: [] },
+      ...p.agents,
+    ];
+    for (const r of roleDefs) {
+      if (byName.has(r.name)) continue;                       // disk/user agent wins
+      const mcpServers = ['ccm-browser', ...((r.mcp || []).filter(m => m !== 'ccm-browser'))];
+      byName.set(r.name, {
+        name: r.name,
+        type: 'DevOps Team',
+        description: (r.system || '').split('. ')[0],
+        model: '',
+        permMode: 'default',
+        cwd: '', projectId: '', sessionId: '',
+        mcpServers,
+        skills: r.skills || [],
+        color: r.color || '#7ab389',
+        system: r.system || '',
+        role: r.role,
+        builtin: true,
+      });
+    }
+  } catch (_) {}
+
   return [...byName.values()];
 });
 
 ipcMain.handle('agents:save', async (_, agents) => {
   try {
+    // Built-in team agents (builtin:true) are sourced from director.js — never
+    // persist them to disk, or we'd snapshot a stale copy + create duplicate
+    // files on the next load. Strip them before anything touches the filesystem.
+    agents = (Array.isArray(agents) ? agents : []).filter(a => a && !a.builtin);
     // Write combined agents.json (backward compat for CLI)
     fs.writeFileSync(AGENTS_FILE, JSON.stringify(agents, null, 2), 'utf8');
 

@@ -10,6 +10,8 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **Team roles in the agents dropdown (Phase 26b)** — the 11 specialists + Director now appear in the AI-agents menu too, not only via `team_spawn`, so you can launch any single role on its own. They're injected into `agents:load-all` straight from `director.js` (single source — no duplicate JSON files to drift), grouped under type **"DevOps Team"**, and marked `builtin` so `agents:save` never snapshots them to disk (always fresh). A disk/user agent of the same name **wins** (your custom "Code Reviewer" isn't overwritten or duplicated). Every team agent carries the **`ccm-browser`** MCP (plus its specialty MCP, e.g. Media→`ideogram`) so it can call `kanban_move` / `director_*` even when launched solo. Verified with a 10-assertion merge test.
+
 - **One-click team spawn — "a workspace ready to go" (Phase 26)** — stand up the whole agent team in one action: a Director terminal + one role-injected Claude terminal per agent (11) + the shared task board, all in the workspace. **+1 MCP tool → 196 total.**
   - **Role injection**: each agent terminal launches `claude --append-system-prompt "<role prompt>"` so it boots already knowing its job AND the kanban protocol (move my task to *In progress* → do it → move to *Needs review* and stop; never self-finalize). The Director boots knowing the `director_*` tools. Prompts are authored single-line and **hard-stripped of shell-hostile chars** (`" \` $ \` + newlines) in the renderer so the typed command can't break out of its quoted arg in PowerShell or bash.
   - **The loop closes over MCP**: agents report status with the same `kanban_move` tool; the Director coordinates with `director_*`. No terminal-scraping.
