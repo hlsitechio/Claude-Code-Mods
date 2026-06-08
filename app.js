@@ -13022,6 +13022,26 @@ let _streamInterval = setInterval(() => {
     setTimeout(() => document.addEventListener('mousedown', _docClose), 0);
   }
 
+  // Create (or open) the "DevOps Team" workspace and spawn the team into it.
+  // wsCreate/wsSwitch reload the page, so we set a one-shot flag that the
+  // workspace init reads after reload to fire the spawn. If we're already on
+  // the DevOps Team workspace, spawn immediately (no reload).
+  function _spawnDevOpsTeam() {
+    const WS_NAME = 'DevOps Team';
+    const list = window.Workspace?.wsGetList() || [];
+    const aid  = window.Workspace?.wsGetActiveId() || '';
+    const existing = list.find(w => w.name === WS_NAME);
+    try {
+      if (existing && existing.id === aid) {
+        window.electronAPI?.team?.spawn?.();          // already here → spawn now
+        return;
+      }
+      localStorage.setItem('ccmod.spawnTeamOnLoad', '1'); // fire after reload
+    } catch (_) {}
+    if (existing) window.Workspace?.wsSwitch(existing.id);
+    else          window.Workspace?.wsCreate(WS_NAME);
+  }
+
   // The "+" workspace selector: lists every saved workspace (click to switch,
   // active one highlighted) + a "New workspace" action at the bottom.
   function _showAddMenu(e) {
@@ -13066,6 +13086,15 @@ let _streamInterval = setInterval(() => {
       window.Workspace?.wsCreate(name);
     };
     menu.appendChild(add);
+
+    // One-click DevOps Team workspace: create (or open) "DevOps Team" and spawn
+    // the Director + 11 agents + task board into it.
+    const teamItem = document.createElement('button');
+    teamItem.className = 'ws-ctx-item ws-ctx-item--team';
+    teamItem.title = 'Create a workspace with the Director + 11 agents loaded';
+    teamItem.textContent = '🤖  DevOps Team';
+    teamItem.onclick = () => { _closeCtxMenu(); _spawnDevOpsTeam(); };
+    menu.appendChild(teamItem);
 
     document.body.appendChild(menu);
 

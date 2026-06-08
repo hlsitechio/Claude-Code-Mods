@@ -10,6 +10,8 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **"DevOps Team" in the workspace dropdown (Phase 26d)** — the "+" workspace selector gains a **🤖 DevOps Team** item that creates (or opens) a workspace named *DevOps Team* and spawns the full team into it — the Director + 11 agent terminals + the task board — in one click. Because `wsCreate`/`wsSwitch` reload the page, it uses a one-shot `ccmod.spawnTeamOnLoad` flag that the workspace init reads after reload to fire the spawn (via the new `team.spawn` IPC → `teamSpawn` → `team:spawn` → `spawnTeam`); if you're already on the DevOps Team workspace it spawns immediately with no reload.
+
 - **Workspace selector dropdown + team agents in Settings (Phase 26c)**
   - **"+" is now a workspace selector**: clicking it opens a dropdown listing **every saved workspace** (click to switch, the active one highlighted) with a **"＋ New workspace"** action at the bottom — instead of silently creating one. Newly created workspaces appear in the list. The per-tab right-click menu also gains **Open** (alongside Rename / Delete), and its outside-click close is now containment-checked (clicking inside the menu no longer dismisses it).
   - **Built-in team agents show in Settings → AI Agents** (after the agents sync on load), each tagged with a **"Built-in"** pill and grouped under type **"DevOps Team"**. Built-ins have no edit/delete (they're sourced from `director.js` and always available) — duplicate one to customise. They also appear in the chat agent dropdown (Phase 26b), so the 11 roles + Director are selectable everywhere agents are.

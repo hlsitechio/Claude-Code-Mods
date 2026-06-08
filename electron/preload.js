@@ -348,6 +348,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Main sends `team:spawn` with the role payload; the renderer lays out the
   // Director + agent terminals.
   team: {
+    spawn: () => ipcRenderer.invoke('team:spawn-request'),
     onSpawn: (cb) => {
       const handler = (_, payload) => cb(payload);
       ipcRenderer.on('team:spawn', handler);

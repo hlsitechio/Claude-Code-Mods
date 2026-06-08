@@ -970,6 +970,16 @@
     } catch (_) {}
     if (_pendingTeam) { const t = _pendingTeam; _pendingTeam = null; setTimeout(() => spawnTeam(t), 150); }
 
+    // One-shot: the "DevOps Team" dropdown item set this flag, then created/
+    // switched the workspace (which reloaded). Now that dv is ready, ask main to
+    // spawn the team (→ team:spawn → onSpawn above → spawnTeam with the payload).
+    try {
+      if (localStorage.getItem('ccmod.spawnTeamOnLoad') === '1') {
+        localStorage.removeItem('ccmod.spawnTeamOnLoad');
+        setTimeout(() => { try { window.electronAPI?.team?.spawn?.(); } catch (_) {} }, 700);
+      }
+    } catch (_) {}
+
     /* ── Drag — suppress browser "Move" badge ────────────────────── */
     el.addEventListener('dragstart', e => {
       const tabEl = e.target?.closest?.('.dv-tab');

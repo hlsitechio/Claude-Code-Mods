@@ -446,6 +446,8 @@ body:not([data-win-role="secondary"]) #secondary-sidebar-strip {
 .ws-ctx-item--active { color: #e7e7ea; background: #1e1e24; }
 .ws-ctx-item--add { color: #8fb89a; font-weight: 500; }
 .ws-ctx-item--add:hover { background: #1d2a20; color: #a9d6b4; }
+.ws-ctx-item--team { color: #c9a0f5; font-weight: 500; }
+.ws-ctx-item--team:hover { background: #241d2e; color: #ddc2ff; }
 
 /* Built-in (director.js-sourced) agent pill in the settings list */
 .agent-card__builtin {

@@ -1110,6 +1110,13 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
       return { ok: true, id: body.id };
     },
   };
+
+  // Renderer-triggered spawn (the "DevOps Team" workspace dropdown item asks for
+  // this after the create-and-reload). Reuses teamSpawn → team:spawn → renderer.
+  ipcMain.handle('team:spawn-request', () => {
+    try { return global.ccmTeam?.teamSpawn?.() || { ok: false, error: 'team unavailable' }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
 }
 
 // Plain-text markdown summary — used by the chat-inject button and the CLI tool.
