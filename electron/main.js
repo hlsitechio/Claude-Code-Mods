@@ -791,11 +791,14 @@ const KANBAN_DEFAULT = () => ({
   version: 1,
   updated: Date.now(),
   columns: [
-    { id: 'todo',  name: 'To do',       color: '#6e88c3' },
-    { id: 'doing', name: 'In progress', color: '#d97757' },
-    { id: 'done',  name: 'Done',        color: '#7ab389' },
+    { id: 'todo',   name: 'To do',        color: '#6e88c3' },
+    { id: 'doing',  name: 'In progress',  color: '#d97757' },
+    { id: 'review', name: 'Needs review',  color: '#c9a23f' }, // Director sign-off lane
+    { id: 'done',   name: 'Done',         color: '#7ab389' },
   ],
-  tasks: [], // { id, col, title, body, tags, priority, created, updated, order }
+  // { id, col, title, body, tags, priority, assignee, deps, created, updated, order }
+  // assignee = agent role (Director protocol); deps = task ids that must be 'done' first.
+  tasks: [],
 });
 
 function _kanbanPath() {
@@ -819,6 +822,12 @@ function _kanbanRead() {
     // Schema migration / safety
     if (!data.columns || !Array.isArray(data.columns)) data.columns = KANBAN_DEFAULT().columns;
     if (!data.tasks   || !Array.isArray(data.tasks))   data.tasks   = [];
+    // Migration: ensure the Director's 'review' lane exists, inserted before 'done'.
+    if (!data.columns.some(c => c && c.id === 'review')) {
+      const reviewCol = { id: 'review', name: 'Needs review', color: '#c9a23f' };
+      const di = data.columns.findIndex(c => c && c.id === 'done');
+      if (di >= 0) data.columns.splice(di, 0, reviewCol); else data.columns.push(reviewCol);
+    }
     return data;
   } catch (e) {
     console.error('[kanban] read error:', e.message);
@@ -851,8 +860,15 @@ function _kanbanSanitizeTask(t) {
   const s = (v, max = 500) => typeof v === 'string'
     ? v.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, ' ').slice(0, max).trim()
     : '';
-  const tagsArr = Array.isArray(t.tags) ? t.tags.slice(0, 8).map(x => s(x, 24)).filter(Boolean) : [];
+  const tagsArr = Array.isArray(t.tags) ? t.tags.slice(0, 12).map(x => s(x, 48)).filter(Boolean) : [];
   const pri = ['low','med','high'].includes(t.priority) ? t.priority : 'med';
+  // Director-protocol fields (preserved through round-trips):
+  //   assignee = agent role  ·  deps = task ids that must reach 'done' first
+  const assignee = typeof t.assignee === 'string'
+    ? t.assignee.replace(/[^A-Za-z0-9-]/g, '').slice(0, 24).toLowerCase() : '';
+  const deps = Array.isArray(t.deps)
+    ? t.deps.slice(0, 32).map(x => typeof x === 'string' ? x.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) : '').filter(Boolean)
+    : [];
   return {
     id:       typeof t.id === 'string' ? t.id : _kanbanTaskId(),
     col:      typeof t.col === 'string' ? t.col : 'todo',
@@ -860,6 +876,8 @@ function _kanbanSanitizeTask(t) {
     body:     s(t.body, 4000),
     tags:     tagsArr,
     priority: pri,
+    assignee,
+    deps,
     created:  typeof t.created === 'number' ? t.created : Date.now(),
     updated:  Date.now(),
     order:    typeof t.order === 'number' ? t.order : 0,

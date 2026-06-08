@@ -23,12 +23,18 @@
  *   A task is only ASSIGNABLE when every task in its `deps` is `done`.
  *   Cycles / unsatisfiable deps surface as `blocked`.
  *
- * Kanban mapping (for the live wiring step — not used by this pure module):
- *   status 'todo'|'doing'         → kanban col 'todo'|'doing'
- *   status 'review'               → kanban col 'doing' + tag 'review'
- *   status 'done'                 → kanban col 'done'
- *   assignee role                 → kanban tag '@<role>'
- *   deps                          → tag 'dep:<id>' (or a preserved field)
+ * Live wiring (the loop the user specified):
+ *   Director → agent : PTY "prompt injection" (terminal:input) — sends the task
+ *   agent → Director : the agent moves ITS OWN kanban task between columns; the
+ *                      board change is the signal the Director reacts to.
+ *
+ * Kanban mapping (status ↔ column is now 1:1 — main.js adds a 'review' column):
+ *   status 'todo'   → col 'todo'         (To do)
+ *   status 'doing'  → col 'doing'        (In progress)
+ *   status 'review' → col 'review'       (Needs review  → redirected to Director)
+ *   status 'done'   → col 'done'         (Done / approved)
+ *   assignee role   → task.assignee field (preserved) + '@<role>' tag (UI filter)
+ *   deps            → task.deps field (preserved)     + 'dep:<id>' tags (UI)
  */
 
 // ── The DevOps team (11 specialists + Director) ─────────────────────────────
@@ -58,6 +64,49 @@ const TEAM_DEVOPS = {
 const STATUS = Object.freeze({
   TODO: 'todo', DOING: 'doing', REVIEW: 'review', DONE: 'done', BLOCKED: 'blocked',
 });
+
+// Status values that map 1:1 to a kanban column (BLOCKED is internal-only).
+const BOARD_STATUSES = ['todo', 'doing', 'review', 'done'];
+
+// ── Kanban bridge (pure) ────────────────────────────────────────────────────
+// Convert between the Director's task model and the shared kanban.json shape so
+// the live board IS the bus. assignee/deps are preserved as first-class fields
+// (the kanban sanitizer keeps them) AND mirrored as tags for the column-driven
+// UI (@role for filtering, dep:<id> for visibility).
+function toKanbanTask(t) {
+  const tags = [];
+  if (t.assignee) tags.push('@' + t.assignee);
+  for (const d of (t.deps || [])) tags.push('dep:' + d);
+  return {
+    id:       t.id,
+    col:      BOARD_STATUSES.includes(t.status) ? t.status : 'todo',
+    title:    t.title || '',
+    body:     t.body || '',
+    tags,
+    priority: ['low', 'med', 'high'].includes(t.priority) ? t.priority : 'med',
+    assignee: t.assignee || '',
+    deps:     Array.isArray(t.deps) ? t.deps.slice() : [],
+  };
+}
+
+function fromKanbanTask(k) {
+  const tags = Array.isArray(k.tags) ? k.tags : [];
+  const assignee = k.assignee
+    || (tags.find(x => typeof x === 'string' && x[0] === '@') || '').slice(1)
+    || undefined;
+  const deps = (Array.isArray(k.deps) && k.deps.length)
+    ? k.deps.slice()
+    : tags.filter(x => typeof x === 'string' && x.startsWith('dep:')).map(x => x.slice(4));
+  return {
+    id:       k.id,
+    title:    k.title || '',
+    body:     k.body || '',
+    assignee,
+    deps,
+    priority: ['low', 'med', 'high'].includes(k.priority) ? k.priority : 'med',
+    status:   BOARD_STATUSES.includes(k.col) ? k.col : 'todo',
+  };
+}
 
 let _seq = 0;
 function _id(now) { return 't' + (now || 0).toString(36) + '-' + (++_seq).toString(36); }
@@ -235,6 +284,39 @@ class Director {
     if (inFlight) return false;
     return this.ready().length === 0; // unfinished tasks but none ready, none moving
   }
+
+  // ── Live-board bridge ──────────────────────────────────────────────────────
+
+  /** Serialize the whole plan to kanban tasks (for persisting to kanban.json). */
+  toKanban() { return this.tasks.map(toKanbanTask); }
+
+  /**
+   * Re-read task statuses from a live kanban snapshot. Agents move THEIR OWN
+   * tasks (To do → In progress → Needs review) by editing the board; this folds
+   * those moves back into the Director's model. Returns the tasks that NEWLY
+   * entered 'review' — i.e. the ones now redirected to the Director for sign-off.
+   * (The Director still owns review→done via approve(); an agent cannot self-
+   * approve — a board move straight to 'done' is treated as 'review'.)
+   */
+  syncFromKanban(ktasks) {
+    const newReview = [];
+    for (const k of (ktasks || [])) {
+      const t = this._byId(k.id);
+      if (!t) continue;
+      let st = BOARD_STATUSES.includes(k.col) ? k.col : t.status;
+      // Agents may not self-approve: a jump to 'done' becomes 'review'.
+      if (st === STATUS.DONE && t.status !== STATUS.REVIEW && t.status !== STATUS.DONE) st = STATUS.REVIEW;
+      if (st !== t.status) {
+        if (st === STATUS.REVIEW) newReview.push(t);
+        t.status = st; t.updated = this.now;
+        this._stamp({ ev: 'sync', task: t.id, status: st });
+      }
+    }
+    return newReview;
+  }
 }
 
-module.exports = { Director, TEAM_DEVOPS, STATUS };
+module.exports = {
+  Director, TEAM_DEVOPS, STATUS, BOARD_STATUSES,
+  toKanbanTask, fromKanbanTask,
+};

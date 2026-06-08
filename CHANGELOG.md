@@ -10,6 +10,13 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **Director ↔ live kanban bridge (Phase 25a)** — the wiring foundation for the agent team's live loop (Director drives agents via PTY prompt-injection; agents report back by moving their OWN kanban tasks). 
+  - **"Needs review" lane**: the kanban gains a 4th column (`To do · In progress · Needs review · Done`) — the Director's sign-off queue. Auto-migrates existing boards (inserted before `Done`); the renderer is column-driven so it appears with no UI change.
+  - **`assignee` + `deps` are now first-class task fields** — `_kanbanSanitizeTask` preserves them through every round-trip (previously stripped). `assignee` = agent role; `deps` = task ids that must reach `done` first.
+  - **Pure bridge in `director.js`** (`toKanbanTask`/`fromKanbanTask`, `Director.toKanban()`/`syncFromKanban()`): maps the Director's task model ↔ kanban shape (status↔column 1:1; assignee/deps mirrored as `@role`/`dep:<id>` tags for the UI, recoverable from tags alone). `syncFromKanban()` folds live board edits back into the Director and returns the tasks that newly entered review.
+  - **No agent self-approval**: a board move straight to `Done` by an agent is downgraded to `Needs review` — only the Director's `approve()` finalizes a task.
+  - Verified with a 15-assertion bridge test (shape, tag mirroring, round-trip integrity, tag-only recovery, the agent→Director review hand-off, self-approve protection). Next: the PTY driver that injects each task prompt into its agent terminal + spawns the 11 role terminals.
+
 - **Agent-team Director — coordination prototype (Phase 24)** — `electron/director.js`, the pure (no-Electron, deterministic) coordination logic for an agent team, validated before any live wiring. A "Director" decomposes a goal into role-tagged tasks and coordinates an **11-role team** (Researcher · Architect · Backend · Frontend · Data/DB · QA · Security · Reviewer · Media Creator · DevOps/CI · Docs) over the shared kanban as the bus. Two roles carry a defining MCP capability consumed by the live-spawn step: **Researcher → `ccm-browser`** (live web research), **Media Creator → `ideogram`** (image generation).
   - **Kanban-bus coordination**: tasks carry `assignee` (role) + `deps` (task ids); the board is the single source of truth (maps to kanban cols/tags for the live step).
   - **Director-gated autonomy**: each agent does ONE task → submits for review → the Director approves before the next is released. Hard invariant: no agent ever has more than one active task.
