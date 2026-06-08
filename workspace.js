@@ -36,6 +36,11 @@
   let _wsList      = [];
   let _wsActiveId  = null;
   let _wsSaveTimer = null;
+  // True between a switch/create/delete and the reload it triggers. The
+  // beforeunload flush checks this so it doesn't save the CURRENT (old) dv
+  // layout into the NEW active workspace after the active id was already
+  // re-pointed. Those paths call saveCurrentLayout() explicitly first.
+  let _wsSwitching = false;
 
   function _wsLoadStore() {
     try { _wsList = JSON.parse(localStorage.getItem(WS_STORE_KEY) || '[]'); } catch { _wsList = []; }
@@ -62,22 +67,82 @@
     return _wsList.find(w => w.id === _wsActiveId) || null;
   }
 
-  // ── Bug B fix: strip terminal-instance panels before saving ──────────────
-  // PTYs cannot be serialized — panels with ids starting "term-" would restore
-  // as blank dead panels. Remove them from the layout JSON before persisting.
-  function _stripTerminalPanels(node) {
-    if (!node) return;
-    if (node.data?.panels) {
-      node.data.panels = node.data.panels.filter(p => !String(p.id || '').startsWith('term-'));
+  // ── Strip non-restorable panels before saving (Phase 23 rewrite) ─────────
+  // PTYs can't survive a reload, so terminal panels must be removed from the
+  // serialized layout — otherwise they restore as blank fresh terminals (and
+  // Claude terminals re-launch `claude` on every start).
+  //
+  // The OLD version targeted node.data.panels / node.children — fields that
+  // DON'T EXIST in dockview's serialization, so it was a silent no-op for
+  // years. dockview's real shape (dockview-core SerializedDockview):
+  //   layout = { grid: { root, width, height, orientation }, panels: {id:{}}, activeGroup, floatingGroups?, popoutGroups? }
+  //   grid node = { type:'leaf'|'branch', data, size?, visible? }
+  //     leaf:   data = { views: string[], activeView?, id }
+  //     branch: data = node[]   (child nodes)
+  function _isEphemeralPanelId(id) {
+    // Terminals only. Artifacts persist via artifactHtml; tool panels rebuild
+    // from their id; split-chat is left alone (separate concern).
+    return typeof id === 'string' && id.startsWith('term-');
+  }
+
+  // Recursively prune ephemeral panels from a grid node.
+  // Returns the cleaned node, or null if it became empty (caller drops it).
+  function _pruneGridNode(node) {
+    if (!node || typeof node !== 'object') return node;
+    if (node.type === 'leaf') {
+      const d = node.data || {};
+      const views = Array.isArray(d.views) ? d.views.filter(v => !_isEphemeralPanelId(v)) : [];
+      if (!views.length) return null;                          // empty group → drop
+      const activeView = views.includes(d.activeView) ? d.activeView : views[views.length - 1];
+      return { ...node, data: { ...d, views, activeView } };
     }
-    if (Array.isArray(node.children)) node.children.forEach(_stripTerminalPanels);
+    if (node.type === 'branch') {
+      const kids = (Array.isArray(node.data) ? node.data : []).map(_pruneGridNode).filter(Boolean);
+      if (!kids.length) return null;                           // empty branch → drop
+      return { ...node, data: kids };                          // single-child branch is valid in dockview
+    }
+    return node;
+  }
+
+  // Strip ephemeral panels from a full serialized layout (operates on the
+  // toJSON() copy, which is fresh — no risk of mutating live dockview state).
+  function _stripEphemeralPanels(layout) {
+    if (!layout || typeof layout !== 'object') return layout;
+    // 1. top-level panel definitions map
+    if (layout.panels && typeof layout.panels === 'object') {
+      for (const id of Object.keys(layout.panels)) {
+        if (_isEphemeralPanelId(id)) delete layout.panels[id];
+      }
+    }
+    // 2. grid tree
+    if (layout.grid && layout.grid.root) {
+      const root = _pruneGridNode(layout.grid.root);
+      // If literally everything was ephemeral, leave a valid empty leaf so
+      // fromJSON doesn't choke (then _buildDefaultLayout effectively runs).
+      layout.grid.root = root || {
+        type: 'leaf',
+        data: { views: [], id: 'empty', activeView: undefined },
+        size: (layout.grid.height || layout.grid.width || 100),
+      };
+    }
+    // 3. floating / popout groups that hold ONLY terminals
+    for (const k of ['floatingGroups', 'popoutGroups']) {
+      if (Array.isArray(layout[k])) {
+        layout[k] = layout[k].filter(g => {
+          const views = g?.data?.views || g?.views;
+          if (!Array.isArray(views)) return true;
+          return views.some(v => !_isEphemeralPanelId(v));
+        });
+      }
+    }
+    return layout;
   }
 
   function saveCurrentLayout() {
     if (!dv) return;
     try {
-      const layout = dv.toJSON();
-      _stripTerminalPanels(layout.grid);
+      const layout = dv.toJSON();   // fresh serialized copy — safe to mutate
+      _stripEphemeralPanels(layout);
       const ws = _wsGetActive();
       if (ws) { ws.layout = layout; ws.updatedAt = Date.now(); _wsWriteStore(); }
     } catch (e) { console.warn('[workspace] saveCurrentLayout failed:', e); }
@@ -94,6 +159,7 @@
     _wsList.push({ id, name, layout: null, updatedAt: null });
     _wsActiveId = id;
     _wsWriteStore();
+    _wsSwitching = true;
     window.location.reload();
   }
 
@@ -102,6 +168,7 @@
     saveCurrentLayout();
     _wsActiveId = id;
     _wsWriteStore();
+    _wsSwitching = true;
     window.location.reload();
   }
 
@@ -117,6 +184,7 @@
     if (wasActive) {
       _wsActiveId = _wsList[0].id;
       _wsWriteStore();
+      _wsSwitching = true;
       window.location.reload();
     } else {
       _wsWriteStore();
@@ -821,6 +889,23 @@
     dv.onDidLayoutChange(() => _wsScheduleSave());
     dv.onDidAddPanel(()    => _wsScheduleSave());
     dv.onDidRemovePanel(() => _wsScheduleSave());
+
+    // ── Flush-on-close (Phase 23) ───────────────────────────────────────────
+    // The 600ms debounce means a layout change made just before quitting was
+    // lost — the timer never fired. Flush synchronously on unload / when the
+    // window is hidden, so the last arrangement always persists. Skip when a
+    // switch/create/delete is mid-reload (those already saved to the correct
+    // workspace; saving here would write the old layout into the new ws).
+    const _flushSave = () => {
+      if (_wsSwitching) return;
+      if (_wsSaveTimer) { clearTimeout(_wsSaveTimer); _wsSaveTimer = null; }
+      saveCurrentLayout();
+    };
+    window.addEventListener('beforeunload', _flushSave);
+    window.addEventListener('pagehide', _flushSave);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') _flushSave();
+    });
 
     // ── Bug C fix: drain any openTerminal calls queued before dv was ready ──
     if (_pendingTerminals.length) {

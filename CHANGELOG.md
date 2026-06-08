@@ -8,6 +8,12 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ## [Unreleased]
 
+### Fixed
+
+- **Workspace persistence (Phase 23)** — workspaces weren't saving/restoring correctly. Two root causes:
+  - **`_stripTerminalPanels` was a silent no-op.** It targeted `node.data.panels` / `node.children` — fields that don't exist in dockview's serialization. The real shape is `{ grid:{root}, panels:{id}, activeGroup }` where grid nodes are `{type:'leaf'|'branch', data}` (leaf `data.views[]`/`data.activeView`, branch `data[]`). So terminal panels were never stripped → they serialized → on restore they came back as blank fresh PTYs and Claude terminals re-ran `claude` on every launch, and the leftover sizing/refs could skew the restored layout. Rewrote to dockview's true shape: removes `term-*` from the top-level panels map, prunes them from every leaf's `views` (re-pointing `activeView` when it was on a removed terminal), drops emptied leaves/branches, and filters terminal-only floating/popout groups. Verified with a 10-assertion layout fixture.
+  - **No flush-on-close.** The layout save is debounced 600 ms, so a change made within 600 ms of quitting was lost. Added `beforeunload` / `pagehide` / `visibilitychange→hidden` handlers that clear the timer and save synchronously — guarded by a new `_wsSwitching` flag so the reload triggered by switch/create/delete doesn't write the old layout into the newly-activated workspace.
+
 ### Security
 
 - **Full code security review (Phase 22)** — four-agent audit across Electron/IPC, MCP/HTTP/CDP, renderer XSS, and secrets/repo. The repo had no live credentials; findings fixed:
