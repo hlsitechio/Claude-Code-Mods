@@ -10,6 +10,12 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **Director + Team MCP tools (Phase 25b)** — 12 new app-control tools in the ccm MCP (**183 → 195 tools**) so a Director-Claude can run the agent team over the *same* MCP it uses for the browser. These route through a new `global.ccmTeam` (the app-control counterpart to `global.ccmChrome`); all Director ops are **stateless over the board** (each call reads `kanban.json`, reconstructs the Director, acts, writes back — so it survives restarts and stays in sync with agents + the user dragging cards).
+  - **Kanban bus**: `kanban_read`, `kanban_add`, `kanban_update`, `kanban_move`, `kanban_delete` — full CRUD with `assignee`/`deps` first-class.
+  - **Director coordination**: `director_plan` (decompose → validate roles/deps/cycles → write to board), `director_status` (per-agent + counts), `director_next` (gated assign of ready tasks), `director_review` (the Needs-review queue), `director_approve`/`director_reject` (the gate — only the Director finalises).
+  - **`team_list`** — the 11-role roster with each role's skills + MCP servers.
+  - Wired end-to-end across all four layers (MCP schema+dispatch → HTTP route → `global.ccmTeam` → kanban/director). Verified with a 13-assertion flow test simulating the whole loop (plan → status → next → agent-moves-to-review → review → approve → completion). Spawn-team + layout tools come next (Phase 26 — they need new renderer plumbing).
+
 - **Director ↔ live kanban bridge (Phase 25a)** — the wiring foundation for the agent team's live loop (Director drives agents via PTY prompt-injection; agents report back by moving their OWN kanban tasks). 
   - **"Needs review" lane**: the kanban gains a 4th column (`To do · In progress · Needs review · Done`) — the Director's sign-off queue. Auto-migrates existing boards (inserted before `Done`); the renderer is column-driven so it appears with no UI change.
   - **`assignee` + `deps` are now first-class task fields** — `_kanbanSanitizeTask` preserves them through every round-trip (previously stripped). `assignee` = agent role; `deps` = task ids that must reach `done` first.

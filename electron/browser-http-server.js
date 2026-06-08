@@ -147,6 +147,11 @@ async function _handle(req, res) {
   const chrome  = global.ccmChrome;
   // Phase 7 — closed-Chrome file/registry editors.
   const chromeFiles = global.ccmChromeFiles;
+  // Phase 25b — Director + kanban app-control surface.
+  const team = () => {
+    if (!global.ccmTeam) throw new Error('Team control unavailable (app still starting?)');
+    return global.ccmTeam;
+  };
   try {
     let result;
     switch (cmd) {
@@ -406,6 +411,22 @@ async function _handle(req, res) {
       case 'chrome-ext-top-sites':         result = await chrome.topSites(); break;
       // Notifications
       case 'chrome-ext-notify':            result = await chrome.notifyCreate(body); break;
+
+      // ── Phase 25b · Director + kanban (app control, not browser) ───────────
+      // Routed to global.ccmTeam so a Director-Claude can drive the team over
+      // the same MCP it uses for the browser.
+      case 'team-list':         result = team().teamList(); break;
+      case 'kanban-read':       result = team().kanbanRead(); break;
+      case 'kanban-add':        result = team().kanbanAdd(body); break;
+      case 'kanban-update':     result = team().kanbanUpdate(body); break;
+      case 'kanban-move':       result = team().kanbanMove(body); break;
+      case 'kanban-delete':     result = team().kanbanDelete(body); break;
+      case 'director-plan':     result = team().directorPlan(body); break;
+      case 'director-status':   result = team().directorStatus(); break;
+      case 'director-next':     result = team().directorNext(); break;
+      case 'director-review':   result = team().directorReview(); break;
+      case 'director-approve':  result = team().directorApprove(body); break;
+      case 'director-reject':   result = team().directorReject(body); break;
 
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }

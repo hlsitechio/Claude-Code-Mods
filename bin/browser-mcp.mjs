@@ -1358,6 +1358,51 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { name: { type: 'string' }, value: {}, type: { type: 'string', enum: ['REG_SZ', 'REG_DWORD', 'REG_MULTI_SZ'] } }, required: ['name', 'value'], additionalProperties: false } },
   { name: 'chrome_policy_delete', description: 'Delete a Chrome group policy from HKCU (Windows-only).',
     inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'], additionalProperties: false } },
+
+  // ── Phase 25b · Director + Team (app control, not browser) ─────────────────
+  // Let a Director-Claude run an agent team over the shared kanban: decompose a
+  // goal into role-tagged tasks, watch the board, gate reviews. Coordination is
+  // KANBAN-BUS + DIRECTOR-GATED (see electron/director.js). Roles: researcher,
+  // architect, backend, frontend, data, qa, security, reviewer, media, devops, docs.
+  { name: 'team_list', description: 'List the agent-team roster: the 11 specialist roles (researcher, architect, backend, frontend, data, qa, security, reviewer, media, devops, docs) + Director, with each role\'s skills, MCP servers, and colour. Call this first to learn the valid `assignee` values for director_plan.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'kanban_read', description: 'Read the shared task board (kanban) — columns (To do / In progress / Needs review / Done) and all tasks with id, col, title, body, tags, priority, assignee (agent role), deps (prerequisite task ids). This is the team\'s coordination bus.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'kanban_add', description: 'Add one task to the board. For team work set `assignee` (an agent role) and `deps` (ids of tasks that must reach Done first). Prefer director_plan to write a whole decomposition at once.',
+    inputSchema: { type: 'object', properties: {
+      title: { type: 'string' }, body: { type: 'string' },
+      col: { type: 'string', enum: ['todo', 'doing', 'review', 'done'], description: 'Default todo' },
+      assignee: { type: 'string', description: 'Agent role (see team_list)' },
+      deps: { type: 'array', items: { type: 'string' }, description: 'Task ids that must be Done first' },
+      priority: { type: 'string', enum: ['low', 'med', 'high'] },
+      tags: { type: 'array', items: { type: 'string' } },
+    }, required: ['title'], additionalProperties: false } },
+  { name: 'kanban_update', description: 'Patch a task by id (title, body, priority, assignee, deps, tags, col).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, patch: { type: 'object' } }, required: ['id', 'patch'], additionalProperties: false } },
+  { name: 'kanban_move', description: 'Move a task to a column (todo/doing/review/done) and/or reorder it. Agents use this to report progress: doing = In progress, review = Needs review (→ redirected to the Director). Agents cannot self-finalise — see director_approve.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, col: { type: 'string', enum: ['todo', 'doing', 'review', 'done'] }, order: { type: 'number' } }, required: ['id'], additionalProperties: false } },
+  { name: 'kanban_delete', description: 'Delete a task by id.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
+  { name: 'director_plan', description: 'Load a goal decomposition: an array of role-tagged tasks (each {title, body?, assignee, deps?:[index|id], priority?}). VALIDATES roles, dependency references, and rejects cycles before writing. deps may reference earlier tasks by array index. Writes the plan to the board as the team\'s work queue. Set replace:true to clear prior team tasks first.',
+    inputSchema: { type: 'object', properties: {
+      tasks: { type: 'array', items: { type: 'object', properties: {
+        title: { type: 'string' }, body: { type: 'string' },
+        assignee: { type: 'string' },
+        deps: { type: 'array', items: { type: ['integer', 'string'] } },
+        priority: { type: 'string', enum: ['low', 'med', 'high'] },
+      }, required: ['title', 'assignee'] } },
+      replace: { type: 'boolean' },
+    }, required: ['tasks'], additionalProperties: false } },
+  { name: 'director_status', description: 'Team snapshot: per-agent state (idle/queued/doing/review), each agent\'s active task, done/total counts, board counts, and whether the run is complete or stalled.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'director_next', description: 'Advance the board: assign the next ready task to each idle agent (director-gated — one active task per agent; a task is only ready when all its deps are Done). Moves those tasks To do → In progress and returns what was dispatched.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'director_review', description: 'The Needs-review queue: tasks an agent has finished and handed back to the Director for sign-off.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'director_approve', description: 'Approve a reviewed task → Done. This is the gate: only the Director finalises a task, which unblocks its dependents and frees the agent for its next task.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
+  { name: 'director_reject', description: 'Reject a reviewed task → back to In progress for rework (optionally with a reason).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id'], additionalProperties: false } },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
@@ -1604,6 +1649,20 @@ async function execTool(name, args = {}) {
     case 'chrome_policy_list':           return callOp('chrome-policy-list');
     case 'chrome_policy_set':            return callOp('chrome-policy-set', args);
     case 'chrome_policy_delete':         return callOp('chrome-policy-delete', args);
+
+    // ── Phase 25b · Director + Team (app control) ──────────────────────────
+    case 'team_list':        return callOp('team-list');
+    case 'kanban_read':      return callOp('kanban-read');
+    case 'kanban_add':       return callOp('kanban-add',     args);
+    case 'kanban_update':    return callOp('kanban-update',  args);
+    case 'kanban_move':      return callOp('kanban-move',    args);
+    case 'kanban_delete':    return callOp('kanban-delete',  args);
+    case 'director_plan':    return callOp('director-plan',  args);
+    case 'director_status':  return callOp('director-status');
+    case 'director_next':    return callOp('director-next');
+    case 'director_review':  return callOp('director-review');
+    case 'director_approve': return callOp('director-approve', args);
+    case 'director_reject':  return callOp('director-reject',  args);
 
     default: throw new Error('Unknown tool: ' + name);
   }

@@ -287,6 +287,22 @@ class Director {
 
   // ── Live-board bridge ──────────────────────────────────────────────────────
 
+  /**
+   * Reconstruct the Director's model directly from a live kanban snapshot
+   * (ids already exist — unlike loadPlan, which mints them). Use this in the
+   * MCP control plane: the board is the source of truth, so each tool call
+   * rebuilds the Director from disk, acts, and writes back. Only tasks that
+   * carry an assignee are treated as team tasks; plain kanban cards are ignored.
+   * Returns { ok, count }.
+   */
+  loadFromKanban(ktasks) {
+    this.tasks = (ktasks || [])
+      .filter(k => k && (k.assignee || (Array.isArray(k.tags) && k.tags.some(t => typeof t === 'string' && t[0] === '@'))))
+      .map(fromKanbanTask)
+      .filter(t => t.assignee);                 // drop anything still role-less
+    return { ok: true, count: this.tasks.length };
+  }
+
   /** Serialize the whole plan to kanban tasks (for persisting to kanban.json). */
   toKanban() { return this.tasks.map(toKanbanTask); }
 

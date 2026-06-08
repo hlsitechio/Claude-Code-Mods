@@ -938,6 +938,157 @@ ipcMain.handle('kanban:clear-done', () => {
 
 ipcMain.handle('kanban:path', () => _kanbanPath());
 
+// ═══════════════════════════════════════════════════════════════════════════
+// global.ccmTeam — app-control surface for the MCP (Director + kanban).
+// The HTTP control server (browser-http-server.js) routes director-*/kanban-*
+// ops here, exactly as it routes chrome-* to global.ccmChrome. These let a
+// Director-Claude DRIVE the team over the same MCP it uses for the browser.
+//
+// All Director ops are STATELESS over the board: each call reads kanban.json,
+// reconstructs the Director, acts, and writes back. The board is the single
+// source of truth, so the Director survives app restarts and stays in sync with
+// whatever the agents (and the user dragging cards) have done.
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const { Director, TEAM_DEVOPS } = require('./director.js');
+
+  // Apply a Director's task statuses back onto the live board (match by id;
+  // status → col, assignee/deps preserved). Adds tasks the board doesn't have.
+  const _applyDirectorToBoard = (dir) => {
+    const data = _kanbanRead();
+    const byId = new Map(data.tasks.map(t => [t.id, t]));
+    for (const dt of dir.toKanban()) {
+      const existing = byId.get(dt.id);
+      if (existing) {
+        existing.col = dt.col;
+        existing.assignee = dt.assignee;
+        existing.deps = dt.deps;
+        // merge @role/dep: tags without dropping user tags
+        const keep = (existing.tags || []).filter(x => x[0] !== '@' && !x.startsWith('dep:'));
+        existing.tags = [...new Set([...keep, ...dt.tags])];
+        existing.updated = Date.now();
+      } else {
+        const sameCol = data.tasks.filter(t => t.col === dt.col);
+        data.tasks.push(_kanbanSanitizeTask({
+          ...dt,
+          order: sameCol.length ? Math.max(...sameCol.map(t => t.order || 0)) + 1 : 0,
+        }));
+      }
+    }
+    return _kanbanWrite(data);
+  };
+
+  const _freshDirector = (gated = true) => {
+    const dir = new Director(TEAM_DEVOPS, { gated, now: Date.now() });
+    dir.loadFromKanban(_kanbanRead().tasks);
+    return dir;
+  };
+
+  global.ccmTeam = {
+    // ── Team roster ──────────────────────────────────────────────────────────
+    teamList() {
+      return {
+        ok: true,
+        team: TEAM_DEVOPS.name,
+        director: TEAM_DEVOPS.director,
+        agents: TEAM_DEVOPS.agents.map(a => ({
+          role: a.role, name: a.name, skills: a.skills || [], mcp: a.mcp || [], color: a.color,
+        })),
+      };
+    },
+
+    // ── Kanban CRUD (the bus) ──────────────────────────────────────────────────
+    kanbanRead() { const d = _kanbanRead(); return { ok: true, columns: d.columns, tasks: d.tasks, path: _kanbanPath() }; },
+    kanbanAdd(body = {}) {
+      const data = _kanbanRead();
+      const task = _kanbanSanitizeTask({ ...body, id: _kanbanTaskId() });
+      const sameCol = data.tasks.filter(t => t.col === task.col);
+      task.order = sameCol.length ? Math.max(...sameCol.map(t => t.order || 0)) + 1 : 0;
+      data.tasks.push(task);
+      const res = _kanbanWrite(data);
+      return { ...res, task };
+    },
+    kanbanUpdate(body = {}) {
+      const { id, patch } = body;
+      const data = _kanbanRead();
+      const idx = data.tasks.findIndex(t => t.id === id);
+      if (idx < 0) return { ok: false, error: 'Not found' };
+      data.tasks[idx] = _kanbanSanitizeTask({ ...data.tasks[idx], ...patch, id, created: data.tasks[idx].created });
+      const res = _kanbanWrite(data);
+      return { ...res, task: data.tasks[idx] };
+    },
+    kanbanMove(body = {}) {
+      const { id, col, order } = body;
+      const data = _kanbanRead();
+      const idx = data.tasks.findIndex(t => t.id === id);
+      if (idx < 0) return { ok: false, error: 'Not found' };
+      if (typeof col === 'string') data.tasks[idx].col = col;
+      if (typeof order === 'number') data.tasks[idx].order = order;
+      data.tasks[idx].updated = Date.now();
+      return _kanbanWrite(data);
+    },
+    kanbanDelete(body = {}) {
+      const data = _kanbanRead();
+      const before = data.tasks.length;
+      data.tasks = data.tasks.filter(t => t.id !== body.id);
+      if (data.tasks.length === before) return { ok: false, error: 'Not found' };
+      return _kanbanWrite(data);
+    },
+
+    // ── Director coordination (over the board) ─────────────────────────────────
+    // Load a decomposition → validate (roles/deps/cycles) → write role-tagged
+    // tasks to the board. Director-Claude calls this after breaking down a goal.
+    directorPlan(body = {}) {
+      const tasks = Array.isArray(body.tasks) ? body.tasks : null;
+      if (!tasks) return { ok: false, error: 'tasks[] required' };
+      const dir = new Director(TEAM_DEVOPS, { now: Date.now() });
+      const res = dir.loadPlan(tasks);
+      if (!res.ok) return { ok: false, errors: res.errors };
+      if (body.replace) {                     // clean slate: drop existing team tasks
+        const data = _kanbanRead();
+        data.tasks = data.tasks.filter(t => !t.assignee);
+        _kanbanWrite(data);
+      }
+      _applyDirectorToBoard(dir);
+      return { ok: true, count: res.count, tasks: dir.toKanban() };
+    },
+    // Per-agent + overall snapshot for the team status panel / Director.
+    directorStatus() {
+      const dir = _freshDirector();
+      return { ok: true, ...dir.status() };
+    },
+    // Compute + commit the next gated assignments (todo→doing for idle agents).
+    // Returns the tasks dispatched (the live PTY injection lands in Phase 26).
+    directorNext() {
+      const dir = _freshDirector();
+      const moved = dir.assignNext();
+      _applyDirectorToBoard(dir);
+      return { ok: true, assigned: moved.map(t => ({ id: t.id, role: t.assignee, title: t.title })) };
+    },
+    // The "Needs review" queue — tasks redirected to the Director for sign-off.
+    directorReview() {
+      const dir = _freshDirector();
+      const q = dir.tasks.filter(t => t.status === 'review')
+        .map(t => ({ id: t.id, role: t.assignee, title: t.title }));
+      return { ok: true, review: q };
+    },
+    directorApprove(body = {}) {
+      const dir = _freshDirector();
+      const r = dir.approve(body.id);
+      if (!r.ok) return r;
+      _applyDirectorToBoard(dir);
+      return { ok: true, id: body.id };
+    },
+    directorReject(body = {}) {
+      const dir = _freshDirector();
+      const r = dir.reject(body.id, body.reason);
+      if (!r.ok) return r;
+      _applyDirectorToBoard(dir);
+      return { ok: true, id: body.id };
+    },
+  };
+}
+
 // Plain-text markdown summary — used by the chat-inject button and the CLI tool.
 ipcMain.handle('kanban:summary', () => {
   const data = _kanbanRead();
