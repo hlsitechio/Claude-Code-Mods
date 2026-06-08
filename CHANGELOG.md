@@ -8,6 +8,15 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ## [Unreleased]
 
+### Added
+
+- **Agent-team Director — coordination prototype (Phase 24)** — `electron/director.js`, the pure (no-Electron, deterministic) coordination logic for an agent team, validated before any live wiring. A "Director" decomposes a goal into role-tagged tasks and coordinates a 9-role DevOps team (Architect · Backend · Frontend · Data/DB · QA · Security · Reviewer · DevOps/CI · Docs) over the shared kanban as the bus.
+  - **Kanban-bus coordination**: tasks carry `assignee` (role) + `deps` (task ids); the board is the single source of truth (maps to kanban cols/tags for the live step).
+  - **Director-gated autonomy**: each agent does ONE task → submits for review → the Director approves before the next is released. Hard invariant: no agent ever has more than one active task.
+  - **Dependency engine**: a task is assignable only when all its deps are `done`; load-time validation rejects unknown roles, dangling deps, and dependency cycles (DFS); runtime `isStalled()` catches deadlocks.
+  - **`status()`** snapshot (per-agent state + counts) for the future team panel.
+  - Verified with a 16-assertion test driving a realistic feature build (design → parallel impl → test/audit/review → deploy): dependency ordering, the gating invariant held every tick, parallel fan-out, review-gate semantics, completion, cycle + unknown-role rejection. Next phases wire it to live kanban + spawn the 9 role-injected Claude terminals in git worktrees.
+
 ### Fixed
 
 - **Workspace persistence (Phase 23)** — workspaces weren't saving/restoring correctly. Two root causes:

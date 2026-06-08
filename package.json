@@ -45,7 +45,7 @@
     "dist:dir": "npm run build && electron-builder --x64 --dir",
     "dist:linux": "npm run build && electron-builder --linux --x64",
     "dist:win": "npm run build && electron-builder --win --x64",
-    "lint": "node -c electron/main.js && node -c electron/chrome-controller.js && node -c electron/browser-http-server.js && node -c electron/preload.js && node -c electron/cli-session-tracker.js && node -c app.js && node --check bin/browser-mcp.mjs && echo \"lint: syntax-check OK\"",
+    "lint": "node -c electron/main.js && node -c electron/chrome-controller.js && node -c electron/browser-http-server.js && node -c electron/preload.js && node -c electron/cli-session-tracker.js && node -c electron/director.js && node -c app.js && node -c workspace.js && node --check bin/browser-mcp.mjs && echo \"lint: syntax-check OK\"",
     "test": "echo \"No automated test suite yet. Run 'npm run lint' for syntax checks.\" && exit 0",
     "setup:win": "pwsh -ExecutionPolicy Bypass -File setup.ps1"
   },
