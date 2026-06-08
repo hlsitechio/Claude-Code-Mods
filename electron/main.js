@@ -1001,6 +1001,7 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
     // asks the renderer to lay out the Director + 11 agent terminals + the task
     // board. The terminals are spawned in the renderer (it owns dockview/xterm).
     teamSpawn() {
+      try { _ensureTeamSubagents(); } catch (_) {}   // refresh ~/.claude/agents so /agents has the roster
       const payload = teamSpawnPayload(TEAM_DEVOPS);
       const sent = _spawnTeamInRenderer(payload);
       return sent
@@ -2603,6 +2604,36 @@ const AGENTS_DIR  = path.join(APP_ROOT, 'agents');
 
 // Ensure agents/ directory exists
 fs.mkdirSync(AGENTS_DIR, { recursive: true });
+
+// ── Native Claude Code subagents for the team (Phase 26e) ──────────────────
+// Write the team roster to ~/.claude/agents/<role>.md in Claude Code's native
+// subagent format so the roles appear in the CLI's `/agents` Library and can be
+// delegated to via the Task tool — by the Director terminal or ANY claude
+// session, regardless of cwd. User-level so every spawned team terminal sees
+// them. NON-DESTRUCTIVE: a file without our marker is treated as user-authored
+// and never overwritten. Single source of truth is director.js.
+const _CCM_TEAM_MARK = '<!-- ccm-team: generated from director.js — delete this marker to keep your own edits; otherwise it is refreshed on launch -->';
+function _ensureTeamSubagents() {
+  try {
+    const { subagentDefs } = require('./director.js');
+    const dir = path.join(CLAUDE_DIR, 'agents');
+    fs.mkdirSync(dir, { recursive: true });
+    let written = 0;
+    for (const d of subagentDefs()) {
+      const safe = String(d.name).replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+      const file = path.join(dir, safe + '.md');
+      try {
+        if (fs.existsSync(file) && !fs.readFileSync(file, 'utf8').includes('ccm-team:')) continue; // user's file — leave it
+      } catch (_) {}
+      const desc = String(d.description || '').replace(/[\r\n"]/g, ' ').trim();
+      const body = String(d.body || '').trim();
+      const md = `---\nname: ${safe}\ndescription: "${desc}"\n---\n${_CCM_TEAM_MARK}\n\n${body}\n`;
+      try { fs.writeFileSync(file, md, 'utf8'); written++; } catch (_) {}
+    }
+    return { ok: true, dir, written };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+try { _ensureTeamSubagents(); } catch (_) {}
 
 // Load all agents: agents/ directory (primary) + agents.json (fallback/legacy)
 ipcMain.handle('agents:load-all', () => {

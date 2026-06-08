@@ -96,6 +96,42 @@ function roleSystemPrompt(role) {
   return role === 'director' ? spec : spec + ' ' + TEAM_PROTOCOL;
 }
 
+// "When to use" lines for the Claude Code CLI subagent `description` field
+// (drives /agents Library + auto-delegation by the Task tool).
+const ROLE_DESC = {
+  director:   'Coordinate a multi-role build: decompose a goal into tasks, assign them to specialists, review and approve the work.',
+  researcher: 'Gather current facts, competitive analysis, or documentation from the live web.',
+  architect:  'Design system architecture, interfaces, and a file-level implementation plan.',
+  backend:    'Implement server-side logic, APIs, services, and data access.',
+  frontend:   'Build UI components and client-side logic.',
+  data:       'Design database schemas, migrations, and queries.',
+  qa:         'Write and run tests; find edge cases and defects.',
+  security:   'Audit code for vulnerabilities and unsafe patterns.',
+  reviewer:   'Review code for correctness, readability, and maintainability.',
+  media:      'Generate images and brand assets (via the ideogram tools).',
+  devops:     'Handle builds, CI, packaging, and deployment configuration.',
+  docs:       'Write README, changelog, and usage documentation.',
+};
+
+/**
+ * Claude Code CLI native subagent definitions (for `.claude/agents/<name>.md`).
+ * Each: { name (lowercase-hyphen), description (when-to-use), body (system
+ * prompt) }. Body is the specialty only — native subagents are orchestrated by
+ * their parent via the Task tool, so they don't need the self-reporting kanban
+ * protocol the standalone terminal agents carry.
+ */
+function subagentDefs(team = TEAM_DEVOPS) {
+  const out = [{ name: 'director', description: ROLE_DESC.director, body: ROLE_SPECIALTY.director }];
+  for (const a of team.agents) {
+    out.push({
+      name: a.role,
+      description: ROLE_DESC[a.role] || ('The ' + a.role + ' specialist.'),
+      body: ROLE_SPECIALTY[a.role] || ('You are the ' + a.role + '.'),
+    });
+  }
+  return out;
+}
+
 /**
  * Payload the main process ships to the renderer to spawn a team workspace.
  * The renderer can't require() this module, so everything it needs (names,
@@ -390,5 +426,6 @@ class Director {
 module.exports = {
   Director, TEAM_DEVOPS, STATUS, BOARD_STATUSES,
   toKanbanTask, fromKanbanTask,
-  ROLE_SPECIALTY, TEAM_PROTOCOL, roleSystemPrompt, teamSpawnPayload,
+  ROLE_SPECIALTY, ROLE_DESC, TEAM_PROTOCOL, roleSystemPrompt, teamSpawnPayload,
+  subagentDefs,
 };

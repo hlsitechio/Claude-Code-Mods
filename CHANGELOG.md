@@ -10,6 +10,8 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **Team roles as native Claude Code CLI subagents (Phase 26e)** — the 11 roles + Director are now written to **`~/.claude/agents/<role>.md`** in Claude Code's native subagent format, so they appear in the CLI's **`/agents` Library** and can be delegated to via the Task tool — by the Director terminal *or any* `claude` session, in any project (user-level, so cwd doesn't matter). Generated from `director.js` (single source: `subagentDefs()`), refreshed on launch and on `team_spawn`. **Non-destructive**: a file lacking the `ccm-team:` marker is treated as user-authored and never overwritten. This complements the standalone-terminal team — now the roles work both as their own full `claude` CLIs *and* as native subagents.
+
 - **"DevOps Team" in the workspace dropdown (Phase 26d)** — the "+" workspace selector gains a **🤖 DevOps Team** item that creates (or opens) a workspace named *DevOps Team* and spawns the full team into it — the Director + 11 agent terminals + the task board — in one click. Because `wsCreate`/`wsSwitch` reload the page, it uses a one-shot `ccmod.spawnTeamOnLoad` flag that the workspace init reads after reload to fire the spawn (via the new `team.spawn` IPC → `teamSpawn` → `team:spawn` → `spawnTeam`); if you're already on the DevOps Team workspace it spawns immediately with no reload.
 
 - **Workspace selector dropdown + team agents in Settings (Phase 26c)**
