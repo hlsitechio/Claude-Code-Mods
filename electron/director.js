@@ -31,21 +31,27 @@
  *   deps                          → tag 'dep:<id>' (or a preserved field)
  */
 
-// ── The 9-agent DevOps team (+ Director) ────────────────────────────────────
-// Each role maps to an existing CCM agent def / skill where one exists.
+// ── The DevOps team (11 specialists + Director) ─────────────────────────────
+// Each role maps to an existing CCM agent def / skill where one exists, plus
+// the MCP server(s) that define its capability (researcher needs the browser
+// for live web work; media needs the ideogram image MCP). The `mcp` list is
+// consumed by the live "Spawn Team" step to grant each agent terminal its
+// tools; the coordination logic here is role-count-agnostic.
 const TEAM_DEVOPS = {
   name: 'DevOps Team',
   director: { role: 'director', name: 'Director', skills: ['orchestration'] },
   agents: [
-    { role: 'architect', name: 'Architect',     skills: ['software-architecture'], color: '#c08cf5' },
-    { role: 'backend',   name: 'Backend Dev',   skills: ['backend-dev-guidelines'], color: '#7ab389' },
-    { role: 'frontend',  name: 'Frontend Dev',  skills: ['frontend-dev-guidelines'], color: '#61afef' },
-    { role: 'data',      name: 'Data / DB',     skills: ['database'],               color: '#56b6c2' },
-    { role: 'qa',        name: 'QA Engineer',   skills: ['testing-qa'],             color: '#e5c07b' },
-    { role: 'security',  name: 'Security',      skills: ['security-audit'],         color: '#e06c75' },
-    { role: 'reviewer',  name: 'Code Reviewer', skills: ['code-review'],            color: '#7ab8f5' },
-    { role: 'devops',    name: 'DevOps / CI',   skills: ['cicd-automation'],        color: '#d97757' },
-    { role: 'docs',      name: 'Tech Writer',   skills: ['documentation'],          color: '#a1a1aa' },
+    { role: 'researcher', name: 'Researcher',    skills: ['deep-research'],          mcp: ['ccm-browser'], color: '#9d8cf5' },
+    { role: 'architect',  name: 'Architect',     skills: ['software-architecture'],                        color: '#c08cf5' },
+    { role: 'backend',    name: 'Backend Dev',   skills: ['backend-dev-guidelines'],                       color: '#7ab389' },
+    { role: 'frontend',   name: 'Frontend Dev',  skills: ['frontend-dev-guidelines'],                      color: '#61afef' },
+    { role: 'data',       name: 'Data / DB',     skills: ['database'],                                     color: '#56b6c2' },
+    { role: 'qa',         name: 'QA Engineer',   skills: ['testing-qa'],                                   color: '#e5c07b' },
+    { role: 'security',   name: 'Security',      skills: ['security-audit'],                               color: '#e06c75' },
+    { role: 'reviewer',   name: 'Code Reviewer', skills: ['code-review'],                                  color: '#7ab8f5' },
+    { role: 'media',      name: 'Media Creator', skills: ['ai-studio-image'],        mcp: ['ideogram'],   color: '#f59ec0' },
+    { role: 'devops',     name: 'DevOps / CI',   skills: ['cicd-automation'],                              color: '#d97757' },
+    { role: 'docs',       name: 'Tech Writer',   skills: ['documentation'],                                color: '#a1a1aa' },
   ],
 };
 
