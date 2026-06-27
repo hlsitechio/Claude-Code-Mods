@@ -640,22 +640,27 @@ function _registerBrowserMcp(slot = 1) {
   // box. It's a remote HTTP MCP (OAuth handled at the server — no local key).
   // Idempotent + NON-DESTRUCTIVE: only added when absent; an existing entry (the
   // user's own) is left exactly as-is.
-  try {
-    const target = path.join(home, '.claude.json');
-    let cfg = null;
-    if (fs.existsSync(target)) { try { cfg = JSON.parse(fs.readFileSync(target, 'utf8')); } catch (_) { cfg = null; } }
-    else cfg = {};
-    if (cfg) {
+  // Write to BOTH targets (same as ccm-browser above) — ~/.claude.json is what
+  // the agents read, and ~/.claude/settings.json is what CCM's MCP panel lists.
+  // Phase 27b originally wrote only the former, so ideogram worked for agents
+  // but didn't appear in the panel; mirror it to both for consistency.
+  for (const target of targets) {
+    try {
+      let cfg = null;
+      if (fs.existsSync(target)) { try { cfg = JSON.parse(fs.readFileSync(target, 'utf8')); } catch (_) { cfg = null; } }
+      else cfg = {};
+      if (!cfg) continue;
       cfg.mcpServers = cfg.mcpServers || {};
       if (!cfg.mcpServers.ideogram) {
         cfg.mcpServers.ideogram = { type: 'http', url: 'https://mcp.ideogram.ai/mcp' };
+        fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, JSON.stringify(cfg, null, 2), 'utf8');
         console.log('[mcp] registered ideogram (remote http) in ' + target);
       } else {
-        console.log('[mcp] ideogram already present — leaving as-is');
+        console.log('[mcp] ideogram already present in ' + target + ' — leaving as-is');
       }
-    }
-  } catch (e) { console.warn('[mcp] could not ensure ideogram:', e.message); }
+    } catch (e) { console.warn('[mcp] could not ensure ideogram in ' + target + ':', e.message); }
+  }
 }
 
 app.on('window-all-closed', () => {
