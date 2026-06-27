@@ -10,6 +10,8 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **Auto-register the ideogram MCP (Phase 27b)** — CCM now ensures the ideogram remote MCP (`https://mcp.ideogram.ai/mcp`, OAuth at the server) is in `~/.claude.json` on launch, mirroring how it already registers `ccm-browser`. So the Media Creator agent's `mcp__ideogram__*` tools work out of the box on any install — giving the team **three image engines** (Imagen · ideogram · DALL·E-via-GPT) plus Veo for video. **Non-destructive**: only added when absent; an existing ideogram entry is left exactly as-is.
+
 - **Cross-LLM media generation — Imagen, Veo & ChatGPT inside CCM (Phase 27)** — Claude can now create media with *other* models, exposed as 5 new ccm MCP tools (**197 → 202**), routed through a new `global.ccmMedia` and given to the Media Creator agent:
   - **`imagen_generate`** — Google **Imagen** images via `@google/genai` → saved to the project's `generated-media/`.
   - **`veo_generate` + `veo_status`** — Google **Veo** video. `veo_generate` returns a `jobId` immediately (generation takes minutes); poll `veo_status` until `done` → saved `.mp4`. Async job registry so the MCP call never blocks.

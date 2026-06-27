@@ -634,6 +634,28 @@ function _registerBrowserMcp(slot = 1) {
       console.warn(`[browser-mcp] could not write ${target}:`, e.message);
     }
   }
+
+  // Phase 27b — also ensure the ideogram remote MCP is registered, so the Media
+  // Creator agent (and any spawned team CLI) can call mcp__ideogram__* out of the
+  // box. It's a remote HTTP MCP (OAuth handled at the server — no local key).
+  // Idempotent + NON-DESTRUCTIVE: only added when absent; an existing entry (the
+  // user's own) is left exactly as-is.
+  try {
+    const target = path.join(home, '.claude.json');
+    let cfg = null;
+    if (fs.existsSync(target)) { try { cfg = JSON.parse(fs.readFileSync(target, 'utf8')); } catch (_) { cfg = null; } }
+    else cfg = {};
+    if (cfg) {
+      cfg.mcpServers = cfg.mcpServers || {};
+      if (!cfg.mcpServers.ideogram) {
+        cfg.mcpServers.ideogram = { type: 'http', url: 'https://mcp.ideogram.ai/mcp' };
+        fs.writeFileSync(target, JSON.stringify(cfg, null, 2), 'utf8');
+        console.log('[mcp] registered ideogram (remote http) in ' + target);
+      } else {
+        console.log('[mcp] ideogram already present — leaving as-is');
+      }
+    }
+  } catch (e) { console.warn('[mcp] could not ensure ideogram:', e.message); }
 }
 
 app.on('window-all-closed', () => {
