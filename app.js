@@ -5442,13 +5442,13 @@ function showModelMenu(anchor) {
     <hr/>
     <div class="ctx-section">
       <div class="ctx-section__head"><span>Mode</span></div>
-      <button data-section="mode" data-id="cli">
+      <button data-section="mode" data-id="cli" title="A claude -p session: your Max plan, all MCP servers, browser control, --resume continuity">
         ${!isDirect ? iconSVG('check') : '<span style="width:13px"></span>'}
-        <span>Claude Code (CLI)</span>
+        <span>Claude Code (CLI) · recommended</span>
       </button>
-      <button data-section="mode" data-id="direct">
+      <button data-section="mode" data-id="direct" title="Raw Anthropic API via your API key — lower rate limits, no MCP servers. Fallback only.">
         ${isDirect ? iconSVG('check') : '<span style="width:13px"></span>'}
-        <span>Direct Claude API</span>
+        <span>Direct API (key · no MCP)</span>
       </button>
     </div>
     <hr/>
@@ -6601,12 +6601,15 @@ function renderBrowserPanel() {
                 title="Swap left ↔ right panes">
           <i data-phosphor="arrows-left-right"></i>
         </button>` : ''}
-        <!-- Mode badge — pinned right. Click switches CLI <→ Direct so Claude can drive the browser. -->
+        <!-- Mode badge — pinned right. CLI = a claude -p session (Max plan + all
+             MCP incl. browser control). Direct = raw API key (lower limits, no MCP). -->
         <button class="browser-mode-pill" id="browser-mode-pill"
                 data-direct="${window.modelState?.directMode ? 'true' : 'false'}"
-                title="Click to toggle: in Direct mode Claude has full browser control via tools.">
-          <i data-phosphor="${window.modelState?.directMode ? 'check-circle' : 'robot'}" class="browser-mode-pill__icon"></i>
-          <span class="browser-mode-pill__label">${window.modelState?.directMode ? 'Direct · Claude can drive' : 'CLI · Click to let Claude drive'}</span>
+                title="${window.modelState?.directMode
+                  ? 'Direct API mode: uses your API key — lower rate limits, no MCP servers. Click to switch back to CLI.'
+                  : 'CLI mode: a claude -p session on your Max plan with ALL MCP servers (incl. browser control). Click only if you need the raw-API fallback.'}">
+          <i data-phosphor="${window.modelState?.directMode ? 'cloud' : 'check-circle'}" class="browser-mode-pill__icon"></i>
+          <span class="browser-mode-pill__label">${window.modelState?.directMode ? 'Direct API · limited' : 'CLI · Max + MCP'}</span>
         </button>
       </div>
 
@@ -7030,10 +7033,10 @@ async function initBrowserPanel(bodyEl) {
       if (typeof window.syncModelChip === 'function') window.syncModelChip();
       window.showToast?.(
         window.modelState.directMode
-          ? 'Direct API mode — Claude can now control the browser'
-          : 'CLI mode — browser tools off',
-        'success',
-        2500,
+          ? 'Direct API mode — uses your API key (lower rate limits, no MCP servers)'
+          : 'CLI mode — claude -p session: your Max plan + all MCP servers + browser control',
+        window.modelState.directMode ? 'info' : 'success',
+        3000,
       );
       refreshChrome(); // re-render so the pill label updates
     });
