@@ -3111,8 +3111,17 @@ function getShellConfig() {
 // Reads/writes ~/.claude/settings.json (global) and optionally
 // <project>/.claude/settings.json (project-level).
 
-const GLOBAL_SETTINGS_PATH  = path.join(CLAUDE_DIR, 'settings.json');
+const USER_CONFIG_PATH      = path.join(USER_HOME, '.claude.json');      // Claude Code 2.x primary — where /mcp reads + most user MCP servers live
+const GLOBAL_SETTINGS_PATH  = path.join(CLAUDE_DIR, 'settings.json');    // legacy ~/.claude/settings.json
 const PROJECT_SETTINGS_PATH = path.join(APP_ROOT, '.claude', 'settings.json');
+
+// Map an MCP scope to the config file it lives in. 'user' = the primary
+// ~/.claude.json (Claude Code 2.x); 'global' = legacy settings.json; 'project'
+// = the project's settings.json. Default → user (the primary).
+const _mcpScopeFile = (scope) =>
+  scope === 'global'  ? GLOBAL_SETTINGS_PATH
+  : scope === 'project' ? PROJECT_SETTINGS_PATH
+  : USER_CONFIG_PATH;
 
 function _readSettings(filePath) {
   try {
@@ -3127,11 +3136,21 @@ function _writeSettings(filePath, data) {
 }
 
 ipcMain.handle('mcp:list', () => {
-  const global  = _readSettings(GLOBAL_SETTINGS_PATH);
-  const project = _readSettings(PROJECT_SETTINGS_PATH);
-  const merge = (obj, scope) =>
-    Object.entries(obj?.mcpServers || {}).map(([name, cfg]) => ({ name, scope, ...cfg }));
-  return [...merge(global, 'global'), ...merge(project, 'project')];
+  // Read ALL three sources so the panel shows every configured server, not just
+  // the legacy settings.json ones. ~/.claude.json (user) is the primary config
+  // where most servers live; dedup by name with user > global > project so each
+  // shows once tagged with the file it actually lives in (so edit/remove target
+  // the right file).
+  const out = [], seen = new Set();
+  for (const scope of ['user', 'global', 'project']) {
+    const cfg = _readSettings(_mcpScopeFile(scope));
+    for (const [name, sc] of Object.entries(cfg?.mcpServers || {})) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push({ name, scope, ...sc });
+    }
+  }
+  return out;
 });
 
 // Confirm a renderer-driven MCP server registration with the user.
@@ -3166,11 +3185,11 @@ async function _confirmMcpWrite(event, { name, config, scope }) {
   return res.response === 1;
 }
 
-ipcMain.handle('mcp:add', async (event, { name, config, scope = 'global' }) => {
+ipcMain.handle('mcp:add', async (event, { name, config, scope = 'user' }) => {
   if (!await _confirmMcpWrite(event, { name, config, scope })) {
     return { ok: false, cancelled: true };
   }
-  const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
+  const filePath = _mcpScopeFile(scope);
   const settings = _readSettings(filePath);
   settings.mcpServers = settings.mcpServers || {};
   settings.mcpServers[name] = config;
@@ -3178,8 +3197,8 @@ ipcMain.handle('mcp:add', async (event, { name, config, scope = 'global' }) => {
   return { ok: true };
 });
 
-ipcMain.handle('mcp:remove', async (_, { name, scope = 'global' }) => {
-  const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
+ipcMain.handle('mcp:remove', async (_, { name, scope = 'user' }) => {
+  const filePath = _mcpScopeFile(scope);
   const settings = _readSettings(filePath);
   if (settings.mcpServers) {
     delete settings.mcpServers[name];
@@ -3188,11 +3207,11 @@ ipcMain.handle('mcp:remove', async (_, { name, scope = 'global' }) => {
   return { ok: true };
 });
 
-ipcMain.handle('mcp:update', async (event, { name, config, scope = 'global' }) => {
+ipcMain.handle('mcp:update', async (event, { name, config, scope = 'user' }) => {
   if (!await _confirmMcpWrite(event, { name, config, scope })) {
     return { ok: false, cancelled: true };
   }
-  const filePath = scope === 'project' ? PROJECT_SETTINGS_PATH : GLOBAL_SETTINGS_PATH;
+  const filePath = _mcpScopeFile(scope);
   const settings = _readSettings(filePath);
   settings.mcpServers = settings.mcpServers || {};
   settings.mcpServers[name] = config;

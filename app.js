@@ -8067,9 +8067,12 @@ function renderMcpPanel() {
           "></textarea>
 
           <label style="font-size:10.5px;color:#5a5a65;display:block;margin-bottom:5px">Scope</label>
-          <div style="display:flex;gap:6px;margin-bottom:12px">
+          <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
             <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#9a9aa4;cursor:pointer">
-              <input type="radio" name="mcp-f-scope" value="global" checked> Global (~/.claude)
+              <input type="radio" name="mcp-f-scope" value="user" checked> User (~/.claude.json)
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#9a9aa4;cursor:pointer">
+              <input type="radio" name="mcp-f-scope" value="global"> Global (settings.json)
             </label>
             <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#9a9aa4;cursor:pointer">
               <input type="radio" name="mcp-f-scope" value="project"> Project
@@ -8173,9 +8176,13 @@ async function initMcpPanel(container) {
 
     listEl.innerHTML = servers.map((srv, i) => {
       const hasEnv = srv.env && Object.keys(srv.env).length > 0;
-      const scopeBadge = srv.scope === 'project'
-        ? `<span style="font-size:9.5px;background:rgba(106,134,195,0.15);color:#6a86c3;border:1px solid rgba(106,134,195,0.3);border-radius:4px;padding:1px 6px">project</span>`
-        : `<span style="font-size:9.5px;background:rgba(90,90,90,0.15);color:#6a6a72;border:1px solid rgba(90,90,90,0.25);border-radius:4px;padding:1px 6px">global</span>`;
+      const _badgeStyles = {
+        project: 'background:rgba(106,134,195,0.15);color:#6a86c3;border:1px solid rgba(106,134,195,0.3)',
+        user:    'background:rgba(122,179,137,0.15);color:#7ab389;border:1px solid rgba(122,179,137,0.3)',
+        global:  'background:rgba(90,90,90,0.15);color:#6a6a72;border:1px solid rgba(90,90,90,0.25)',
+      };
+      const _scope = srv.scope === 'project' ? 'project' : srv.scope === 'global' ? 'global' : 'user';
+      const scopeBadge = `<span style="font-size:9.5px;${_badgeStyles[_scope]};border-radius:4px;padding:1px 6px">${_scope}</span>`;
       const cmdFull = [srv.command, ...((srv.args || []))].join(' ');
       return `
         <div class="mcp-srv-card" data-srv-idx="${i}" style="
@@ -8250,8 +8257,8 @@ async function initMcpPanel(container) {
       argsEl.value          = argsToString(prefill.args);
       envEl.value           = objToEnv(prefill.env);
       editingEl.value       = prefill.name;
-      // set scope radio
-      const scope = prefill.scope || 'global';
+      // set scope radio (defaults to 'user' = ~/.claude.json)
+      const scope = prefill.scope || 'user';
       scopeEls.forEach(r => r.checked = (r.value === scope));
     } else {
       titleEl.textContent  = 'Add MCP server';
@@ -8262,7 +8269,7 @@ async function initMcpPanel(container) {
       argsEl.value         = argsToString(prefill?.args);
       envEl.value          = prefill?.env   ? objToEnv(prefill.env) : '';
       editingEl.value      = '';
-      scopeEls.forEach(r => r.checked = (r.value === 'global'));
+      scopeEls.forEach(r => r.checked = (r.value === 'user'));
     }
     formEl.style.display = 'block';
     nameEl.focus();
@@ -8279,7 +8286,7 @@ async function initMcpPanel(container) {
     const argsRaw  = $('mcp-f-args').value.trim();
     const envRaw   = $('mcp-f-env').value.trim();
     const editing  = $('mcp-f-editing-name').value;
-    const scope    = (container.querySelector('[name="mcp-f-scope"]:checked') || {}).value || 'global';
+    const scope    = (container.querySelector('[name="mcp-f-scope"]:checked') || {}).value || 'user';
 
     if (!name)  { $('mcp-f-name').focus(); return; }
     if (!cmd)   { $('mcp-f-cmd').focus();  return; }
