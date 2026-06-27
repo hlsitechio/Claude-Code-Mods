@@ -3135,6 +3135,36 @@ function _writeSettings(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
+// Expose legacy settings.json MCP servers to the chat/CLI. Claude Code 2.x reads
+// MCP servers from ~/.claude.json — NOT ~/.claude/settings.json — so servers
+// that exist only in settings.json (filesystem, memory-engine, pinpoint…) never
+// load in the chat. Mirror any missing ones into ~/.claude.json's root
+// mcpServers. NON-DESTRUCTIVE and guarded: we read ~/.claude.json directly and
+// REQUIRE a clean parse — never overwrite the user's 40KB config on a read error.
+function _mirrorSettingsMcpToUserConfig() {
+  try {
+    const legacy = _readSettings(GLOBAL_SETTINGS_PATH).mcpServers || {};
+    if (!Object.keys(legacy).length) return;
+    if (!fs.existsSync(USER_CONFIG_PATH)) return;
+    let userCfg;
+    try { userCfg = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, 'utf8')); }
+    catch (_) { console.warn('[mcp] ~/.claude.json unparseable — skipping MCP mirror'); return; }
+    if (!userCfg || typeof userCfg !== 'object') return;
+    userCfg.mcpServers = userCfg.mcpServers || {};
+    let added = 0;
+    for (const [name, cfg] of Object.entries(legacy)) {
+      if (!userCfg.mcpServers[name]) { userCfg.mcpServers[name] = cfg; added++; }
+    }
+    if (added) {
+      fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userCfg, null, 2), 'utf8');
+      console.log(`[mcp] mirrored ${added} settings.json server(s) into ~/.claude.json so the chat/CLI exposes them`);
+    } else {
+      console.log('[mcp] all settings.json servers already in ~/.claude.json (chat-exposed)');
+    }
+  } catch (e) { console.warn('[mcp] settings→user MCP mirror failed:', e.message); }
+}
+try { _mirrorSettingsMcpToUserConfig(); } catch (_) {}
+
 ipcMain.handle('mcp:list', () => {
   // Read ALL three sources so the panel shows every configured server, not just
   // the legacy settings.json ones. ~/.claude.json (user) is the primary config
