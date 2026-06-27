@@ -114,16 +114,15 @@
         if (_isEphemeralPanelId(id)) delete layout.panels[id];
       }
     }
-    // 2. grid tree
+    // 2. grid tree — dockview REQUIRES the root to be a BRANCH. If pruning
+    //    removed everything (all-ephemeral) or reduced the root to a bare leaf,
+    //    null the grid so saveCurrentLayout persists no layout and restore
+    //    cleanly builds the default — instead of dockview throwing
+    //    "root must be of type branch" on fromJSON and losing the layout.
     if (layout.grid && layout.grid.root) {
       const root = _pruneGridNode(layout.grid.root);
-      // If literally everything was ephemeral, leave a valid empty leaf so
-      // fromJSON doesn't choke (then _buildDefaultLayout effectively runs).
-      layout.grid.root = root || {
-        type: 'leaf',
-        data: { views: [], id: 'empty', activeView: undefined },
-        size: (layout.grid.height || layout.grid.width || 100),
-      };
+      if (root && root.type === 'branch') layout.grid.root = root;
+      else layout.grid = null;
     }
     // 3. floating / popout groups that hold ONLY terminals
     for (const k of ['floatingGroups', 'popoutGroups']) {
@@ -144,7 +143,9 @@
       const layout = dv.toJSON();   // fresh serialized copy — safe to mutate
       _stripEphemeralPanels(layout);
       const ws = _wsGetActive();
-      if (ws) { ws.layout = layout; ws.updatedAt = Date.now(); _wsWriteStore(); }
+      // grid===null means nothing restorable survived the strip — persist null
+      // so restore builds the default cleanly (no invalid-layout throw).
+      if (ws) { ws.layout = layout.grid ? layout : null; ws.updatedAt = Date.now(); _wsWriteStore(); }
     } catch (e) { console.warn('[workspace] saveCurrentLayout failed:', e); }
   }
 

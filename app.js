@@ -11752,6 +11752,11 @@ let _streamInterval = setInterval(() => {
     text = text.trim();
     if (!text || isStreaming) return;
 
+    // A pending rate-limit countdown belongs to an EARLIER message; a fresh user
+    // send supersedes it. Cancel it so its stale auto-retry can't fire a
+    // duplicate request on top of this one. (Retries themselves pass skipUI.)
+    if (!opts.skipUI && _retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
+
     // ── Slash command interceptor ─────────────────────────────────────────
     if (text.startsWith('/') && !opts._skipSlash) {
       const spaceIdx = text.indexOf(' ');
@@ -12359,30 +12364,44 @@ let _streamInterval = setInterval(() => {
             send(text, { skipUI: true });
           });
         } else {
-          // First 429 — countdown then one auto-retry
+          // First 429 — countdown then one auto-retry, with manual controls so
+          // the user is never trapped waiting (esp. the 120s no-header default).
           let sec = waitSec;
-          const updateWait = () => {
-            if (bodyEl) bodyEl.innerHTML =
-              `<p style="color:#c96442;font-size:13px">Rate limited — retrying in <strong>${sec}s</strong>…<br>
-              <span style="color:#5a5a63;font-size:11px">(waiting longer avoids resetting the rate-limit window)</span></p>`;
+          const fireRetry = () => {
+            if (_retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
+            aDiv.classList.add('msg--streaming');
+            if (dotEl)  dotEl.className = 'msg__dot msg__dot--thinking';
+            if (metaEl) { metaEl.className = 'msg__meta msg__meta--streaming'; metaEl.textContent = 'generating a response'; }
+            if (bodyEl) bodyEl.innerHTML = '';
+            // Re-push the user message (history.pop() removed it above). Use
+            // retryContent so image blocks (if any) are preserved.
+            history.push({ role: 'user', content: retryContent });
+            send(text, { skipUI: true, existingBubble: aDiv }); // one retry
           };
-          updateWait();
+          const cancelRetry = () => {
+            if (_retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
+            aDiv.remove();
+            // Don't lose the message — drop it back into the composer to edit/resend.
+            try { if (composerInput && !composerInput.value.trim()) { composerInput.value = text; composerInput.focus(); } } catch (_) {}
+          };
+          // Render the controls ONCE; the timer only updates the seconds, so the
+          // button listeners aren't torn down/re-bound under the user's click.
+          if (bodyEl) {
+            bodyEl.innerHTML =
+              `<p style="color:#c96442;font-size:13px;margin:0 0 8px">Rate limited — retrying in <strong id="rl-sec">${sec}</strong>s…<br>
+               <span style="color:#5a5a63;font-size:11px">(waiting longer avoids resetting the rate-limit window)</span></p>
+               <div style="display:flex;gap:8px">
+                 <button id="rl-now" style="font-size:12px;padding:4px 12px;background:#1e1e24;border:1px solid #c96442;color:#c96442;border-radius:6px;cursor:pointer">Retry now</button>
+                 <button id="rl-cancel" style="font-size:12px;padding:4px 12px;background:#1e1e24;border:1px solid #3a3a44;color:#9a9aa4;border-radius:6px;cursor:pointer">Cancel</button>
+               </div>`;
+            bodyEl.querySelector('#rl-now')?.addEventListener('click', fireRetry);
+            bodyEl.querySelector('#rl-cancel')?.addEventListener('click', cancelRetry);
+          }
 
           _retryTimer = setInterval(() => {
             sec--;
-            if (sec <= 0) {
-              clearInterval(_retryTimer); _retryTimer = null;
-              aDiv.classList.add('msg--streaming');
-              if (dotEl)  dotEl.className = 'msg__dot msg__dot--thinking';
-              if (metaEl) { metaEl.className = 'msg__meta msg__meta--streaming'; metaEl.textContent = 'generating a response'; }
-              if (bodyEl) bodyEl.innerHTML = '';
-              // Re-push the user message before retrying (history.pop() removed it above).
-              // Use retryContent so image blocks (if any) are preserved.
-              history.push({ role: 'user', content: retryContent });
-              send(text, { skipUI: true, existingBubble: aDiv }); // one retry
-            } else {
-              updateWait();
-            }
+            if (sec <= 0) { fireRetry(); }
+            else { const s = bodyEl?.querySelector('#rl-sec'); if (s) s.textContent = sec; }
           }, 1000);
         }
         // Skip the history.pop() below (already done above)
