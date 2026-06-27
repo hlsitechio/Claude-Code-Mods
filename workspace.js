@@ -223,6 +223,7 @@
 
   let dv           = null;
   let _artifactSeq = 0;
+  let _chatReadding = false;   // re-entrancy guard for the chat-never-lost re-add
 
   // ── Bug C fix: queue openTerminal calls that arrive before dv is ready ───
   const _pendingTerminals = [];
@@ -262,13 +263,31 @@
     return {
       element: wrap,
       init() {
+        // Adopt the live chat DOM (chat-scroll + composer + ctx-strip) into this
+        // panel. It lives in a hidden #chat-slot holder between mounts — moving
+        // (never destroying) the nodes keeps every app.js reference + listener +
+        // scroll/history state intact across close/reopen.
         const slot = document.getElementById('chat-slot');
         if (slot) {
           while (slot.firstChild) wrap.appendChild(slot.firstChild);
-          slot.remove();
+          // Keep the holder hidden but PRESENT (was previously .remove()'d, which
+          // made a reopened chat blank — there was nothing left to re-adopt).
+          slot.style.display = 'none';
         }
         // The floating toggle buttons are gone in the new layout
         wrap.querySelector('.right-panel-toggle-wrap')?.remove();
+      },
+      // Closing the Chat tab must NOT destroy the chat DOM — stash it back into
+      // the hidden #chat-slot holder so activatePanel('chat') can re-adopt it.
+      dispose() {
+        let slot = document.getElementById('chat-slot');
+        if (!slot) {
+          slot = document.createElement('div');
+          slot.id = 'chat-slot';
+          slot.style.display = 'none';
+          document.body.appendChild(slot);
+        }
+        while (wrap.firstChild) slot.appendChild(wrap.firstChild);
       },
     };
   }
@@ -942,7 +961,22 @@
     // Auto-save layout on any panel or size change (debounced 600 ms)
     dv.onDidLayoutChange(() => _wsScheduleSave());
     dv.onDidAddPanel(()    => _wsScheduleSave());
-    dv.onDidRemovePanel(() => _wsScheduleSave());
+    dv.onDidRemovePanel((e) => {
+      _wsScheduleSave();
+      // The Chat is the primary panel — never let it be lost. If its X is
+      // clicked, re-add it (re-adopting the chat DOM that makeChatComponent's
+      // dispose stashed into #chat-slot). NOTE: dragging the tab to rearrange
+      // fires a MOVE, not a remove — so this never interferes with placing
+      // chat-left / browser-right.
+      if (e?.panel?.id === 'chat' && !_chatReadding) {
+        _chatReadding = true;
+        setTimeout(() => {
+          try { activatePanel('chat'); } catch (_) {}
+          _chatReadding = false;
+          try { window.showToast?.('Chat is your main panel — drag its tab to rearrange instead of closing', 'info', 3000); } catch (_) {}
+        }, 0);
+      }
+    });
 
     // ── Flush-on-close (Phase 23) ───────────────────────────────────────────
     // The 600ms debounce means a layout change made just before quitting was
