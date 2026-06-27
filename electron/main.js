@@ -1164,6 +1164,82 @@ ipcMain.handle('kanban:path', () => _kanbanPath());
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// global.ccmMedia — cross-LLM media generation (Phase 27).
+// Imagen + Veo via Google's @google/genai (key REUSED from gemini_desktop's
+// safeStorage blob), and ChatGPT/DALL·E via the headless gpt_cli subprocess.
+// Routed through the MCP exactly like ccmTeam, so Claude + the Media Creator
+// agent can call imagen_generate / veo_generate / veo_status / gpt_ask.
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const media = require('./media.js');
+  const { safeStorage } = require('electron');
+
+  // Reuse gemini_desktop's Gemini key. On Windows safeStorage is DPAPI scoped to
+  // the OS user (not per-app), so this same-user process can decrypt it. Env
+  // vars win if set. Returns null if nothing is configured.
+  const _geminiKey = () => {
+    if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+    if (process.env.GOOGLE_API_KEY) return process.env.GOOGLE_API_KEY;
+    try {
+      const f = path.join(app.getPath('appData'), 'gemini-desktop', 'gemini-key.enc');
+      if (!fs.existsSync(f) || !safeStorage.isEncryptionAvailable()) return null;
+      return safeStorage.decryptString(Buffer.from(fs.readFileSync(f, 'utf8'), 'base64'));
+    } catch (_) { return null; }
+  };
+  const _NO_KEY = 'No Gemini API key found. Open gemini_desktop and set your API key (Settings → API key) — CCM reuses it. Or set GEMINI_API_KEY.';
+  const _mediaOutDir = () => path.join(global._projectCwd || app.getPath('userData'), 'generated-media');
+  const _stamp = () => Date.now().toString(36);
+
+  const _veoJobs = new Map();   // jobId → { op, prompt, model, startedAt, status, videos }
+  let _veoSeq = 0;
+
+  global.ccmMedia = {
+    async imagenGenerate(body = {}) {
+      const apiKey = _geminiKey();
+      if (!apiKey) return { ok: false, error: _NO_KEY };
+      return media.generateImages({
+        apiKey, prompt: body.prompt, model: body.model, count: body.count,
+        aspectRatio: body.aspectRatio, outDir: _mediaOutDir(), stamp: _stamp(),
+      });
+    },
+    async veoGenerate(body = {}) {
+      const apiKey = _geminiKey();
+      if (!apiKey) return { ok: false, error: _NO_KEY };
+      const r = await media.startVideo({
+        apiKey, prompt: body.prompt, model: body.model,
+        aspectRatio: body.aspectRatio, negativePrompt: body.negativePrompt,
+      });
+      if (!r.ok) return r;
+      const jobId = 'veo-' + _stamp() + '-' + (++_veoSeq).toString(36);
+      _veoJobs.set(jobId, { op: r.op, prompt: body.prompt, model: r.model, startedAt: Date.now(), status: 'processing' });
+      return { ok: true, jobId, status: 'processing', model: r.model,
+        message: 'Veo is generating (typically 1–3 min). Poll veo_status with this jobId.' };
+    },
+    async veoStatus(body = {}) {
+      const job = _veoJobs.get(body.jobId);
+      if (!job) return { ok: false, error: 'unknown jobId' };
+      if (job.status === 'done') return { ok: true, status: 'done', videos: job.videos, model: job.model };
+      const apiKey = _geminiKey();
+      if (!apiKey) return { ok: false, error: _NO_KEY };
+      const p = await media.pollVideo({ apiKey, op: job.op });
+      if (!p.ok) return p;
+      job.op = p.op;
+      if (!p.done) return { ok: true, status: 'processing', elapsedSec: Math.round((Date.now() - job.startedAt) / 1000) };
+      const dl = await media.downloadVideos({ apiKey, op: p.op, outDir: _mediaOutDir(), stamp: _stamp() });
+      if (!dl.ok) { job.status = 'error'; return dl; }
+      job.status = 'done'; job.videos = dl.videos;
+      return { ok: true, status: 'done', videos: dl.videos, model: job.model };
+    },
+    async gptAsk(body = {}) {
+      return media.askGpt({ prompt: body.prompt, gptId: body.gptId, newConvo: body.newConvo, timeoutMs: 180000 });
+    },
+    mediaStatus() {
+      return { ok: true, geminiKey: !!_geminiKey(), outDir: _mediaOutDir(), veoJobs: _veoJobs.size };
+    },
+  };
+}
+
 // Plain-text markdown summary — used by the chat-inject button and the CLI tool.
 ipcMain.handle('kanban:summary', () => {
   const data = _kanbanRead();

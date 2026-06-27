@@ -78,7 +78,7 @@ const ROLE_SPECIALTY = {
   qa:         'You are the QA engineer. Write and run tests, hunt edge cases, and report defects with exact reproduction steps.',
   security:   'You are the SECURITY auditor. Review for vulnerabilities and unsafe patterns; propose concrete, minimal fixes.',
   reviewer:   'You are the CODE REVIEWER. Check correctness, readability, and maintainability; give specific line-level feedback.',
-  media:      'You are the MEDIA creator. Generate images and brand assets with the ideogram tools to match the brief; iterate on prompt and style.',
+  media:      'You are the MEDIA creator. Generate images with imagen_generate (Google Imagen) or the ideogram tools, and videos with veo_generate then poll veo_status (Google Veo). You can also use gpt_ask for ChatGPT/DALL-E. Match the brief, iterate on prompt and style; generated files land in the generated-media folder.',
   devops:     'You are the DEVOPS engineer. Handle builds, CI, packaging, and deployment configuration; keep the pipeline green.',
   docs:       'You are the TECH WRITER. Produce clear README, changelog, and usage docs that match what was actually built.',
 };
@@ -108,7 +108,7 @@ const ROLE_DESC = {
   qa:         'Write and run tests; find edge cases and defects.',
   security:   'Audit code for vulnerabilities and unsafe patterns.',
   reviewer:   'Review code for correctness, readability, and maintainability.',
-  media:      'Generate images and brand assets (via the ideogram tools).',
+  media:      'Generate images (Imagen/ideogram) and videos (Veo), or ask ChatGPT/DALL-E.',
   devops:     'Handle builds, CI, packaging, and deployment configuration.',
   docs:       'Write README, changelog, and usage documentation.',
 };

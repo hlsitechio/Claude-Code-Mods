@@ -1,7 +1,7 @@
 {
   "name": "claude-code-desktop",
   "version": "0.5.0",
-  "description": "Fan-made Electron desktop UI for the Claude Code CLI — 197-tool ccm MCP (browser control + agent-team Director that drives agent CLIs + one-click team spawn), multi-pane parallel control, live context panel, permission modes, JSX preview, workspace awareness",
+  "description": "Fan-made Electron desktop UI for the Claude Code CLI — 202-tool ccm MCP (browser control + agent-team Director + cross-LLM media: Imagen/Veo via Gemini + ChatGPT bridge), multi-pane parallel control, live context panel, permission modes, JSX preview, workspace awareness",
   "author": {
     "name": "hlsitechio",
     "email": "23203953+hlsitechio@users.noreply.github.com"
@@ -45,7 +45,7 @@
     "dist:dir": "npm run build && electron-builder --x64 --dir",
     "dist:linux": "npm run build && electron-builder --linux --x64",
     "dist:win": "npm run build && electron-builder --win --x64",
-    "lint": "node -c electron/main.js && node -c electron/chrome-controller.js && node -c electron/browser-http-server.js && node -c electron/preload.js && node -c electron/cli-session-tracker.js && node -c electron/director.js && node -c app.js && node -c workspace.js && node --check bin/browser-mcp.mjs && echo \"lint: syntax-check OK\"",
+    "lint": "node -c electron/main.js && node -c electron/chrome-controller.js && node -c electron/browser-http-server.js && node -c electron/preload.js && node -c electron/cli-session-tracker.js && node -c electron/director.js && node -c electron/media.js && node -c app.js && node -c workspace.js && node --check bin/browser-mcp.mjs && echo \"lint: syntax-check OK\"",
     "test": "echo \"No automated test suite yet. Run 'npm run lint' for syntax checks.\" && exit 0",
     "setup:win": "pwsh -ExecutionPolicy Bypass -File setup.ps1"
   },
@@ -122,6 +122,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.97.1",
+    "@google/genai": "^2.10.0",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
     "dockview-core": "^5.2.0",
     "node-pty": "^1.1.0",

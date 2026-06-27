@@ -87,6 +87,10 @@ async function callOp(cmd, body = {}) {
   }
   const u = new URL(env.url + '/op/' + cmd);
   const data = JSON.stringify(body || {});
+  // Media generation can run well past the default 30s (Imagen ~15-30s, gpt_cli
+  // up to 2min, Veo start a few s). Give those ops a longer client timeout.
+  const LONG_OPS = new Set(['imagen-generate', 'veo-generate', 'veo-status', 'gpt-ask']);
+  const opTimeout = LONG_OPS.has(cmd) ? 240_000 : 30_000;
 
   return new Promise((resolve, reject) => {
     const req = http.request({
@@ -101,7 +105,7 @@ async function callOp(cmd, body = {}) {
         'Connection':     'keep-alive',
       },
       agent:   _httpAgent, // reuse TCP connection
-      timeout: 30_000,
+      timeout: opTimeout,
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -134,7 +138,7 @@ async function callOp(cmd, body = {}) {
       }
     });
     req.on('timeout', () => {
-      req.destroy(new Error('Request timed out after 30s'));
+      req.destroy(new Error('Request timed out after ' + Math.round(opTimeout / 1000) + 's'));
     });
     req.write(data);
     req.end();
@@ -1407,6 +1411,35 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id'], additionalProperties: false } },
   { name: 'agent_send', description: 'Inject a prompt directly into a spawned agent\'s terminal (the Director\'s drive channel — the input half of the loop). The text is typed into that role\'s claude CLI and submitted. Use to kick off, nudge, or follow up with a specific agent. Note: director_next already auto-kicks each agent it assigns, so use this for ad-hoc messages or to re-prod a stalled agent. role = one of the team roles; the agent must have a live terminal (team_spawn first).',
     inputSchema: { type: 'object', properties: { role: { type: 'string', description: 'Agent role (researcher, architect, backend, frontend, data, qa, security, reviewer, media, devops, docs, director)' }, text: { type: 'string', description: 'The message/prompt to type into that agent\'s terminal' } }, required: ['role', 'text'], additionalProperties: false } },
+
+  // ── Phase 27 · Cross-LLM media generation ──────────────────────────────────
+  // Let Claude create media with OTHER models: Imagen (image) + Veo (video) via
+  // Google's @google/genai (Gemini key reused from gemini_desktop), and ChatGPT/
+  // DALL·E via the headless gpt_cli. Outputs save to the project's generated-media/.
+  { name: 'imagen_generate', description: 'Generate image(s) with Google Imagen. Saves PNG(s) to the project\'s generated-media/ folder and returns their absolute paths. Uses the Gemini key reused from gemini_desktop (billing required). Default model imagen-4.0-generate-001.',
+    inputSchema: { type: 'object', properties: {
+      prompt: { type: 'string', description: 'What to generate' },
+      count: { type: 'integer', description: '1–4 images (default 1)' },
+      aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'], description: 'default 1:1' },
+      model: { type: 'string', description: 'override, e.g. imagen-3.0-generate-002, imagen-4.0-fast-generate-001' },
+    }, required: ['prompt'], additionalProperties: false } },
+  { name: 'veo_generate', description: 'Start a Google Veo VIDEO generation. Returns a jobId IMMEDIATELY — generation takes minutes — then poll veo_status with that jobId until status is "done" (which returns the saved .mp4 path). Default model veo-3.0-fast-generate-preview. Veo needs billing/allowlisting on the key.',
+    inputSchema: { type: 'object', properties: {
+      prompt: { type: 'string', description: 'What to generate' },
+      aspectRatio: { type: 'string', enum: ['16:9', '9:16'], description: 'default 16:9' },
+      negativePrompt: { type: 'string', description: 'what to avoid' },
+      model: { type: 'string', description: 'override, e.g. veo-2.0-generate-001, veo-3.0-generate-preview' },
+    }, required: ['prompt'], additionalProperties: false } },
+  { name: 'veo_status', description: 'Check a Veo job started with veo_generate. Returns status processing|done|error (+ elapsedSec while processing); when done, returns the saved .mp4 path(s).',
+    inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'], additionalProperties: false } },
+  { name: 'gpt_ask', description: 'Ask ChatGPT or a custom GPT via the headless gpt_cli (drives your logged-in ChatGPT over a private Chrome profile — NO API key needed). Returns the answer text and the paths of any DALL·E images it generated. Takes ~15s–2min. gptId targets a specific custom GPT; newConvo starts a fresh thread.',
+    inputSchema: { type: 'object', properties: {
+      prompt: { type: 'string', description: 'Message to send' },
+      gptId: { type: 'string', description: 'custom GPT id, e.g. g-69aa38ff...' },
+      newConvo: { type: 'boolean', description: 'start a new conversation thread' },
+    }, required: ['prompt'], additionalProperties: false } },
+  { name: 'media_status', description: 'Report media-generation readiness: whether a Gemini key is available (reused from gemini_desktop), the output directory, and active Veo job count.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
 ];
 
 // Map MCP tool name → HTTP op + arg shape
@@ -1669,6 +1702,13 @@ async function execTool(name, args = {}) {
     case 'director_approve': return callOp('director-approve', args);
     case 'director_reject':  return callOp('director-reject',  args);
     case 'agent_send':       return callOp('agent-send',       args);
+
+    // ── Phase 27 · Media generation ────────────────────────────────────────
+    case 'imagen_generate':  return callOp('imagen-generate',  args);
+    case 'veo_generate':     return callOp('veo-generate',     args);
+    case 'veo_status':       return callOp('veo-status',       args);
+    case 'gpt_ask':          return callOp('gpt-ask',          args);
+    case 'media_status':     return callOp('media-status');
 
     default: throw new Error('Unknown tool: ' + name);
   }

@@ -152,6 +152,11 @@ async function _handle(req, res) {
     if (!global.ccmTeam) throw new Error('Team control unavailable (app still starting?)');
     return global.ccmTeam;
   };
+  // Phase 27 — cross-LLM media generation surface.
+  const media = () => {
+    if (!global.ccmMedia) throw new Error('Media generation unavailable (app still starting?)');
+    return global.ccmMedia;
+  };
   try {
     let result;
     switch (cmd) {
@@ -429,6 +434,13 @@ async function _handle(req, res) {
       case 'director-approve':  result = team().directorApprove(body); break;
       case 'director-reject':   result = team().directorReject(body); break;
       case 'agent-send':        result = team().agentSend(body); break;
+
+      // ── Phase 27 · Media generation (Imagen / Veo / GPT) ───────────────────
+      case 'imagen-generate':   result = await media().imagenGenerate(body); break;
+      case 'veo-generate':      result = await media().veoGenerate(body); break;
+      case 'veo-status':        result = await media().veoStatus(body); break;
+      case 'gpt-ask':           result = await media().gptAsk(body); break;
+      case 'media-status':      result = media().mediaStatus(); break;
 
       default:              return _sendJson(res, 404, { error: 'Unknown op: ' + cmd });
     }

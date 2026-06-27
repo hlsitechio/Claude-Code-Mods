@@ -10,6 +10,15 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ### Added
 
+- **Cross-LLM media generation — Imagen, Veo & ChatGPT inside CCM (Phase 27)** — Claude can now create media with *other* models, exposed as 5 new ccm MCP tools (**197 → 202**), routed through a new `global.ccmMedia` and given to the Media Creator agent:
+  - **`imagen_generate`** — Google **Imagen** images via `@google/genai` → saved to the project's `generated-media/`.
+  - **`veo_generate` + `veo_status`** — Google **Veo** video. `veo_generate` returns a `jobId` immediately (generation takes minutes); poll `veo_status` until `done` → saved `.mp4`. Async job registry so the MCP call never blocks.
+  - **`gpt_ask`** — ChatGPT / custom GPTs (and DALL·E images) via the headless **`gpt_cli`** subprocess (drives your logged-in ChatGPT over a private Chrome profile — no API key). Returns the answer text + any generated image paths.
+  - **`media_status`** — reports key availability, output dir, active Veo jobs.
+  - **Key reuse**: the Gemini key is **decrypted from `gemini_desktop`'s `gemini-key.enc`** (Windows `safeStorage`/DPAPI is OS-user-scoped, so the same-user CCM process can read it) — no second key to manage. `GEMINI_API_KEY`/`GOOGLE_API_KEY` env vars override.
+  - `@google/genai` v2.x added (ESM, loaded via the standard CJS→ESM dynamic-import shim). Long-running media ops get a 240s MCP client timeout (vs the default 30s). Engine in `electron/media.js`; errors are mapped to actionable messages (invalid key, no billing, quota, model not allowlisted). Verified with a 9-assertion engine test (GPT stdout parsing, graceful no-key/missing-CLI failures).
+  - **Caveats**: Imagen/Veo need billing on the Gemini key; Veo is slow + sometimes access-gated; `gpt_cli` needs a one-time `gpt auth` and spawns Chrome per call.
+
 - **Director drive channel — the Director now wakes its agents (Phase 26f)** — *the missing half of the loop, surfaced by a live test.* The Director could push tasks to the board but had no way to make the agent terminals **read** them, so tasks sat in "doing" forever. Now:
   - **role → termId registry**: each agent terminal reports its id when it spawns (`team:agent-registered`), so main knows which PTY backs which role (cleaned up on exit/close).
   - **`director_next` auto-kicks every agent it assigns** — it injects a kickoff prompt into that role's terminal (*"use kanban_read to find card id …, do it, then kanban_move it to review"*), typed + submitted into the agent's `claude` CLI. Returns `nudged` / `unreachable` so the Director knows who got the message. This is why dispatch now actually starts the agents.
