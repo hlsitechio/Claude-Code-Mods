@@ -8,6 +8,10 @@ This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (loos
 
 ## [Unreleased]
 
+### Fixed
+
+- **Embedded browser "framing" bug — view painted narrow/offset from its pane (zoom mismatch).** When the app UI was zoomed (`webFrame.setZoomFactor` ≠ 1 — the Ctrl+/Ctrl- feature, persisted in `ccmod.zoom` and restored every launch), the embedded browser's `WebContentsView` was sized to `1/zoom` of its pane, painting narrow and offset with app background showing on the right/bottom (the page looked "not in the frame"). Cause: the renderer measures the pane with `getBoundingClientRect()` (CSS px, which shrink under zoom), but `WebContentsView.setBounds` expects **window DIP** = CSS × zoomFactor. `browser:set-bounds` now scales the incoming rect by the host renderer's zoom factor (no-op at 100%). Recurring because the zoom is persisted — a restart kept re-applying it. Diagnosed live: view measured 1076 px wide = 1614 / 1.5 at a 1.5× zoom.
+
 ### Added
 
 - **Auto-register the ideogram MCP (Phase 27b)** — CCM now ensures the ideogram remote MCP (`https://mcp.ideogram.ai/mcp`, OAuth at the server) is in `~/.claude.json` on launch, mirroring how it already registers `ccm-browser`. So the Media Creator agent's `mcp__ideogram__*` tools work out of the box on any install — giving the team **three image engines** (Imagen · ideogram · DALL·E-via-GPT) plus Veo for video. **Non-destructive**: only added when absent; an existing ideogram entry is left exactly as-is.

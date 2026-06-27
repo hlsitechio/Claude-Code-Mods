@@ -1704,15 +1704,24 @@ ipcMain.handle('browser:stealth-check', async (_, viewId) => {
   return _stealthSelfTest(entry.view.webContents);
 });
 
-ipcMain.handle('browser:set-bounds', (_, { viewId, x, y, width, height, visible }) => {
+ipcMain.handle('browser:set-bounds', (event, { viewId, x, y, width, height, visible }) => {
   const entry = _liveBrowserEntry(viewId);
   if (!entry) return { ok: false, error: 'Unknown view' };
+  // ── Zoom-factor correction (the "website not in the frame" bug) ──────────
+  // The renderer measures the pane with getBoundingClientRect() — CSS px in the
+  // renderer's coordinate space. When the app UI is zoomed (webFrame.setZoomFactor
+  // != 1, our Ctrl+/Ctrl- feature), CSS px no longer equal window DIP, but
+  // WebContentsView.setBounds expects window DIP: DIP = CSS × zoomFactor. Without
+  // this, a zoomed app sizes the view to 1/zoom of its pane → it paints narrow &
+  // offset, with app background showing on the right/bottom. No-op at zoom 1.
+  let z = 1;
+  try { z = event.sender.getZoomFactor() || 1; } catch (_) {}
   // Clamp to integers — WebContentsView is finicky about fractional pixels
   entry.view.setBounds({
-    x:      Math.max(0, Math.round(x)),
-    y:      Math.max(0, Math.round(y)),
-    width:  Math.max(1, Math.round(width)),
-    height: Math.max(1, Math.round(height)),
+    x:      Math.max(0, Math.round(x * z)),
+    y:      Math.max(0, Math.round(y * z)),
+    width:  Math.max(1, Math.round(width * z)),
+    height: Math.max(1, Math.round(height * z)),
   });
   entry.view.setVisible(visible !== false);
   return { ok: true };
