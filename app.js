@@ -10206,15 +10206,18 @@ queueMicrotask(wireSplitBtn);
 
 function setRightPanelOpen(open) {
   document.body.classList.toggle('right-panel-open', open);
-  if (open) {
-    // Restore persisted width (overrides the CSS 360px default)
-    const saved = parseInt(localStorage.getItem(RP_WIDTH_KEY), 10);
-    if (saved >= RP_MIN && saved <= RP_MAX) {
-      rightPanelEl.style.width = saved + 'px';
+  // rightPanelEl is the LEGACY right-panel element — it doesn't exist in the
+  // dockview layout, so guard it. Without this, the auto-open-preview path
+  // (when a reply has renderable code) threw "Cannot read properties of null
+  // (reading 'style')" and surfaced as a chat error — especially on the turn
+  // after an image, whose reply tends to include code.
+  if (rightPanelEl) {
+    if (open) {
+      const saved = parseInt(localStorage.getItem(RP_WIDTH_KEY), 10);
+      if (saved >= RP_MIN && saved <= RP_MAX) rightPanelEl.style.width = saved + 'px';
+    } else {
+      rightPanelEl.style.width = '';   // clear inline width so CSS 'width: 0' takes effect
     }
-  } else {
-    // Clear inline width so CSS 'width: 0' takes effect
-    rightPanelEl.style.width = '';
   }
   localStorage.setItem(RIGHT_PANEL_KEY + '.open', open ? '1' : '0');
 }
@@ -10347,6 +10350,7 @@ const RP_MAX = 700;
 
 // Restore persisted width on page load if panel is already open
 (function applyRPWidth() {
+  if (!rightPanelEl) return;   // legacy element — absent in the dockview layout
   const saved = parseInt(localStorage.getItem(RP_WIDTH_KEY), 10);
   if (saved >= RP_MIN && saved <= RP_MAX && document.body.classList.contains('right-panel-open')) {
     rightPanelEl.style.width = saved + 'px';
