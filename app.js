@@ -2492,10 +2492,7 @@ function handleSettingsAction(group, id) {
   if (group === 'model')  { modelState.currentModel  = id; syncModelChip(); }
   if (group === 'effort') { modelState.currentEffort = id; syncModelChip(); }
   if (group === 'mic')    { micState.device = id; }
-  if (group === 'attach') {
-    if (id === 'computer' || id === 'files') document.getElementById('file-picker')?.click();
-    else console.log('[stub] attach:', id);
-  }
+  if (group === 'attach') doAttach(id);   // computer/files/image/github/context/mcp — real logic
   if (group === 'lang')   {
     userState.language = id;
     applyLanguage();
@@ -5138,7 +5135,14 @@ attachBtn?.addEventListener('click', (e) => {
     if (!btn) return;
     const type = btn.dataset.attach;
     hideCtx();
+    doAttach(type);
+  };
+});
 
+// Shared attach logic — used by BOTH the #attach-btn menu AND the composer
+// settings "Insert" submenu (which previously routed to dead [stub] console
+// logs for image/github/context/mcp). Now both paths do the real thing.
+function doAttach(type) {
     switch (type) {
 
       // ── Screenshot / computer vision ──────────────────────────────────────
@@ -5226,8 +5230,7 @@ attachBtn?.addEventListener('click', (e) => {
         break;
       }
     }
-  };
-});
+}
 
 // ── GitHub attach modal ───────────────────────────────────────────────────────
 // Lets the user paste a PR URL (→ --from-pr) or a repo URL/branch
