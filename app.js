@@ -5670,16 +5670,26 @@ function showTokensMenu(anchor) {
 // instead of hugging the sidebar edge.
 function openAboveComposer() {
   ctx.classList.remove('hidden');
-  // Anchor to the LEFT edge of the MAIN chat area (past the sidebar),
-  // not the centered composer — that was leaving a big empty gap.
-  const mainEl = document.querySelector('main');
-  const mainRect = mainEl.getBoundingClientRect();
-  const compRect = document.querySelector('.composer').getBoundingClientRect();
   const cRect = ctx.getBoundingClientRect();
+  // Anchor to the VISIBLE composer. Selecting the first `.composer` was the bug:
+  // the chat DOM lives in a hidden #chat-slot holder between mounts, and a
+  // hidden composer has an all-zero rect → the menu got pinned to the top-left
+  // (0,0). Pick the one that's actually on screen (height > 0).
+  const compEl = [...document.querySelectorAll('.composer')]
+    .find(c => c.getBoundingClientRect().height > 0);
+  if (!compEl) {                                   // safety: no visible composer
+    ctx.style.left = Math.round(Math.max(8, (window.innerWidth - cRect.width) / 2)) + 'px';
+    ctx.style.top  = Math.round(Math.max(8, window.innerHeight - cRect.height - 80)) + 'px';
+    return;
+  }
+  // Anchor to the LEFT edge of the MAIN chat area (past the sidebar).
+  const mainEl = document.querySelector('main');
+  const mainRect = mainEl ? mainEl.getBoundingClientRect() : { left: 8 };
+  const compRect = compEl.getBoundingClientRect();
   let left = mainRect.left + 12;                                             // 12px in from main area's left edge
-  left = Math.min(left, window.innerWidth - cRect.width - 8);
+  left = Math.max(8, Math.min(left, window.innerWidth - cRect.width - 8));
   let top = compRect.top - cRect.height - 10;
-  if (top < 8) top = compRect.bottom + 10;
+  if (top < 8) top = 8;            // tall menu: pin to top, don't shove it off-screen below the composer
   ctx.style.left = Math.round(left) + 'px';
   ctx.style.top  = Math.round(top) + 'px';
 }
